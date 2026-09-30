@@ -2,7 +2,6 @@
 must fail the run, not print a WARNING beside exit 0."""
 import collections
 import contextlib
-import io
 import sys
 import unittest
 
@@ -153,7 +152,6 @@ class MainWiringTests(TempDirTestCase):
         self.assertIn("malformed", output)
 
     def test_an_empty_corpus_is_a_controlled_failure_not_a_silent_pass(self):
-        with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(SystemExit) as caught:
-                guard.main(["validate_corpus.py", sys.executable, str(self.corpus)])
+        with self.assertRaises(SystemExit) as caught:
+            guard.main(["validate_corpus.py", sys.executable, str(self.corpus)])
         self.assertIn("no .vrf under", str(caught.exception))

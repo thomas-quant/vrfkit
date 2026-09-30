@@ -24,8 +24,6 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-#[cfg(feature = "alloc")]
-use alloc::vec::Vec;
 use core::fmt;
 
 /// Five 7-bit chunks cover a `u32` (35 bits); a sixth means a malformed stream.
@@ -453,27 +451,25 @@ impl<'a> BitReader<'a> {
         if byte_len > max_bytes as u64 || byte_len * 8 > self.bits_remaining() {
             return Err(invalid());
         }
-        // Fits: the bytes lie inside the remaining window, which lies in `data`.
-        let byte_len = byte_len as usize;
-
+        // Fits `usize`: the bytes lie inside the remaining window, in `data`.
+        let mut bytes = alloc::vec![0; byte_len as usize];
+        self.copy_bits_to(&mut bytes, byte_len * 8)?;
+        let bad = BitError::InvalidString { position: start };
         if utf16 {
-            let mut units16 = Vec::with_capacity(byte_len / 2);
-            for _ in 0..byte_len / 2 {
-                units16.push(self.read_u16()?);
+            if bytes.ends_with(&[0, 0]) {
+                bytes.truncate(bytes.len() - 2);
             }
-            if units16.last() == Some(&0) {
-                units16.pop();
-            }
-            String::from_utf16(&units16).map_err(|_| BitError::InvalidString { position: start })
+            let units = bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]));
+            char::decode_utf16(units)
+                .collect::<core::result::Result<_, _>>()
+                .map_err(|_| bad)
         } else {
-            let mut bytes = Vec::with_capacity(byte_len);
-            for _ in 0..byte_len {
-                bytes.push(self.read_u8()?);
-            }
             if bytes.last() == Some(&0) {
                 bytes.pop();
             }
-            String::from_utf8(bytes).map_err(|_| BitError::InvalidString { position: start })
+            String::from_utf8(bytes).map_err(|_| bad)
         }
     }
 

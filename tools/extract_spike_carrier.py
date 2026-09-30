@@ -35,12 +35,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import atomic_write_file
-    from .player_identity import EARLIER_PROVENANCE, load_player_bodies
-else:
-    from atomic_io import atomic_write_file
-    from player_identity import EARLIER_PROVENANCE, load_player_bodies
+from atomic_io import atomic_write_file
+from player_identity import EARLIER_PROVENANCE, load_player_bodies
 
 BOMB_CLASS = "BombEquippable.BombEquippable_C"
 

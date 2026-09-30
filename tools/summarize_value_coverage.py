@@ -17,10 +17,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .export_scan import discover_exports, skipped_report
-else:
-    from export_scan import discover_exports, skipped_report
+from export_scan import discover_exports, skipped_report
 
 VALUE_COLUMNS = ("value_i64", "value_f64", "value_bool", "value_str")
 TABLES = ("fields", "checkpoint_fields")

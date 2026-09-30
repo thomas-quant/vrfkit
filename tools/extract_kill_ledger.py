@@ -15,14 +15,9 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from . import extract_kill_observations as observation_extractor, kill_state
-    from .atomic_io import run_json_cli, sha256_file as file_sha
-    from .wire_bits import InputError, exact_ref, iter_selected, text
-else:
-    import extract_kill_observations as observation_extractor, kill_state
-    from atomic_io import run_json_cli, sha256_file as file_sha
-    from wire_bits import InputError, exact_ref, iter_selected, text
+import extract_kill_observations as observation_extractor, kill_state
+from atomic_io import run_json_cli, sha256_file as file_sha
+from wire_bits import InputError, exact_ref, iter_selected, text
 
 #: Matched lags measure 5-41 ms; a 100 ms cap changed no match.
 MAX_REPLICATION_LAG_MS = 50

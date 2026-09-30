@@ -37,10 +37,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .export_scan import generated_ancestor, leftover_note, skipped_report
-else:
-    from export_scan import generated_ancestor, leftover_note, skipped_report
+from export_scan import generated_ancestor, leftover_note, skipped_report
 
 
 def _signed(value: int, width: int) -> int:

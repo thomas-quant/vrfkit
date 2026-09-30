@@ -1031,12 +1031,23 @@ fn a_declared_entry_outranks_the_engine_and_checksum_fallbacks() {
 }
 
 /// Every group the overlay assigns a `RepMovement` type (table or scoped), by
-/// the location level its spawn join measured; docs/DATA.md has the per-class
-/// table, and a new class needs its join there first.
+/// the location level `tools/check_rep_movement_levels.py` measures for it.
 const REP_MOVEMENT_LOCATION_EVIDENCE: [(VectorQuantization, &[&str]); 2] = [
     (
         VectorQuantization::RoundTwoDecimals,
-        &[SEEKER_NADE, CLAY_BOOMBOT],
+        &[
+            SEEKER_NADE,
+            "/Game/Characters/BountyHunter/S0/Ability_4/Pawn_BountyHunter_4_WolfHound.Pawn_BountyHunter_4_WolfHound_C",
+            "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C",
+            CLAY_BOOMBOT,
+            "/Game/Characters/Guide/S0/Ability_X/Pawn_Guide_X_Pack.Pawn_Guide_X_Pack_C",
+            "/Game/Characters/Killjoy/S0/Ability_E/Pawn_Killjoy_E_Turret.Pawn_Killjoy_E_Turret_C",
+            "/Game/Characters/Killjoy/S0/Ability_Q/Pawn_Killjoy_Q_StealthAlarmbot.Pawn_Killjoy_Q_StealthAlarmbot_C",
+            "/Game/Characters/Pine/S0/Ability_E/Pawn_Pine_E_RadEater.Pawn_Pine_E_RadEater_C",
+            "/Game/Characters/Stealth/S0/Ability_4/Pawn_Stealth_4_Decoy_V2.Pawn_Stealth_4_Decoy_V2_C",
+            "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterMoving_FakeTP.Pawn_Stealth_E_TeleporterMoving_FakeTP_C",
+            "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterStationary_FakeTP.Pawn_Stealth_E_TeleporterStationary_FakeTP_C",
+        ],
     ),
     (
         VectorQuantization::RoundWholeNumber,
@@ -1046,20 +1057,70 @@ const REP_MOVEMENT_LOCATION_EVIDENCE: [(VectorQuantization, &[&str]); 2] = [
             "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_DiscTurret_PowerWave.Projectile_E_Aggrobot_DiscTurret_PowerWave_C",
             "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_OrbSpawner.Projectile_E_Aggrobot_OrbSpawner_C",
             "/Game/Characters/BountyHunter/S0/Ability_E/Projectile_E_BountyHunter_Divebomb.Projectile_E_BountyHunter_Divebomb_C",
+            "/Game/Characters/BountyHunter/S0/Ability_Q/Projectile_Q_BountyHunter_TetherGrenade_SphereExpansion.Projectile_Q_BountyHunter_TetherGrenade_SphereExpansion_C",
+            "/Game/Characters/Breach/S0/Ability_4/Projectile_Breach_4_FusionBlast.Projectile_Breach_4_FusionBlast_C",
+            "/Game/Characters/Breach/S0/Ability_Q/Projectile_Breach_Q_ThroughWalls_Flash.Projectile_Breach_Q_ThroughWalls_Flash_C",
+            "/Game/Characters/Cable/S0/Ability_4/Projectile_Cable_4_NetToss.Projectile_Cable_4_NetToss_C",
+            "/Game/Characters/Cable/S0/Ability_4/Projectile_NetToss.Projectile_NetToss_C",
+            "/Game/Characters/Cable/S0/Ability_E/Projectile_CableJam_InAir.Projectile_CableJam_InAir_C",
+            "/Game/Characters/Cashew/S0/Ability_Q/Projectile_Cashew_Q_ShellShockGrenade.Projectile_Cashew_Q_ShellShockGrenade_C",
+            "/Game/Characters/Cashew/S0/Ability_Q/Projectile_Cashew_Q_ShellShockGrenade_Bounce.Projectile_Cashew_Q_ShellShockGrenade_Bounce_C",
+            "/Game/Characters/Cashew/S0/Ability_X/GameObject_Cashew_X_SegmentManager.GameObject_Cashew_X_SegmentManager_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_ProjectilePrimary.Projectile_Clay_4_ProjectilePrimary_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_ProjectileSecondary.Projectile_Clay_4_ProjectileSecondary_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_Primary.Projectile_Clay_4_Projectile_Primary_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_Secondary.Projectile_Clay_4_Projectile_Secondary_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_SecondarySpawner.Projectile_Clay_4_Projectile_SecondarySpawner_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_SecondarySpawner.Projectile_Clay_4_SecondarySpawner_C",
+            "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C",
+            "/Game/Characters/Clay/S0/Ability_X/Projectile_Clay_X_Rocket.Projectile_Clay_X_Rocket_C",
+            "/Game/Characters/Deadeye/S0/Ability_4/Projectile_Deadeye_4_Trap_Dart.Projectile_Deadeye_4_Trap_Dart_C",
+            "/Game/Characters/Grenadier/S0/Ability_4/Projectile_C_Grenadier_Flash.Projectile_C_Grenadier_Flash_C",
+            "/Game/Characters/Grenadier/S0/Ability_4/Projectile_C_Grenadier_Flash_Underhand.Projectile_C_Grenadier_Flash_Underhand_C",
+            "/Game/Characters/Grenadier/S0/Ability_E/Gameobject_Grenadier_E_SuppressionPulse.Gameobject_Grenadier_E_SuppressionPulse_C",
+            "/Game/Characters/Grenadier/S0/Ability_E/Projectile_Grenadier_E_SuppressionBlade.Projectile_Grenadier_E_SuppressionBlade_C",
+            "/Game/Characters/Grenadier/S0/Ability_Q/Projectile_Grenadier_Q_SemtexBasic.Projectile_Grenadier_Q_SemtexBasic_C",
             HAWK,
+            "/Game/Characters/Gumshoe/S0/Ability_E/Projectile_Gumshoe_E_CameraTrackingDart.Projectile_Gumshoe_E_CameraTrackingDart_C",
+            "/Game/Characters/Gumshoe/S0/Ability_Q/Projectile_Gumshoe_Q_CameraTrackingDart.Projectile_Gumshoe_Q_CameraTrackingDart_C",
+            "/Game/Characters/Gumshoe/S0/Ability_Q/Zone_Gumshoe_Q_Cage.Zone_Gumshoe_Q_Cage_C",
+            "/Game/Characters/Hunter/S0/Ability_4/AnimationUpdatePrototype/Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance.Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance_C",
             "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
             "/Game/Characters/Hunter/S0/Ability_Q/Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C",
+            "/Game/Characters/Iris/S0/Ability_4/GameObject_Thumper_Concuss.GameObject_Thumper_Concuss_C",
+            "/Game/Characters/Iris/S0/Ability_4/GameObject_Thumper_Heal.GameObject_Thumper_Heal_C",
+            "/Game/Characters/Iris/S0/Ability_4/Projectile_Thumper_Concuss.Projectile_Thumper_Concuss_C",
+            "/Game/Characters/Iris/S0/Ability_4/Projectile_Thumper_Heal.Projectile_Thumper_Heal_C",
+            "/Game/Characters/Killjoy/S0/Ability_4/Projectile_Killjoy_4_RemoteBees_MultiDetonate.Projectile_Killjoy_4_RemoteBees_MultiDetonate_C",
+            "/Game/Characters/Mage/S0/Ability_4/Projectile_Mage_4_SplashGrenade.Projectile_Mage_4_SplashGrenade_C",
             "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
+            "/Game/Characters/Mage/S0/Ability_E/Projectile_Mage_E_WorldSmoke.Projectile_Mage_E_WorldSmoke_C",
             "/Game/Characters/Mage/S0/Ability_Q/Projectile_Mage_Q_Wall.Projectile_Mage_Q_Wall_C",
+            "/Game/Characters/Nox/S0/Ability_4/Projectile_Nox_BarbedWire.Projectile_Nox_BarbedWire_C",
+            "/Game/Characters/Pandemic/S0/Ability_4/Projectile_Pandemic_4_SmokeGrenade.Projectile_Pandemic_4_SmokeGrenade_C",
             "/Game/Characters/Pandemic/S0/Ability_E/Projectile_Pandemic_E_SmokeScreen_NoCollision.Projectile_Pandemic_E_SmokeScreen_NoCollision_C",
+            "/Game/Characters/Pandemic/S0/Ability_Q/Projectile_Pandemic_Q_AcidGrenade.Projectile_Pandemic_Q_AcidGrenade_C",
+            "/Game/Characters/Phoenix/S0/Ability_4/Production/Projectile_Phoenix_4_Molotov_Production.Projectile_Phoenix_4_Molotov_Production_C",
+            "/Game/Characters/Phoenix/S0/Ability_E/Production/Projectile_Phoenix_E_FlareCurve_Synced.Projectile_Phoenix_E_FlareCurve_Synced_C",
+            "/Game/Characters/Phoenix/S0/Ability_E/Production/Projectile_Phoenix_E_FlareCurve_Synced_Right.Projectile_Phoenix_E_FlareCurve_Synced_Right_C",
             "/Game/Characters/Phoenix/S0/Ability_Q/Production/Projectile_Phoenix_Q_FlameWall_ThroughWall.Projectile_Phoenix_Q_FlameWall_ThroughWall_C",
+            "/Game/Characters/Pine/S0/Ability_E/Projectile_Pine_E_RadEaterSpawner.Projectile_Pine_E_RadEaterSpawner_C",
+            "/Game/Characters/Pine/S0/Ability_Q/Projectile_Pine_Q_TrapGrenade.Projectile_Pine_Q_TrapGrenade_C",
+            "/Game/Characters/Pine/S0/Ability_Q/Projectile_Pine_Q_TrapGrenadeUnderhand.Projectile_Pine_Q_TrapGrenadeUnderhand_C",
+            "/Game/Characters/Sarge/S0/Ability_Molotov/Projectile_Sarge_Q_Molotov_Production.Projectile_Sarge_Q_Molotov_Production_C",
+            "/Game/Characters/Sarge/S0/Ability_SpeedStim/Projectile_Sarge_E_SpeedStim.Projectile_Sarge_E_SpeedStim_C",
+            "/Game/Characters/Sequoia/S0/Ability_Q/Projectile_Sequoia_Q_FragileMissile.Projectile_Sequoia_Q_FragileMissile_C",
             "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
             "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
             "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
             "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/Projectile_Smonk_DecayNade.Projectile_Smonk_DecayNade_C",
             "/Game/Characters/Sprinter/S0/Ability_4/Projectile_Neon_C_Tunnel.Projectile_Neon_C_Tunnel_C",
+            "/Game/Characters/Sprinter/S0/Ability_4/Projectile_Neon_C_Tunnel_Cosmetic.Projectile_Neon_C_Tunnel_Cosmetic_C",
+            "/Game/Characters/Sprinter/S0/Ability_Q/Projectile_Sprinter_4_GroundStrike.Projectile_Sprinter_4_GroundStrike_C",
+            "/Game/Characters/Stealth/S0/Ability_Q/Projectile_Stealth_Q_BounceFlash.Projectile_Stealth_Q_BounceFlash_C",
             "/Game/Characters/Terra/S0/Ability_4/GameObject_Terra_C_TimeSlowGrenade_Explosion.GameObject_Terra_C_TimeSlowGrenade_Explosion_C",
             "/Game/Characters/Terra/S0/Ability_4/Projectile_Terra_C_TimeSlowGrenade.Projectile_Terra_C_TimeSlowGrenade_C",
+            "/Game/Characters/Thorne/S0/Ability_4/Projectile_Thorne_4_SlowFIeld_Production.Projectile_Thorne_4_SlowFIeld_Production_C",
             "/Game/Characters/Vampire/S0/Ability_4/Projectile_Vampire_4_NearsightAoE.Projectile_Vampire_4_NearsightAoE_C",
             "/Game/Characters/Wraith/S0/Ability_4/Projectile_Wraith_4_Smoke.Projectile_Wraith_4_Smoke_C",
             "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
@@ -1070,13 +1131,11 @@ const REP_MOVEMENT_LOCATION_EVIDENCE: [(VectorQuantization, &[&str]); 2] = [
     ),
 ];
 
-/// Every `RepMovement` type the overlay can assign carries the measured level,
-/// and no unlisted group gets one. The level is not on the wire, so an
-/// unmeasured table entry is written with Unreal's default
-/// (`RoundWholeNumber`): a prior, not a measurement.
-/// All three routes are held to the list: the table and the scoped types by
-/// group, checksum propagation by admitting no `RepMovement` at all. Only the
-/// Seeker Nade and the Boom Bot replicate short rotator components.
+/// Every `RepMovement` type the overlay can assign carries its measured level,
+/// and no unlisted group gets one: the level is not on the wire, so Unreal's
+/// default (`RoundWholeNumber`) is a prior, not a measurement. The table and the
+/// scoped types are held to the list by group, checksum propagation by admitting
+/// no `RepMovement`. Short rotators and two-decimal locations go together (pawns).
 #[test]
 fn every_rep_movement_entry_carries_its_measured_location_level() {
     let table = OVERLAY_TABLE.iter().map(|e| (e.group_path, e.field_type));
@@ -1097,7 +1156,6 @@ fn every_rep_movement_entry_carries_its_measured_location_level() {
             }
         }
     }
-    assert_eq!(short, BTreeSet::from([SEEKER_NADE, CLAY_BOOMBOT]));
     let mut measured = BTreeMap::new();
     for (level, groups) in REP_MOVEMENT_LOCATION_EVIDENCE {
         for &group in groups {
@@ -1105,6 +1163,15 @@ fn every_rep_movement_entry_carries_its_measured_location_level() {
             assert!(!twice, "{group}: the evidence list names it twice");
         }
     }
+    let two_decimals: BTreeSet<&str> = measured
+        .iter()
+        .filter(|&(_, &level)| level == VectorQuantization::RoundTwoDecimals)
+        .map(|(&group, _)| group)
+        .collect();
+    assert_eq!(
+        short, two_decimals,
+        "short rotators and two decimals differ"
+    );
     for (group, level) in &declared {
         assert_eq!(
             measured.get(group),

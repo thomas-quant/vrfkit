@@ -20,12 +20,10 @@ reference export lacks.
 - Associate healing, ability and GAS `OwnerActor`/`AvatarActor` references
   with their role conflicts, missing references and lifecycle uncertainty
   kept; an association is not player credit.
-- Type Raze's satchel, Paint Shells and rocket `ReplicatedMovement` if they
-  are wanted. Byte rotation consumes all 351,709 payloads, and all 29,972
-  actors land within 1 m of their spawn only at x100; the level is per class
-  ([DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level)),
-  so each needs a row in DATA.md's per-class table and an entry in
-  `REP_MOVEMENT_LOCATION_EVIDENCE`.
+- Type the six `ReplicatedMovement` classes still raw
+  ([DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level)):
+  four need their rotator width from the native class, and Cypher's cage
+  projectile needs its table `Skip` retyped with its 13.01 successor.
 - Type `Clay_PC_C.FocusProjectiles` through a measured array route: 24,409 of
   25,197 main payloads parse exactly and all 12,837 elements resolve to Raze
   actors; the other 788 carry the empty-array zero trailer the route must admit.
@@ -46,8 +44,14 @@ reference export lacks.
   rule per discard mode inside a path the verdict leaves unscored.
 - **Counting the bits after a cleanly read package-map export list.**
   `process_complete_payload` returns after the exports, so what follows is
-  never read; with no replay carrying such a bunch, neither reading on nor a
-  counter has anything to be checked against.
+  never read. No replay carries such a bunch to check reading on or a bit
+  counter against, so the bunch fails `validate` and `verify_build_corpus.py`.
+- **A team roster.** `Rounds[].Reports[].Interactions[].{ParticipantSubject,ParticipantTeamName}`
+  gives one: in the 1,015 corpus replays that carry it (Bomb and Swiftplay; the
+  public fixtures carry none), 364,312 pairs name `Red` or `Blue`, 0 subjects
+  under both and 5 manifest players under neither, and the spike carrier's team
+  is `extract_rounds.py`'s `attacker_team` on all 36,277 held custody intervals.
+  valplay derives teams itself, and a second file would repeat account UUIDs.
 - **Committing raw bits cut from private replays** so CI's real-bytes type
   check covers more fields: it would put private replay content in this
   public repository. The machine-local corpus sweeps cover them.
@@ -55,7 +59,8 @@ reference export lacks.
 The reopen and package-map items have no input: over the 1,018 exports of the common audit,
 `package_map_exports`, `must_be_mapped_guids`, `bunch_header_failures`,
 `channel_state_limit_failures`, `channel_reopens_while_open` and
-`partial_errors` are 0 on 563,030,549 main and 4,346,884 checkpoint bunches.
+`partial_errors` are 0 on 563,030,549 main and 4,346,884 checkpoint bunches;
+`vrfkit diag` on the same replays agrees, `rep_layout_export_bunches` included.
 
 ## The damage record only vrfkit emits
 

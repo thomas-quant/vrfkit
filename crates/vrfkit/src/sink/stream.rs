@@ -1924,12 +1924,11 @@ mod tests {
         sink.set_current_group_path(Arc::from("AbilitiesAndBuffsComponent"));
 
         // The framing layer's exact sequence for an unresolved block:
-        // on_unresolved_class_net_cache_payload, then on_stream_failure.
+        // on_stream_failure, then on_unresolved_class_net_cache_payload.
         let unresolved = unresolved_failure(9, 64);
-        for i in 0..40 {
-            let _ = i;
-            sink.on_unresolved_class_net_cache_payload(unresolved, &[0xDE, 0xAD]);
+        for _ in 0..40 {
             sink.on_stream_failure(unresolved);
+            sink.on_unresolved_class_net_cache_payload(unresolved, &[0xDE, 0xAD]);
         }
 
         // ...plus a real RepLayout loss.

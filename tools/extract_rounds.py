@@ -24,12 +24,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import atomic_write_file, refuse_input_path
-    from .wire_bits import iter_selected, text
-else:
-    from atomic_io import atomic_write_file, refuse_input_path
-    from wire_bits import iter_selected, text
+from atomic_io import atomic_write_file, refuse_input_path
+from wire_bits import iter_selected, text
 
 SET_PHASE = "MulticastSetPhase.NewPhase"
 PHASE_COLUMNS = {2: "reset_ms", 3: "start_ms", 4: "buy_end_ms", 5: "post_round_ms",
@@ -60,6 +56,7 @@ SCHEMA = pa.schema([
 PLACED = ("round_number", "plant_site", *SPIKE_COLUMNS.values())
 COUNT_KEYS = (*(f"phase {p}" for p in PHASE_COLUMNS), "phase other",
               "phase repeated in a round (first kept)", *PHASE_RPCS.values(),
+              "named RPC repeated in its frame", "unstarted final round (dropped)",
               "RoundResults entries", "RoundResults joined to a played round",
               "RoundResults awarded, not played",
               *(f"{what} before the first round" for what in PLACED),
@@ -102,8 +99,10 @@ def build(export: Path) -> tuple[list[dict], Counter, list[str]]:
                 results.setdefault(int(index), {})[member] = value
 
     for phase, rpc in PHASE_RPCS.items():
-        sent = rpc_times[rpc]
+        # An overtime side switch sends ClientResetRound twice in one frame.
+        sent = [t for i, t in enumerate(rpc_times[rpc]) if i == 0 or rpc_times[rpc][i - 1] != t]
         counts[rpc] = len(sent)
+        counts["named RPC repeated in its frame"] += len(rpc_times[rpc]) - len(sent)
         kept = [r[PHASE_COLUMNS[phase]] for r in rounds if r[PHASE_COLUMNS[phase]] is not None]
         if kept != sent:
             problems.append(f"phase {phase} at {kept[:3]}... ({len(kept)}) disagrees with "
@@ -136,6 +135,9 @@ def build(export: Path) -> tuple[list[dict], Counter, list[str]]:
     by_number = {entry.get("RoundNumber", ("index", i)): entry for i, entry in results.items()}
     if len(by_number) != len(results):
         problems.append("RoundResults repeats a RoundNumber")
+    if rounds and rounds[-1]["start_ms"] is None:  # the last side switch resets into no round
+        rounds.pop()
+        counts["unstarted final round (dropped)"] += 1
     for ordinal, r in enumerate(rounds):
         r["round_ordinal"] = ordinal
         entry = by_number.pop(r["round_number"], None) if r["round_number"] is not None else None

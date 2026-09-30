@@ -22,7 +22,7 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 or approved by Riot Games.
 
 **Verified state (2026-09-30):** Rust has **707 passing** tests; Python has
-**1037 passing** tests. All 24 supported builds received the same verification
+**1045 passing** tests. All 24 supported builds received the same verification
 on **1,018 unique replays**; all **1,018** meet every strict criterion. See
 [build verification](docs/BUILD_VERIFICATION.md) for the measured scope, common
 checks and remaining limits.
@@ -179,7 +179,7 @@ timestamp) are in [`docs/USAGE.md` section 3](docs/USAGE.md#3-output).
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**707 passing**; the full Python suite also has **1037 passing** tests. The
+**707 passing**; the full Python suite also has **1045 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export and independent value checks for
 each supported build.
@@ -278,7 +278,7 @@ Effect blobs:  61,617
 
 The four buckets partition `Rows offered` exactly (822,185 + 24,747 + 140,814 +
 1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. `check_docs.py`
-compares these counters and the Parquet row/byte table with that baseline.
+compares these counters and USAGE's Parquet row/byte table with that baseline.
 
 **Effect decoding is additive and does not move these buckets.** The overlay
 buckets are settled before the effect pass, so rows that gained a value from an
@@ -289,7 +289,7 @@ prints identically.
 
 Physical value coverage -- `fields.parquet` rows with a non-null `value_*` --
 is a different population from the overlay's input rows: the reference
-baseline has 939,382 typed rows out of 1,296,660 (72.45%), measured from its
+baseline has 939,474 typed rows out of 1,296,660 (72.45%), measured from its
 columns, and it is not a fraction of all game information understood.
 `Typed`, the overlay counter, the `compatible_checksum` buckets that separate
 "nobody described this" from "we missed this", and

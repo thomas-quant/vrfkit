@@ -103,8 +103,9 @@ says how many were skipped. Use `export --checkpoints` to decode them.
 Partial reassembly rejections discard payloads before block framing and are
 also reported under `NOT COVERED`. They are excluded from the block score and
 exit verdict; a pass does not establish end-to-end preservation. Other counted
-transport failures, including unfinished partials, resource limits and
-bunches dropped because their channel had no open actor, fail the verdict.
+transport failures, including unfinished partials, resource limits,
+bunches dropped because their channel had no open actor and package-map export
+bunches (`Package map exports:`; nothing after the exports is read), fail the verdict.
 That holds even when the channel's open arrived in a rejected partial
 fragment: the fragment itself stays unscored, but the complete bunches dropped
 after it count as loss. The exception is a rejected fragment that reopened a
@@ -740,6 +741,7 @@ the list. `check_docs.py` checks both figures.
 | `check_component_remaps.py` | Whether each component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. Exits 1 on a broken pair or an entry of the Rust table that does not parse, 2 when the export has no `fields.parquet`. Re-derive a broken or renamed pair with `extract_component_classes` ([below](#reading-the-installed-game)). |
 | `check_checksum_types.py` | Whether each overlay type hashes to the replay's own `compatible_checksum`. Recomputes Unreal's checksum from the C++ type vrfkit decodes and sorts every typed identity into match / mismatch / untestable -- enums, object references of an unknown class and struct members whose parent checksum is unknown (no parent chain, and no unambiguous agreement among their siblings) are untestable, never a match -- and checks every `checksum_table.rs` checksum under the names that carry it. Needs only manifests (`--export`, or `--corpus` for a directory of them). A mismatch vrfkit keeps on purpose is listed, with its reason and evidence, in `tools/fixtures/checksum_types_expected.json`, keyed on its exact shape (checksum, wire name, parent chain, vrfkit's type, the C++ type the checksum names). Exits 1 on a mismatch no item names (the corpus exits 0, only the listed `249` quaternions mismatching) and on an item that applies to the input (its checksum is declared) but covers nothing, STALE; exit 2 on a malformed list. The method, the provenance of the formula and its limits are in [CHECKSUM_TYPES.md](CHECKSUM_TYPES.md). |
 | `check_entry_survival.py` | Whether every name-keyed entry -- `table.rs` (names and handles), `scoped_types.rs`, `checksum_table.rs`, the measured array routes, the component-remap targets and the group aliases -- is still declared build after build, read from the `manifest.json` and checkpoint declaration tables of a directory of exports. Separates a field the group stopped declaring, a group that moved (naming the successor, and whether the successor's field is still typed), and a class nobody used; judges each absence by the chance that it is sampling, so a three-replay build can never fail. Fails on an evidenced loss that is neither still typed nor listed with its reason in `tools/fixtures/entry_survival_expected.json`. Run it on every new build ([section 7](#checking-a-new-build-still-matches-every-entry)). |
+| `check_rep_movement_levels.py` | Each class's `ReplicatedMovement` location level, from the first update joined to its spawn ([DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level)), plus a speed check and the rotator width that consumes each row. Exits 1 when a class the overlay types measures another level, no clean level, or a row its rotator width does not consume; 2 on no `ReplicatedMovement` row |
 | `overlay_mirror.py` | Not a check -- the Python mirror of the overlay that `check_checksum_types.py` and `check_entry_survival.py` share: it parses `table.rs` and the generated `scoped_types.rs` and `checksum_table.rs` and the `overlay.rs` resolution constants, refusing any table that does not parse whole, and follows `overlay::resolve_entry`'s order. |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A |
 | `compare_combat_report.py` | Metrics-input multiset |
@@ -764,7 +766,7 @@ script mentioned, every crate in the table, every link and `#anchor`
 resolving, and the live value of each number it can re-derive, in the
 phrasings it reads -- the overlay and handle table sizes (in Rust doc comments
 and `Cargo.toml` too), the test counts, the reference replay's printed overlay
-counters, `Typed` ratio and export rows/bytes, the build tables' clean/checked
+counters, `Typed` ratio and export rows/bytes, the build table's clean/checked
 counts, and the counts its `MEASURED_RE` names. Any other figure, DATA.md's
 measurements among them, is a measurement nothing re-runs, and nothing checks
 it. A stale sentence compiles and passes every test.
@@ -1096,7 +1098,7 @@ schema drift, not meaning.
 
 The pre-PR sweep, and what CI runs, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr); the suites have
-707 Rust tests and 1037 Python tests.
+707 Rust tests and 1045 Python tests.
 
 **The ASCII rule is correctness, not style.** The Windows console is cp949, so a
 single non-ASCII character in a format string truncates output at that point.
@@ -1343,7 +1345,8 @@ the private work directory. The JSON report contains build counts and input
 hashes, without source filenames or player identifiers. An unsuccessful
 strict audit still writes its results and exits nonzero. Read
 [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md) for the latest measured results.
-`check_docs.py` checks both supported-build tables against that committed
-report and the Rust registry, including the same verification wording and
-clean/checked denominators. The native and golden vector counts remain
+`check_docs.py` checks README's supported-build table against that committed
+report and the Rust registry (the same verification wording and clean/checked
+denominators), and this document's `Payload transform (N builds)` count
+against the registry. The native and golden vector counts remain
 separate arithmetic evidence; they do not substitute for any replay check.

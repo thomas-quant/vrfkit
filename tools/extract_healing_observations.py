@@ -11,16 +11,10 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from . import extract_section_observations as sections
-    from .atomic_io import run_json_cli, sha256_file as sha
-    from .player_identity import load_player_bodies
-    from .wire_bits import InputError, iter_selected, load_net_guids, text
-else:
-    import extract_section_observations as sections
-    from atomic_io import run_json_cli, sha256_file as sha
-    from player_identity import load_player_bodies
-    from wire_bits import InputError, iter_selected, load_net_guids, text
+import extract_section_observations as sections
+from atomic_io import run_json_cli, sha256_file as sha
+from player_identity import load_player_bodies
+from wire_bits import InputError, iter_selected, load_net_guids, text
 IntegrityError = sections.IntegrityError
 SCHEMA_VERSION = 1
 ROUTE = "MulticastNotifyHeal"

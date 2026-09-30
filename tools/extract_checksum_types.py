@@ -29,12 +29,8 @@ import re
 import sys
 from pathlib import Path
 
-if __package__:
-    from . import overlay_mirror
-    from .atomic_io import atomic_write_text
-else:  # direct script execution
-    import overlay_mirror
-    from atomic_io import atomic_write_text
+import overlay_mirror
+from atomic_io import atomic_write_text
 
 REPO = Path(__file__).resolve().parents[1]
 TABLE_RS = REPO / "crates" / "vrf-decode" / "src" / "table.rs"

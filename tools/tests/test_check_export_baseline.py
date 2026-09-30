@@ -16,7 +16,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import check_export_baseline as guard
 
 
@@ -579,20 +579,17 @@ class MainTests(TempDirTestCase):
         current = measurement(actor_closes=0)
         self.assertEqual(guard.cross_checks(current["counters"], current["parquet"]), [],
                          "the stand-in measurement must reach the update")
-        argv = ["check_export_baseline.py", "--baseline", str(root / "baseline.json"),
-                "--exe", sys.executable, *extra]
-        output = io.StringIO()
-        with patch.dict(os.environ), patch.object(sys, "argv", argv), \
-                patch.object(guard, "measure", return_value=current) as measured, \
-                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        with patch.dict(os.environ), patch.object(guard, "measure", return_value=current) as measured:
             os.environ.pop("VRFKIT_CORPUS_DIR", None)
             os.environ.pop("VRFKIT_REQUIRE_CORPUS", None)
             if corpus_dir is not None:
                 os.environ["VRFKIT_CORPUS_DIR"] = corpus_dir
             if require is not None:
                 os.environ["VRFKIT_REQUIRE_CORPUS"] = require
-            code = guard.main()
-        return code, output.getvalue(), measured
+            code, output, _ = run_cli(guard.main, "--baseline", root / "baseline.json", "--exe",
+                                      sys.executable, *extra, prog="check_export_baseline.py",
+                                      merged=True)
+        return code, output, measured
 
     def test_an_absolute_replay_is_refused_before_the_export_runs(self):
         root = self.tmp()

@@ -1,8 +1,6 @@
 """Focused behavior checks for the raw/untyped priority catalog."""
 from __future__ import annotations
 
-import contextlib
-import io
 import json
 import tempfile
 from pathlib import Path
@@ -107,8 +105,7 @@ class RawPriorityTests(TempDirTestCase):
                 ".pub2.vrfkit-previous-4242-7", ".pub2.vrfkit-staging-55396-0")]
 
             self.assertEqual(priority.discover([parent]), [(parent / "pub2").resolve()])
-            with contextlib.redirect_stdout(io.StringIO()):
-                code = priority.main([str(parent), "--output-dir", out, "--jobs", "1"])
+            code = priority.main([str(parent), "--output-dir", out, "--jobs", "1"])
             summary = json.loads((Path(out) / "raw_untyped_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(code, 0)
         self.assertEqual(summary["export_count"], 1)
@@ -120,8 +117,7 @@ class RawPriorityTests(TempDirTestCase):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as out:
             parent = Path(td)
             self.write_export(parent / "one", [field("/A", "raw", 9, 8, b"\x01")])
-            with contextlib.redirect_stdout(io.StringIO()):
-                code = priority.main([str(parent), "--output-dir", out, "--jobs", "1"])
+            code = priority.main([str(parent), "--output-dir", out, "--jobs", "1"])
             names = sorted(path.name for path in Path(out).iterdir())
             reports = {name: (Path(out) / name).read_bytes() for name in names}
         self.assertEqual(code, 0)

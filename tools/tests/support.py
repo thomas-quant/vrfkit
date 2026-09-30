@@ -19,23 +19,17 @@ class TempDirTestCase(unittest.TestCase):
         return Path(self.enterContext(tempfile.TemporaryDirectory()))
 
 
-def run_cli(main, *argv, prog=None, exits=False, merged=False):
-    """Run a tool's main and return (code, stdout, stderr).
+def run_cli(main, *argv, prog=None, merged=False):
+    """Run a tool's main and return (code, stdout, stderr); SystemExit propagates.
 
     With `prog`, argv is patched into sys.argv and main() takes no arguments; otherwise
-    main(list(argv)). exits=True turns SystemExit into its code; merged=True writes both
-    streams, in order, to stdout.
+    main(list(argv)). merged=True writes both streams, in order, to stdout.
     """
     args, out, err = [str(a) for a in argv], io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out if merged else err):
-        try:
-            if prog is None:
-                code = main(args)
-            else:
-                with mock.patch.object(sys, "argv", [prog, *args]):
-                    code = main()
-        except SystemExit as exit:
-            if not exits:
-                raise
-            code = exit.code
+        if prog is None:
+            code = main(args)
+        else:
+            with mock.patch.object(sys, "argv", [prog, *args]):
+                code = main()
     return code, out.getvalue(), err.getvalue()

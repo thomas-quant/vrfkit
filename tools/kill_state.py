@@ -10,12 +10,8 @@ import struct
 from collections import Counter
 from typing import Any
 
-if __package__:
-    from .extract_kill_observations import decode_direct
-    from .wire_bits import InputError, exact_ref, parse_array
-else:
-    from extract_kill_observations import decode_direct
-    from wire_bits import InputError, exact_ref, parse_array
+from extract_kill_observations import decode_direct
+from wire_bits import InputError, exact_ref, parse_array
 
 SCHEMA_VERSION = 1
 DOCUMENT_KIND = "vrfkit_killdata_observation_export"

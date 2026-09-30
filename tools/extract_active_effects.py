@@ -27,12 +27,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import atomic_write_file, refuse_input_path
-    from .wire_bits import iter_selected, text
-else:
-    from atomic_io import atomic_write_file, refuse_input_path
-    from wire_bits import iter_selected, text
+from atomic_io import atomic_write_file, refuse_input_path
+from wire_bits import iter_selected, text
 
 # Case-insensitive class-path substrings, broad on purpose. Three false matches
 # are handled: Chamber's ult gun ("fire" in "FIreRate", 17,304 rows) by the

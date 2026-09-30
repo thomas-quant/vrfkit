@@ -48,12 +48,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-if __package__:
-    from . import overlay_mirror
-    from .export_scan import is_generated_sibling
-else:  # direct script execution
-    import overlay_mirror
-    from export_scan import is_generated_sibling
+import overlay_mirror
+from export_scan import is_generated_sibling
 
 REPO = Path(__file__).resolve().parents[1]
 DECODE_SRC = REPO / "crates" / "vrf-decode" / "src"

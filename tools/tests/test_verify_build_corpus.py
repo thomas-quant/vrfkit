@@ -6,8 +6,7 @@ from unittest.mock import patch
 import json
 import subprocess
 import tempfile
-from contextlib import ExitStack, redirect_stdout, redirect_stderr
-from io import StringIO
+from contextlib import ExitStack
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -72,6 +71,16 @@ class ManifestTests(unittest.TestCase):
                         target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
                         target[category][key] = 1
                         self.assertIn(f"{scope}_{key}=1", audit.manifest_counts(data)[1])
+
+    def test_package_map_export_bunches_fail_each_pass(self):
+        """Named here, not read from NET_ZERO, so dropping either term fails."""
+        for scope in ("main", "checkpoint"):
+            for key in ("package_map_exports", "rep_layout_export_bunches"):
+                with self.subTest(scope=scope, key=key):
+                    data = manifest()
+                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                    target["net"][key] = 1
+                    self.assertIn(f"{scope}_{key}=1", audit.manifest_counts(data)[1])
 
     def test_each_run_level_count_must_be_zero(self):
         for key in ("content_blocks_lost", "unknown_chunks", "overlay_errors_reported"):
@@ -384,7 +393,7 @@ class AuditCommandTests(TempDirTestCase):
                     "failures": ["array error"] if failure else [],
                     "counts": {"checkpoint_content_blocks": int(checkpoint),
                                "checkpoint_overlay_decoded_ok": int(checkpoint)}}
-        with patch.object(audit, "audit_one", side_effect=inspect), redirect_stdout(StringIO()):
+        with patch.object(audit, "audit_one", side_effect=inspect):
             code = audit.main(self.args)
         return code, json.loads(self.output.read_text(encoding="utf-8"))
 
@@ -416,7 +425,7 @@ class AuditCommandTests(TempDirTestCase):
 
     def test_existing_output_is_never_overwritten(self):
         self.output.write_text("keep me", encoding="utf-8")
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
+        with self.assertRaises(SystemExit) as raised:
             audit.main(self.args)
         self.assertEqual(raised.exception.code, 2)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "keep me")
@@ -425,7 +434,7 @@ class AuditCommandTests(TempDirTestCase):
         empty = self.root / "empty"
         empty.mkdir()
         self.args[self.args.index("--corpus") + 1] = str(empty)
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
+        with self.assertRaises(SystemExit) as raised:
             audit.main(self.args)
         self.assertEqual(raised.exception.code, 2)
         self.assertFalse(self.output.exists())

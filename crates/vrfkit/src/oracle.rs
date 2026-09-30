@@ -81,6 +81,8 @@ impl Verdict {
 /// depth sum is `NetStats::lost_content_blocks`'s alone, so this verdict and
 /// `quality.content_blocks_lost` cannot drift. `bunches_on_unopened_channel`
 /// is 0 on 45 replays of 24 builds, main and checkpoint passes.
+/// `package_map_exports` (a superset of `rep_layout_export_bunches`) fails the
+/// run: the bunch content after the exports is never read. 0 on 1,018 replays.
 fn verdict_from_stats(stats: &NetStats, replay_data_trailing_bytes: u64) -> Verdict {
     let total_with_content = stats.rep_layout_blocks + stats.class_net_cache_blocks;
     let failures = stats.malformed_packets
@@ -89,6 +91,7 @@ fn verdict_from_stats(stats: &NetStats, replay_data_trailing_bytes: u64) -> Verd
         + stats.partial_resource_limit_failures
         + stats.bunch_header_failures
         + stats.bunches_on_unopened_channel
+        + stats.package_map_exports
         + stats.lost_content_blocks()
         + u64::from(replay_data_trailing_bytes != 0);
     Verdict::decide(total_with_content, failures)
@@ -158,7 +161,6 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         "    Unopened channel:   {} bunches / {} bits",
         stats.bunches_on_unopened_channel, stats.unopened_channel_bits
     );
-    // Printed, not (yet) verdict terms: such a bunch's content is never read.
     println!(
         "    Package map exports: {} ({} with RepLayout export)",
         stats.package_map_exports, stats.rep_layout_export_bunches
@@ -469,7 +471,7 @@ mod tests {
     /// (reported as unscored) do not.
     #[test]
     fn every_unfinished_or_payload_failure_prevents_a_pass() {
-        let failures: [fn(&mut NetStats); 10] = [
+        let failures: [fn(&mut NetStats); 11] = [
             |s| s.malformed_packets = 1,
             |s| s.bunch_header_failures = 1,
             |s| s.transform_failures = 1,
@@ -480,6 +482,7 @@ mod tests {
             |s| s.channel_state_limit_failures = 1,
             |s| s.content_block_framing_failures = 1,
             |s| (s.bunches_on_unopened_channel, s.unopened_channel_bits) = (1, 10),
+            |s| s.package_map_exports = 1,
         ];
         let passes: [fn(&mut NetStats); 3] = [
             |_| {},

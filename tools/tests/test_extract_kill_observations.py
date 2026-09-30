@@ -2,7 +2,7 @@ import copy, json, tempfile, unittest
 from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import extract_kill_observations as tool
 from wire_fixtures import FIELD_SCHEMA as SCHEMA, array, field_row, write_empty_tables
 
@@ -78,8 +78,6 @@ def build_export(root, build):
 
 class BuildScopeTests(unittest.TestCase):
     def test_measured_builds_are_accepted(self):
-        import contextlib, io
-
         for build in (*LEGACY_BUILDS, "13.01", "13.02", "13.04", "13.05", "13.06"):
             self.assertIn(f"++Ares-Core+release-{build}", tool.MEASURED_BUILDS)
         for build in ("11.06", "13.06"):
@@ -87,11 +85,9 @@ class BuildScopeTests(unittest.TestCase):
             with self.subTest(build=build), tempfile.TemporaryDirectory() as t:
                 export = build_export(Path(t) / "export", branch)
                 out = Path(t) / "observations.json"
-                printed = io.StringIO()
-                with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
-                    code = tool.main(["--export", str(export), "--out", str(out)])
-                self.assertEqual(code, 0, printed.getvalue())
-                self.assertIn("1 serialized updates", printed.getvalue())
+                code, printed, _ = run_cli(tool.main, "--export", export, "--out", out, merged=True)
+                self.assertEqual(code, 0, printed)
+                self.assertIn("1 serialized updates", printed)
                 result = json.loads(out.read_text(encoding="utf-8"))
                 self.assertEqual(result["provenance"]["replay_build"], branch)
                 self.assertEqual(result["provenance"]["wire_bits_sha256"],

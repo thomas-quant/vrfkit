@@ -24,12 +24,8 @@ import tempfile
 import time
 from pathlib import Path
 
-if __package__:
-    from . import summary_counters as sc
-    from .atomic_io import atomic_write_text
-else:  # direct script execution
-    import summary_counters as sc
-    from atomic_io import atomic_write_text
+import summary_counters as sc
+from atomic_io import atomic_write_text
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE = REPO / "tools" / "baselines" / "bench.json"
