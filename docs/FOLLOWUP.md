@@ -20,12 +20,10 @@ reference export lacks.
 - Associate healing, ability and GAS `OwnerActor`/`AvatarActor` references
   with their role conflicts, missing references and lifecycle uncertainty
   kept; an association is not player credit.
-- Type Raze's satchel, Paint Shells and rocket `ReplicatedMovement` if they
-  are wanted. Byte rotation consumes all 351,709 payloads, and all 29,972
-  actors land within 1 m of their spawn only at x100; the level is per class
-  ([DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level)),
-  so each needs a row in DATA.md's per-class table and an entry in
-  `REP_MOVEMENT_LOCATION_EVIDENCE`.
+- Type the six `ReplicatedMovement` classes still raw
+  ([DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level)):
+  four need their rotator width from the native class, and Cypher's cage
+  projectile needs its table `Skip` retyped with its 13.01 successor.
 - Type `Clay_PC_C.FocusProjectiles` through a measured array route: 24,409 of
   25,197 main payloads parse exactly and all 12,837 elements resolve to Raze
   actors; the other 788 carry the empty-array zero trailer the route must admit.
