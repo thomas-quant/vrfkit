@@ -74,7 +74,7 @@ can be represented by their rows instead of a duplicate raw RPC.
 | **11.07** | `release-11.07` | 3/3 | Validation + checkpoints + typed/raw |
 | **11.06** | `release-11.06` | 3/3 | Validation + checkpoints + typed/raw |
 
-Measured 2026-09-28 on all **1,018 unique available replays** across the 24
+Measured on all **1,018 unique available replays** across the 24
 supported branches, every row by the [same acceptance rule](docs/BUILD_VERIFICATION.md):
 ReplayData validation, checkpoint-enabled export, the independent comparisons on
 observed evidence fields, and the strict array and array-leaf error counters.
