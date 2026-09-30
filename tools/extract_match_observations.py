@@ -20,12 +20,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import run_json_cli
-    from .wire_bits import load_net_guids
-else:  # direct script execution
-    from atomic_io import run_json_cli
-    from wire_bits import load_net_guids
+from atomic_io import run_json_cli
+from wire_bits import load_net_guids
 
 
 MAGAZINE_PATH = "MagazineAmmo"

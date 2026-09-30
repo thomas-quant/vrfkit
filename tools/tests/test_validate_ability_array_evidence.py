@@ -1,8 +1,6 @@
 """Fail-closed checks for the independent ability-array wire validator."""
 
 from collections import Counter
-import contextlib
-import io
 import json
 from pathlib import Path
 import tempfile
@@ -11,7 +9,7 @@ import unittest
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import run_cli
 import validate_ability_array_evidence as evidence
 from wire_fixtures import array
 
@@ -153,10 +151,7 @@ def run_main(rows, declared=True, flags=("--compare-typed", "--require-routes"))
             **{name: [value] * len(rows) for name, value in CONTEXT.items()},
             **{name: pa.array([row.get(name) for row in rows], kind) for name, kind in types.items()},
         }), export / "fields.parquet")
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = evidence.main([str(export), *flags])
-    return code, output.getvalue()
+        return run_cli(evidence.main, export, *flags)[:2]
 
 
 class MainTests(unittest.TestCase):

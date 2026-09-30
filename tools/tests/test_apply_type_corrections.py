@@ -1,7 +1,5 @@
 """Guards for apply_type_corrections.py: its pins, and `main()`'s verdict on a
 one-line table.rs, judged by whether applying would change the file."""
-import contextlib
-import io
 import unittest
 from unittest import mock
 
@@ -200,9 +198,7 @@ class MainTests(TempDirTestCase):
     def test_unknown_flag_is_rejected_and_cannot_fall_into_write_mode(self):
         source = whole_table({SMOKE_SCREEN: SHORT_WHOLE})
         self.path.write_text(source, encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as raised:
-                atc.main(["--chekc"])
+        with self.assertRaises(SystemExit) as raised:
+            atc.main(["--chekc"])
         self.assertEqual(raised.exception.code, 2)
         self.assert_unchanged(source)

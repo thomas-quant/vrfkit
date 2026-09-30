@@ -26,12 +26,8 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-if __package__:
-    from . import check_metrics_baseline as cmb
-    from .atomic_io import atomic_write_text, remove_tree, require_descendant
-else:  # direct script execution
-    import check_metrics_baseline as cmb
-    from atomic_io import atomic_write_text, remove_tree, require_descendant
+import check_metrics_baseline as cmb
+from atomic_io import atomic_write_text, remove_tree, require_descendant
 
 REPO = Path(__file__).resolve().parent.parent
 VALPLAY = Path(os.environ.get("VRFKIT_VALPLAY_DIR", ""))

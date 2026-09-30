@@ -19,10 +19,7 @@ import re
 import sys
 from pathlib import Path
 
-if __package__:
-    from .atomic_io import atomic_write_text
-else:  # direct script execution
-    from atomic_io import atomic_write_text
+from atomic_io import atomic_write_text
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "tools/fixtures/scoped_type_evidence.json"

@@ -236,15 +236,13 @@ class MatchObservationTests(TempDirTestCase):
         self.assertEqual(interval["end_boundary"], "state_change")
 
     def test_first_reload_normal_exit_is_left_censored(self):
-        temp = self.tmp()
-        root = temp; write_export(root)
+        root = self.tmp(); write_export(root)
         interval = observations.build(root)["reload_intervals"][0]
         self.assertTrue(interval["left_censored"])
         self.assertFalse(interval["right_censored"])
 
     def test_known_idle_reload_stream_end_is_not_left_censored(self):
-        temp = self.tmp()
-        root = temp; write_export(root)
+        root = self.tmp(); write_export(root)
         self._replace_state_rows(root, [
             (5, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
             (12, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 400, None),
@@ -254,8 +252,7 @@ class MatchObservationTests(TempDirTestCase):
         self.assertTrue(interval["right_censored"])
 
     def test_same_timestamp_later_packet_is_inside_but_boundary_packet_is_excluded(self):
-        temp = self.tmp()
-        root = temp; write_export(root)
+        root = self.tmp(); write_export(root)
         append_field_rows(root, [
             # Same state-entry packet is unorderable and excluded; packet 2
             # at the same timestamp is strictly inside the interval.
@@ -266,8 +263,7 @@ class MatchObservationTests(TempDirTestCase):
         self.assertEqual([(row["time_ms"], row["packet_id"]) for row in rows], [(12, 2)])
 
     def test_unknown_then_reload_is_left_censored(self):
-        temp = self.tmp()
-        root = temp; write_export(root)
+        root = self.tmp(); write_export(root)
         append_field_rows(root, [
             (13, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 999, None),
             (14, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 400, None),
@@ -276,16 +272,14 @@ class MatchObservationTests(TempDirTestCase):
         self.assertTrue(rows[-1]["left_censored"])
 
     def test_a_repeated_net_guid_fails_loudly(self):
-        temp = self.tmp()
-        root = temp; write_export(root)
+        root = self.tmp(); write_export(root)
         net = pq.read_table(root / "net_guids.parquet")
         pq.write_table(pa.concat_tables([net, net.slice(0, 1)]), root / "net_guids.parquet")
         with self.assertRaisesRegex(ValueError, "repeats"):
             observations.build(root)
 
     def test_a_second_weapons_magazine_does_not_join(self):
-        temp = self.tmp()
-        root = temp; write_export(root)
+        root = self.tmp(); write_export(root)
         net = pq.read_table(root / "net_guids.parquet")
         pq.write_table(pa.concat_tables([net, pa.table({
             "net_guid": [101], "path": ["MagazineAmmo"], "outer_net_guid": [201],

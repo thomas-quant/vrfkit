@@ -1006,7 +1006,7 @@ not a table entry.
 
 Most rows still untyped after the table, the engine-reference names and
 checksum propagation are declared `Raw`/`Skip` on purpose
-(`BaseReplayController`'s 4-kbit blob alone is 225,808 rows on 02d4d478); the
+(`BaseReplayController`'s 4-kbit blob alone is 225,844 rows on 02d4d478); the
 rest carry a checksum no declared field donates, or none at all (the
 unresolved `AbilitiesAndBuffs` payload). The largest remaining item does not
 yield to a `FieldType` at all:

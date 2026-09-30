@@ -24,12 +24,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import atomic_write_file, refuse_input_path
-    from .wire_bits import iter_selected, text
-else:
-    from atomic_io import atomic_write_file, refuse_input_path
-    from wire_bits import iter_selected, text
+from atomic_io import atomic_write_file, refuse_input_path
+from wire_bits import iter_selected, text
 
 SET_PHASE = "MulticastSetPhase.NewPhase"
 PHASE_COLUMNS = {2: "reset_ms", 3: "start_ms", 4: "buy_end_ms", 5: "post_round_ms",

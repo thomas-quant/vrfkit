@@ -35,12 +35,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import sha256_file as sha, staged_output
-    from .wire_bits import Bits, WireError, fastarray_header, iter_selected, load_net_guids, text
-else:
-    from atomic_io import sha256_file as sha, staged_output
-    from wire_bits import Bits, WireError, fastarray_header, iter_selected, load_net_guids, text
+from atomic_io import sha256_file as sha, staged_output
+from wire_bits import Bits, WireError, fastarray_header, iter_selected, load_net_guids, text
 
 SCHEMA_VERSION = 2
 CLASS_GROUP = "/Script/DynamicVolume.GroundVolumeComponent"

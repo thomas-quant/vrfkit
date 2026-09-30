@@ -19,10 +19,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-if __package__:
-    from .atomic_io import atomic_write_text
-else:  # direct script execution
-    from atomic_io import atomic_write_text
+from atomic_io import atomic_write_text
 
 ROUTE_CHILDREN = ("Route children: {} player info / {} rewards / {} selected / {} kills / "
                   "{} active effects / {} ignore actors / {} blinds / {} projectile path")

@@ -2,8 +2,6 @@
 that fails for a map without constants or a projection that does not fit."""
 from __future__ import annotations
 
-import contextlib
-import io
 import json
 
 import pyarrow as pa
@@ -30,8 +28,7 @@ class MinimapTests(TempDirTestCase):
                        export / "movement.parquet")
         maps = self.root / "maps.json"
         maps.write_text(json.dumps({"data": [{"mapUrl": MAP, **constants}]}), encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return minimap.main(["--export", str(export), "--maps", str(maps)])
+        return minimap.main(["--export", str(export), "--maps", str(maps)])
 
     def test_pos_y_drives_u_and_pos_x_drives_v(self):
         self.assertEqual(minimap.project(1.0, 100.0, CONSTANTS), (210.0, 23.0))

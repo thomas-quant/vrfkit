@@ -12,12 +12,8 @@ from pathlib import Path
 
 import pyarrow.compute as pc
 
-if __package__:
-    from .atomic_io import run_json_cli, sha256_file as sha
-    from .wire_bits import InputError, exact_ref, iter_selected, load_net_guids, parse_array, text
-else:
-    from atomic_io import run_json_cli, sha256_file as sha
-    from wire_bits import InputError, exact_ref, iter_selected, load_net_guids, parse_array, text
+from atomic_io import run_json_cli, sha256_file as sha
+from wire_bits import InputError, exact_ref, iter_selected, load_net_guids, parse_array, text
 
 SCHEMA_VERSION = 1
 OUTER_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"

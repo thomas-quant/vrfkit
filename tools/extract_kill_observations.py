@@ -10,12 +10,8 @@ from pathlib import Path
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import run_json_cli, sha256_file as sha
-    from .wire_bits import InputError, exact_ref, iter_selected, parse_array, text, weapon_theme
-else:
-    from atomic_io import run_json_cli, sha256_file as sha
-    from wire_bits import InputError, exact_ref, iter_selected, parse_array, text, weapon_theme
+from atomic_io import run_json_cli, sha256_file as sha
+from wire_bits import InputError, exact_ref, iter_selected, parse_array, text, weapon_theme
 
 SCHEMA_VERSION = 1
 GROUP = "/Script/ShooterGame.PlayerMatchStatsComponent"
