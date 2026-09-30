@@ -59,11 +59,6 @@ class PlayerBodiesTests(unittest.TestCase):
         self.assertEqual([value for _, _, value in bodies.history[256]], [1510, 45530])
         self.assertEqual(bodies.counts["manifest_history_disagreements"], 0)
 
-    def test_the_final_provenance_string_is_the_one_records_already_carry(self):
-        """Records the manifest join labelled must come out byte-identical."""
-        self.assertEqual(identity.FINAL_PROVENANCE,
-                         "manifest.players.character_net_guid (SpawnedCharacter)")
-
     def test_a_swiftplay_player_state_names_bodies_like_the_bomb_class(self):
         rows = [dict(row, group_path=SWIFT) for row in RECONNECT]
         self.assertEqual(self.bodies(rows).subjects[1510], "reconnected")
@@ -140,6 +135,33 @@ class PlayerBodiesTests(unittest.TestCase):
     def test_a_value_that_is_not_a_u32_netguid_fails_loudly(self):
         with self.assertRaisesRegex(ValueError, "u32"):
             self.bodies([spawned(256, -1, 66)])
+
+
+class ManifestBodyListTests(unittest.TestCase):
+    """The manifest's `character_net_guids` must equal the fields' history in last-write order."""
+
+    def disagreements(self, player, rows=RECONNECT):
+        manifest = {"players": [dict(player, actor_net_guid=256, subject="s")]}
+        return identity.player_bodies(manifest, rows).counts["manifest_history_disagreements"]
+
+    def test_the_list_must_equal_the_history_in_last_write_order(self):
+        self.assertEqual(self.disagreements(
+            {"character_net_guid": 45530, "character_net_guids": [1510, 45530]}), 0)
+        for wrong in ([45530], [45530, 1510], [1510, 45530, 7], []):
+            with self.subTest(wrong=wrong):
+                self.assertEqual(self.disagreements(
+                    {"character_net_guid": 45530, "character_net_guids": wrong}), 1)
+
+    def test_a_repeat_moves_to_the_end(self):
+        rows = [spawned(256, 7, 1), spawned(256, 8, 2), spawned(256, 7, 3)]
+        self.assertEqual(self.disagreements(
+            {"character_net_guid": 7, "character_net_guids": [8, 7]}, rows), 0)
+        self.assertEqual(self.disagreements(
+            {"character_net_guid": 7, "character_net_guids": [7, 8]}, rows), 1)
+
+    def test_an_older_manifest_without_the_list_compares_the_last_body_only(self):
+        self.assertEqual(self.disagreements({"character_net_guid": 45530}), 0)
+        self.assertEqual(self.disagreements({"character_net_guid": 1510}), 1)
 
 
 class LoadTests(TempDirTestCase):

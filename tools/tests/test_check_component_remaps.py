@@ -3,13 +3,13 @@ kind, the rename signal, and a run that checked nothing. Fixture row counts
 are measured shapes from real exports."""
 import contextlib
 import io
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-
 
 from support import TOOLS, TempDirTestCase
 import check_component_remaps as guard
@@ -191,7 +191,7 @@ class MainTests(TempDirTestCase):
             [sys.executable, "-W", "error", str(SCRIPT), "--export",
              str(directory / "missing")],
             capture_output=True, text=True, check=False,
-            encoding="utf-8", errors="strict")
+            encoding="utf-8", errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("FAILED: no fields.parquet", result.stderr)
 
