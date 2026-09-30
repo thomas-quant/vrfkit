@@ -52,7 +52,7 @@ reference export lacks.
   gives one: in the 1,015 corpus replays that carry it (Bomb and Swiftplay; the
   public fixtures carry none), 364,312 pairs name `Red` or `Blue`, 0 subjects
   under both and 5 manifest players under neither, and the spike carrier's team
-  is `rounds.parquet`'s `attacker_team` on all 36,277 held custody intervals.
+  is `extract_rounds.py`'s `attacker_team` on all 36,277 held custody intervals.
   valplay derives teams itself, and a second file would repeat account UUIDs.
 - **Committing raw bits cut from private replays** so CI's real-bytes type
   check covers more fields: it would put private replay content in this
