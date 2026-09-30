@@ -26,16 +26,10 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .equippable_table import EQUIPPABLE_BY_PATH
-    from .extract_rounds import parquet_cli
-    from .player_identity import COUNT_KEYS as IDENTITY_KEYS, load_player_bodies
-    from .wire_bits import iter_selected, text
-else:
-    from equippable_table import EQUIPPABLE_BY_PATH
-    from extract_rounds import parquet_cli
-    from player_identity import COUNT_KEYS as IDENTITY_KEYS, load_player_bodies
-    from wire_bits import iter_selected, text
+from equippable_table import EQUIPPABLE_BY_PATH
+from extract_rounds import parquet_cli
+from player_identity import COUNT_KEYS as IDENTITY_KEYS, load_player_bodies
+from wire_bits import iter_selected, text
 
 FUNCTIONS = ("MulticastNotifyDamage_Point", "MulticastNotifyDamage_Base")
 #: Parameter -> (column, value column); vectors are "(x,y,z)" strings.

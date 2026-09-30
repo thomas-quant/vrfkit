@@ -12,14 +12,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 
-if __package__:
-    from . import extract_section_observations
-    from .atomic_io import run_json_cli, sha256_file as sha
-    from .wire_bits import iter_selected, text
-else:
-    import extract_section_observations
-    from atomic_io import run_json_cli, sha256_file as sha
-    from wire_bits import iter_selected, text
+import extract_section_observations
+from atomic_io import run_json_cli, sha256_file as sha
+from wire_bits import iter_selected, text
 
 RESET = "MulticastSectionLifeChange"
 SIGNS = {"MulticastNotifyDamage_Base": 1, "MulticastNotifyDamage_Point": 1,

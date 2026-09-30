@@ -18,10 +18,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .validate_type_evidence import Bits, fname
-else:
-    from validate_type_evidence import Bits, fname
+from validate_type_evidence import Bits, fname
 
 BLINDS = ("/Script/ShooterGame.BlindManagerComponent", "ActiveBlinds", 3853965310)
 PATH = ("/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache",

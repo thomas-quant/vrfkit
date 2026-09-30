@@ -20,12 +20,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import sha256_file as sha, staged_output
-    from .wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
-else:
-    from atomic_io import sha256_file as sha, staged_output
-    from wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
+from atomic_io import sha256_file as sha, staged_output
+from wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
 
 SCHEMA_VERSION = 2
 #: Every route's rows carry handle 1; another handle rejects as `route_identity`.

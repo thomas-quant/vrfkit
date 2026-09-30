@@ -79,14 +79,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-if __package__:
-    from . import overlay_mirror as mirror
-    from .check_component_remaps import remap_entries, table_source, unparsed_entries
-    from .export_scan import child_exports
-else:  # direct script execution
-    import overlay_mirror as mirror
-    from check_component_remaps import remap_entries, table_source, unparsed_entries
-    from export_scan import child_exports
+import overlay_mirror as mirror
+from check_component_remaps import remap_entries, table_source, unparsed_entries
+from export_scan import child_exports
 
 REPO = Path(__file__).resolve().parents[1]
 TABLE_RS = REPO / "crates" / "vrf-decode" / "src" / "table.rs"

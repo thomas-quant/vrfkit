@@ -18,10 +18,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-if __package__:
-    from .atomic_io import atomic_write_text
-else:  # direct script execution
-    from atomic_io import atomic_write_text
+from atomic_io import atomic_write_text
 
 TABLE_RS = Path(__file__).parent.parent / "crates" / "vrf-decode" / "src" / "table.rs"
 

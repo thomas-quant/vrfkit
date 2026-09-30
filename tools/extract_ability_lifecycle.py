@@ -16,12 +16,8 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import run_json_cli
-    from .player_identity import FINAL_PROVENANCE, load_player_bodies
-else:
-    from atomic_io import run_json_cli
-    from player_identity import FINAL_PROVENANCE, load_player_bodies
+from atomic_io import run_json_cli
+from player_identity import FINAL_PROVENANCE, load_player_bodies
 
 
 ACTOR_COLUMNS = ("time_ms", "packet_id", "channel_index", "actor_net_guid",

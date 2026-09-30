@@ -39,12 +39,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-if __package__:
-    from . import summary_counters as sc
-    from .atomic_io import atomic_write_text
-else:  # direct script execution
-    import summary_counters as sc
-    from atomic_io import atomic_write_text
+import summary_counters as sc
+from atomic_io import atomic_write_text
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"

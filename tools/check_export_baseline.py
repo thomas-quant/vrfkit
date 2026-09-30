@@ -36,12 +36,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-if __package__:
-    from . import summary_counters as sc
-    from .atomic_io import sha256_file
-else:  # direct script execution
-    import summary_counters as sc
-    from atomic_io import sha256_file
+import summary_counters as sc
+from atomic_io import sha256_file
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"

@@ -16,14 +16,9 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-if __package__:
-    from .atomic_io import run_json_cli
-    from .player_identity import FINAL_PROVENANCE, load_player_bodies
-    from .wire_bits import load_net_guids
-else:
-    from atomic_io import run_json_cli
-    from player_identity import FINAL_PROVENANCE, load_player_bodies
-    from wire_bits import load_net_guids
+from atomic_io import run_json_cli
+from player_identity import FINAL_PROVENANCE, load_player_bodies
+from wire_bits import load_net_guids
 
 
 BLIND_GROUP = "/Script/ShooterGame.BlindManagerComponent"
