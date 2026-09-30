@@ -103,7 +103,6 @@
 
 mod error;
 mod moves;
-mod primitives;
 mod rpc;
 mod types;
 

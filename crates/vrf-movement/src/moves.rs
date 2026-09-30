@@ -5,8 +5,10 @@
 use vrf_bitio::BitReader;
 
 use crate::error::MovementError;
-use crate::primitives::{ANGLE_SCALE, read_quantized_vector};
 use crate::types::{MovementMove, RpcDecodeResult};
+
+/// Raw u16 angle to degrees; yaw and pitch match an independent parser exactly.
+const ANGLE_SCALE: f64 = 360.0 / 65536.0;
 
 /// Magic byte at the start of a movement section.
 pub(crate) const MOVEMENT_MAGIC: u8 = 0x52;
@@ -86,7 +88,7 @@ fn parse_single_move(
     reader.skip_bits(48)?; // rotationInput, not exported
     let timestamp = reader.read_int_packed()?;
 
-    let (pos_x, pos_y, pos_z) = read_quantized_vector(reader, 100)?;
+    let [pos_x, pos_y, pos_z] = reader.read_quantized_vector(100)?;
 
     let has_optional = reader.read_bit()?;
     if has_optional {
@@ -102,9 +104,9 @@ fn parse_single_move(
     let yaw = f64::from(raw_yaw) * ANGLE_SCALE;
     let pitch = f64::from(raw_pitch) * ANGLE_SCALE;
 
-    let (vel_x, vel_y, vel_z) = if move_type_flag {
+    let [vel_x, vel_y, vel_z] = if move_type_flag {
         let _variant1_flag = reader.read_bit()?;
-        read_quantized_vector(reader, 10)?
+        reader.read_quantized_vector(10)?
     } else {
         // Variant 0: 33-bit packed angles, no velocity.
         let variant0_data = reader.read_bits(33)?;
@@ -112,7 +114,7 @@ fn parse_single_move(
         if has_external_ref {
             return Err(MovementError::Variant0ExternalCharRef);
         }
-        (0.0, 0.0, 0.0)
+        [0.0; 3]
     };
 
     let error_sentinel = reader.read_bit()?;
