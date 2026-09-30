@@ -33,14 +33,9 @@ from pathlib import Path
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-if __package__:
-    from .export_scan import discover_exports
-    from .overlay_mirror import overlay_entries, scoped_entries
-    from .validate_type_evidence import decode_exact
-else:
-    from export_scan import discover_exports
-    from overlay_mirror import overlay_entries, scoped_entries
-    from validate_type_evidence import decode_exact
+from export_scan import discover_exports
+from overlay_mirror import overlay_entries, scoped_entries
+from validate_type_evidence import decode_exact
 
 FIELD = "ReplicatedMovement"
 SRC = Path(__file__).resolve().parents[1] / "crates" / "vrf-decode" / "src"
