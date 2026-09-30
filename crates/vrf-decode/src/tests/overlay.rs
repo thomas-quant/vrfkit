@@ -1031,12 +1031,23 @@ fn a_declared_entry_outranks_the_engine_and_checksum_fallbacks() {
 }
 
 /// Every group the overlay assigns a `RepMovement` type (table or scoped), by
-/// the location level its spawn join measured; docs/DATA.md has the per-class
-/// table, and a new class needs its join there first.
+/// the location level `tools/check_rep_movement_levels.py` measures for it.
 const REP_MOVEMENT_LOCATION_EVIDENCE: [(VectorQuantization, &[&str]); 2] = [
     (
         VectorQuantization::RoundTwoDecimals,
-        &[SEEKER_NADE, CLAY_BOOMBOT],
+        &[
+            SEEKER_NADE,
+            "/Game/Characters/BountyHunter/S0/Ability_4/Pawn_BountyHunter_4_WolfHound.Pawn_BountyHunter_4_WolfHound_C",
+            "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C",
+            CLAY_BOOMBOT,
+            "/Game/Characters/Guide/S0/Ability_X/Pawn_Guide_X_Pack.Pawn_Guide_X_Pack_C",
+            "/Game/Characters/Killjoy/S0/Ability_E/Pawn_Killjoy_E_Turret.Pawn_Killjoy_E_Turret_C",
+            "/Game/Characters/Killjoy/S0/Ability_Q/Pawn_Killjoy_Q_StealthAlarmbot.Pawn_Killjoy_Q_StealthAlarmbot_C",
+            "/Game/Characters/Pine/S0/Ability_E/Pawn_Pine_E_RadEater.Pawn_Pine_E_RadEater_C",
+            "/Game/Characters/Stealth/S0/Ability_4/Pawn_Stealth_4_Decoy_V2.Pawn_Stealth_4_Decoy_V2_C",
+            "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterMoving_FakeTP.Pawn_Stealth_E_TeleporterMoving_FakeTP_C",
+            "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterStationary_FakeTP.Pawn_Stealth_E_TeleporterStationary_FakeTP_C",
+        ],
     ),
     (
         VectorQuantization::RoundWholeNumber,
@@ -1070,13 +1081,11 @@ const REP_MOVEMENT_LOCATION_EVIDENCE: [(VectorQuantization, &[&str]); 2] = [
     ),
 ];
 
-/// Every `RepMovement` type the overlay can assign carries the measured level,
-/// and no unlisted group gets one. The level is not on the wire, so an
-/// unmeasured table entry is written with Unreal's default
-/// (`RoundWholeNumber`): a prior, not a measurement.
-/// All three routes are held to the list: the table and the scoped types by
-/// group, checksum propagation by admitting no `RepMovement` at all. Only the
-/// Seeker Nade and the Boom Bot replicate short rotator components.
+/// Every `RepMovement` type the overlay can assign carries its measured level,
+/// and no unlisted group gets one: the level is not on the wire, so Unreal's
+/// default (`RoundWholeNumber`) is a prior, not a measurement. The table and the
+/// scoped types are held to the list by group, checksum propagation by admitting
+/// no `RepMovement`. Short rotators and two-decimal locations go together (pawns).
 #[test]
 fn every_rep_movement_entry_carries_its_measured_location_level() {
     let table = OVERLAY_TABLE.iter().map(|e| (e.group_path, e.field_type));
@@ -1097,7 +1106,6 @@ fn every_rep_movement_entry_carries_its_measured_location_level() {
             }
         }
     }
-    assert_eq!(short, BTreeSet::from([SEEKER_NADE, CLAY_BOOMBOT]));
     let mut measured = BTreeMap::new();
     for (level, groups) in REP_MOVEMENT_LOCATION_EVIDENCE {
         for &group in groups {
@@ -1105,6 +1113,15 @@ fn every_rep_movement_entry_carries_its_measured_location_level() {
             assert!(!twice, "{group}: the evidence list names it twice");
         }
     }
+    let two_decimals: BTreeSet<&str> = measured
+        .iter()
+        .filter(|&(_, &level)| level == VectorQuantization::RoundTwoDecimals)
+        .map(|(&group, _)| group)
+        .collect();
+    assert_eq!(
+        short, two_decimals,
+        "short rotators and two decimals differ"
+    );
     for (group, level) in &declared {
         assert_eq!(
             measured.get(group),

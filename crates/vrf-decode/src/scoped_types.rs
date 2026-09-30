@@ -7,7 +7,7 @@ use crate::types::{RotatorQuantization, VectorQuantization};
 
 /// Sorted by (field name, group path, compatible checksum).
 #[rustfmt::skip]
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 169] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 178] = [
     ("A", "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C", 988169428, FieldType::UInt32),
     ("A", "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C", 988169428, FieldType::UInt32),
     ("ActiveSlowTimeEffects", "/Game/GameModes/Bomb/BombGameState.BombGameState_C", 1807371052, FieldType::Bool),
@@ -127,7 +127,16 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 169] = [
     ("RelativeScale3D", "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C", 1992268157, FieldType::VectorNetQuantize { scale: 100 }),
     ("RelativeScale3D", "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C", 1992268157, FieldType::VectorNetQuantize { scale: 100 }),
     ("RelativeScale3D", "/Game/Characters/Clay/S0/Ability_X/Ability_Clay_X_RocketLauncher.Ability_Clay_X_RocketLauncher_C", 1992268157, FieldType::VectorNetQuantize { scale: 100 }),
+    ("ReplicatedMovement", "/Game/Characters/BountyHunter/S0/Ability_4/Pawn_BountyHunter_4_WolfHound.Pawn_BountyHunter_4_WolfHound_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
+    ("ReplicatedMovement", "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
     ("ReplicatedMovement", "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
+    ("ReplicatedMovement", "/Game/Characters/Guide/S0/Ability_X/Pawn_Guide_X_Pack.Pawn_Guide_X_Pack_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
+    ("ReplicatedMovement", "/Game/Characters/Killjoy/S0/Ability_E/Pawn_Killjoy_E_Turret.Pawn_Killjoy_E_Turret_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
+    ("ReplicatedMovement", "/Game/Characters/Killjoy/S0/Ability_Q/Pawn_Killjoy_Q_StealthAlarmbot.Pawn_Killjoy_Q_StealthAlarmbot_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
+    ("ReplicatedMovement", "/Game/Characters/Pine/S0/Ability_E/Pawn_Pine_E_RadEater.Pawn_Pine_E_RadEater_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
+    ("ReplicatedMovement", "/Game/Characters/Stealth/S0/Ability_4/Pawn_Stealth_4_Decoy_V2.Pawn_Stealth_4_Decoy_V2_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
+    ("ReplicatedMovement", "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterMoving_FakeTP.Pawn_Stealth_E_TeleporterMoving_FakeTP_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
+    ("ReplicatedMovement", "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterStationary_FakeTP.Pawn_Stealth_E_TeleporterStationary_FakeTP_C", 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }),
     ("RocketIndex", "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C", 244340520, FieldType::Int32),
     ("Rotate Axis Location", "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C", 2055764079, FieldType::VectorDouble),
     ("Rotate Offset", "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C", 3642914479, FieldType::Double),

@@ -1353,6 +1353,87 @@
       "type": "VectorDouble",
       "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.10", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05"],
       "evidence": "2026-09-28. Two legs, not three: Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance_C is not in the 13.06 install (this path is older), so no game class definition speaks for it. The declared compatible checksum 3110715024 reproduces as (TrailPosition, FVector) and not as FVector3f (tools/tests/test_compatible_checksum_facts.py) -- the same name and type the 13.06 classes declare under that checksum. Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 373 main plus 0 checkpoint rows in 18 replays on 9 builds, every one exactly 192 bits; an independent reader (exactly 192 bits read as three little-endian f64, all finite) consumed every payload, 0 failures, none typed before. Values are world positions. One to three values per bolt actor (229 actors: 229 / 124 / 20 with a first / second / third value). The class's own ReplicatedMovement is untyped; read with the repository's independent FRepMovement reader (3,607 of 3,607 payloads consumed exactly with byte rotation) and whole-unit locations -- the level of the typed Sova bolts -- every TrailPosition value lies on the same bolt's spawn + ReplicatedMovement path, at a median 19.9 and at most 63.9 world units (372 of 373 within 50), against a median 1,602.4 (27 within 50) for another bolt's path. Re-exported by this change: all 373 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/BountyHunter/S0/Ability_4/Pawn_BountyHunter_4_WolfHound.Pawn_BountyHunter_4_WolfHound_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-12.00", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 635 spawn joins on 14 builds, ratio p1-p99 99.9986-100.0015, every join within 0.0504 of its spawn at /100; ShortComponents consumes all 635 rows, ByteComponents fails 304."
+    },
+    {
+      "group": "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-12.05", "++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 214 spawn joins on 7 builds, ratio p1-p99 99.9982-100.0013, every join within 0.0502 of its spawn at /100; ShortComponents consumes all 214 rows, ByteComponents fails 112."
+    },
+    {
+      "group": "/Game/Characters/Guide/S0/Ability_X/Pawn_Guide_X_Pack.Pawn_Guide_X_Pack_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.11", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 307 spawn joins on 15 builds, ratio p1-p99 99.9983-100.0021, every join within 0.0504 of its spawn at /100; ShortComponents consumes all 307 rows, ByteComponents fails 167."
+    },
+    {
+      "group": "/Game/Characters/Killjoy/S0/Ability_E/Pawn_Killjoy_E_Turret.Pawn_Killjoy_E_Turret_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-12.00", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 410 spawn joins on 12 builds, ratio p1-p99 99.9989-100.0011, every join within 0.0502 of its spawn at /100; ShortComponents consumes all 410 rows, ByteComponents fails 209."
+    },
+    {
+      "group": "/Game/Characters/Killjoy/S0/Ability_Q/Pawn_Killjoy_Q_StealthAlarmbot.Pawn_Killjoy_Q_StealthAlarmbot_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-12.00", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 269 spawn joins on 12 builds, ratio p1-p99 99.9988-100.0009, every join within 0.0504 of its spawn at /100; ShortComponents consumes all 269 rows, ByteComponents fails 138."
+    },
+    {
+      "group": "/Game/Characters/Pine/S0/Ability_E/Pawn_Pine_E_RadEater.Pawn_Pine_E_RadEater_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-11.11", "++Ares-Core+release-12.03", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 108 spawn joins on 6 builds, ratio p1-p99 99.9991-100.0008, every join within 0.0502 of its spawn at /100; ShortComponents consumes all 108 rows, ByteComponents fails 54."
+    },
+    {
+      "group": "/Game/Characters/Stealth/S0/Ability_4/Pawn_Stealth_4_Decoy_V2.Pawn_Stealth_4_Decoy_V2_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-12.00", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 239 spawn joins on 12 builds, ratio p1-p99 99.9985-100.0018, every join within 0.0504 of its spawn at /100; ShortComponents consumes all 239 rows, ByteComponents fails 135."
+    },
+    {
+      "group": "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterMoving_FakeTP.Pawn_Stealth_E_TeleporterMoving_FakeTP_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-12.00", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 470 spawn joins on 12 builds, ratio p1-p99 99.9986-100.0011, every join within 0.0504 of its spawn at /100; ShortComponents consumes all 470 rows, ByteComponents fails 242."
+    },
+    {
+      "group": "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterStationary_FakeTP.Pawn_Stealth_E_TeleporterStationary_FakeTP_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-12.02", "++Ares-Core+release-12.04", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 37 spawn joins on 9 builds, ratio p1-p99 99.9990-100.0009, every join within 0.0504 of its spawn at /100; ShortComponents consumes all 37 rows, ByteComponents fails 20."
     }
   ]
 }
