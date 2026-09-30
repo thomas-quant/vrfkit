@@ -209,7 +209,7 @@ with 100.
 | Possession state (cameras, drones and other possessable pawns) | `PossessableActorComponent_C.IsPossessed` and `Rift_PossessableActorComponent_C.IsPossessed` (component rows, on the pawn's channel); Cypher's camera `Pawn_Gumshoe_E_PossessableCamera_C.Possessed` / `IsDeployed` (under `Ability_Q/Pawn_Gumshoe_Q_PossessableCamera_C` until 12.08) | ✅ Bool, exact identity. `IsPossessed` is carried by `Pawn_Gumshoe_E_PossessableCamera_C`, `Smonk_PostDeath_PC_C`, `Pawn_Hunter_E_Drone_C`, `Pawn_Guide_Q_PossessableScout_C`, `Pawn_Cashew_4_Spider_LockOn_C`, `Pawn_Gumshoe_Q_PossessableCamera_C`, `Pawn_Aggrobot_RollyPolly_C` and (the Rift component) `Rift_TargetingForm_PC_C`. The camera's `IsDeployed` is one row per camera, always true |
 | Killjoy turret and alarmbot on the ability item | `Ability_Killjoy_{E_Turret,Q_Alarmbot}_C.DeployedActor` | ✅ ObjectNetGuid, exact identity: GUID 0 (null) or the `Pawn_Killjoy_E_Turret_C` / `Pawn_Killjoy_Q_StealthAlarmbot_C` actor of the same export, on every row |
 | Charge of a charged ability | `Comp_Equippable_Charged_C.CurrentCharge` | ✅ Double 0.015..1.0, exact identity; carried by `Ability_Wraith_4_Smoke_C` and `Ability_Mage_E_WorldSmoke_C` channels. The unit is not established |
-| Raze satchel, Paint Shells and rocket position | `ReplicatedMovement` on those projectiles | ◐ raw: declined while the reader read every location at /100, and not typed since -- each class needs its own spawn-join level evidence ([per-class level](#replicatedmovementlocation-is-world-units-at-a-per-class-level)); `actors.parquet` spawn xyz for placement |
+| Raze satchel, Paint Shells and rocket position | `ReplicatedMovement` on `Projectile_Clay_Q_Satchel_Arming_C`, `Projectile_Clay_4_*` (renamed at 13.01) and `Projectile_Clay_X_Rocket_C` | ✅ typed, whole units, main stream only ([per-class level](#replicatedmovementlocation-is-world-units-at-a-per-class-level)) |
 | Guide (Gekko) E projectile flight | `Projectile_Guide_E_HawkFlash_C`: `ReplicatedMovement` (ByteComponents), `Banking` (Double), `PostControlVelocity` | ✅ typed, main stream only (11.06-13.06). `location` is world units (whole units, measured against spawn -- [per-class level](#replicatedmovementlocation-is-world-units-at-a-per-class-level)). Velocity is in world units; roll is never replicated and reads 0. `Banking` is an angle in degrees, -180..180; what it banks is not established |
 | Interaction progress (plant/defuse/orb pickup) | `UsableComponent.HighestProgress` (Float 0..1) / `bIsActive` | ✅ |
 
@@ -426,7 +426,7 @@ crouch speed is ~190 cm/s.
 | Posture (crouch) | `fields.bCrouchHeld` (not movement_state) | ✅ |
 | Trajectory | movement time series per character | ✅ |
 | Force modules on a character (tagging, knockback, movement modifiers) | `ForceModuleManagerComponent` RPCs: `NetMulticastApplyForceModule` -- `Module` (→ `net_guids`, a `ForceModule_*` class), `ModuleType`, `Character` (equals the row's actor), `RespawnNumber`, `NetTimestamp`, `HandleNumber`, `SourceLocation`, `Source`, `Duration`; `NetMulticastRemoveForceModule` -- `HandleNumber`, `ModuleType` | ✅ typed: `Source` and `Duration` by exact group/name/checksum, Remove's `ModuleType` through Apply's checksum, the rest by name. `ModuleType` names are unknown: 0 is most modules and 2 the six displacement ones on Apply; Remove's 1 has no established meaning. `NetTimestamp` is a per-actor/per-life clock, not replay time |
-| Ability projectile, smoke, pawn and dropped-weapon position | `fields.ReplicatedMovement` `location` / `linear_velocity` (JSON in `value_str`) | ✅ world units on the 26 classes the table types and the Boom Bot's scoped entry -- [see below](#replicatedmovementlocation-is-world-units-at-a-per-class-level) |
+| Ability projectile, smoke, deployable, pawn (turret, bot, decoy) and dropped-weapon position | `fields.ReplicatedMovement` `location` / `linear_velocity` (JSON in `value_str`) | ✅ world units on the 86 classes the overlay types (26 in the table, 60 scoped) -- [see below](#replicatedmovementlocation-is-world-units-at-a-per-class-level) |
 
 ### The tick is 128 Hz by a 3:13 pattern, not by alternating
 
@@ -484,13 +484,11 @@ second.
 
 The wire packs `round(world * scale)` and one bit saying "scaled", never the
 scale, and bit consumption does not depend on it, so a wrong divisor decodes
-cleanly. An export from a reader that divided every location by 100 is 100x
-too small on every class but `Pawn_Aggrobot_SeekerNade_C`; multiply to repair it.
+cleanly.
 
 The scale is Unreal's `LocationQuantizationLevel`, a per-class choice the wire
-does not carry, so every `RepMovement` entry in the overlay table now states it
-(`FieldType::RepMovement { rotation, location }`), the way it already stated
-the rotator width.
+does not carry, so every `RepMovement` entry states it beside the rotator width
+(`FieldType::RepMovement { rotation, location }`).
 
 **Method.** Over the 1,018 audited replays (24 builds; the one-replay 12.10,
 12.11 and 13.00 fixtures carry no `ReplicatedMovement` rows). An independent Python reader of the raw bits,
@@ -507,6 +505,9 @@ packed integers. Two checks per class:
 - *Speed.* Consecutive rows of one actor with `0 < dt <= 0.2 s` and
   `|velocity| >= 200`: `(|location step| / dt) / |velocity|` with the location at
   its measured scale. Near 1 means the velocity is whole units too.
+
+`tools/check_rep_movement_levels.py` runs both checks, and the rotator width by
+exact consumption, over any directory of exports.
 
 | Class | Rotator | Location | Spawn joins | Builds | Ratio p1-p99 | Speed check (median, pairs) |
 |---|---|---|---:|---:|---|---|
@@ -546,12 +547,15 @@ in `tools/apply_type_corrections.py`. A rotator flag, if one ever appears,
 decides by exact consumption.
 
 Every class the table types was observed, so no entry rests on the default
-alone. The Boom Bot (`Pawn_Clay_E_Boomba_C`), typed through an exact scoped
-identity (`tools/fixtures/scoped_type_evidence.json`) rather than the table,
-packs two decimals: 2,296 joins over 18 builds, ratio 99.9986-100.0014,
-every component within 0.0504 of spawn. The two-decimal class is also visible in the raw widths: its packed
-components are 17-22 bits wide (median 21), against a median of 14 on every
-whole-unit class.
+alone. Sixty more are exact scoped identities
+(`tools/fixtures/scoped_type_evidence.json`, each entry with its own
+figures), measured by the tool on 123 replays: every replay of the
+11.06-12.09 folders and 15 per 13.x build. The ten `Pawn_*`/`AIPawn_*`
+classes -- the Boom Bot, `Pawn_Killjoy_E_Turret_C` and
+`Pawn_Killjoy_Q_StealthAlarmbot_C` among them -- pack two decimals with short
+rotators (ratio 99.998-100.003, every join within 0.0504 of spawn); the other
+50, Raze's satchel, Paint Shells and rocket among them, pack whole units with
+byte rotators (0.9997-1.0004, within 0.5).
 
 What the evidence does **not** cover:
 
@@ -560,22 +564,22 @@ What the evidence does **not** cover:
   The reader uses whole units for every velocity.
 - **Checkpoints.** No checkpoint table in the 1,018 exports holds a single
   `ReplicatedMovement` row, so every figure above is main-stream only.
-- **Classes nothing types yet.** The same checks on the 67 classes that
-  carried the field untyped when this was measured split cleanly: all ten
-  `Pawn_*`/`AIPawn_*` classes pack two decimals and all 57 others pack whole
-  units. Two of them are typed now -- the Boom Bot (a pawn, scoped) and
-  `Projectile_Guide_E_HawkFlash_C` (the table), both above -- leaving 65:
-  nine pawn classes such as `Pawn_Killjoy_E_Turret_C` and 56 others. That is
-  a pattern for whoever adds one of them, not a reason to skip measuring it.
+- **Six classes left raw**, all whole units. `GameObject_Iris_E_Smoke_C`,
+  `GameObject_Cashew_E_AirStrikeMortar_C`, `Zone_Gumshoe_4_Cage_C` and
+  `Projectile_NetToss_Underhand_C` never send a rotation, so the wire cannot
+  choose the rotator width. Cypher's cage projectile,
+  `Projectile_Gumshoe_4_CageTrap_C`, is `Skip` in the table, and its 13.01
+  successor `Projectile_Gumshoe_Q_CageTrap_C` (byte, like it) stays raw with
+  it: typing one side alone breaks the move `check_entry_survival.py` follows.
 
 **New entries.** Every `RepMovement` entry in `table.rs` is whole units --
-Unreal's own `FRepMovement` default and the level of 25 of the 26 classes
-above -- except SeekerNade, which `apply_type_corrections.py` pins to two
-decimals. A default is a prior, not a measurement, so `tests::overlay` lists every group given a
-`RepMovement` type -- by the table or by `scoped_types.rs` -- with its measured
-level, and fails on a group it does not list: a new class cannot ship on the
-default without somebody running the spawn join first. A `RepMovement` literal
-written without a `location:` does not compile.
+Unreal's own `FRepMovement` default -- except SeekerNade, which
+`apply_type_corrections.py` pins to two decimals. A default is a prior, not a
+measurement, so `tests::overlay` lists every group given a `RepMovement` type
+-- by the table or by `scoped_types.rs` -- with its measured level and fails
+on a group it does not list, and `check_rep_movement_levels.py` exits 1 when
+a typed class measures another level. A `RepMovement` literal written without
+a `location:` does not compile.
 
 ### RPC transforms: `249` is a rotation quaternion, not a rotator
 

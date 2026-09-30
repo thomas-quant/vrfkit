@@ -42,9 +42,9 @@ BYTE_WHOLE = rep_movement("ByteComponents", "RoundWholeNumber")
 TIMED_BOMB = "/Game/GameModes/Bomb/TimedBomb.TimedBomb_C"
 DAMAGE = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_"
 
-#: Gekko's Wingman, the one class whose ReplicatedMovement location packs two
-#: decimals: its first update is 100x the actors.parquet spawn on all 932 actors
-#: (1,018 replays, 15 builds), every component within 0.0502 of it after /100.
+#: Gekko's Wingman, the table's one two-decimal ReplicatedMovement (the other
+#: pawns are scoped): its first update is 100x the actors.parquet spawn on all
+#: 932 actors (1,018 replays, 15 builds), every component within 0.0502 after /100.
 SEEKER_NADE_GROUP = (
     "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade."
     "Pawn_Aggrobot_SeekerNade_C"
