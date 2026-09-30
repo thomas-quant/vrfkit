@@ -16,8 +16,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_export_baseline as guard  # noqa: E402
+from support import TempDirTestCase
+import check_export_baseline as guard
 
 
 def measurement(**overrides):
@@ -62,7 +62,7 @@ class UnpinnableTests(unittest.TestCase):
         self.assertIn("tracked_rewards_opaque_empty_variants", " ".join(reasons))
 
 
-class CrossCheckTests(unittest.TestCase):
+class CrossCheckTests(TempDirTestCase):
     def test_partial_identity_includes_checkpoint_rows_only_when_present(self):
         current = measurement(partial_rows=2, cp_partial_rows=3)
         current["parquet"]["partials"]["rows"] = 5
@@ -139,70 +139,68 @@ class CrossCheckTests(unittest.TestCase):
         self.assertTrue(any("resolved indices" in problem for problem in problems), problems)
 
     def test_checkpoint_measurement_requires_every_new_table_and_zero_dropped_actors(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            out = root / "out"
-            out.mkdir()
-            for name in (*guard.PARQUET_FILES, "checkpoint_fields", "checkpoint_net_guids"):
-                pq.write_table(pa.table({"value": [1]}), out / f"{name}.parquet")
-            (out / "manifest.json").write_text(json.dumps({"quality": {"checkpoints": {
-                "checkpoint_actor_rows_dropped": 0,
-                "checkpoint_path_resolution_mode": "preceding_literal_zero_based",
-                "checkpoint_literal_paths": 1,
-                "checkpoint_indexed_paths": 0,
-                "checkpoint_resolved_path_indices": 0,
-                "checkpoint_guid_entries": 1}}}), encoding="utf-8")
-            with patch.object(guard.sc.subprocess, "run", return_value=SimpleNamespace(
-                    returncode=0, stdout="", stderr="")):
-                with self.assertRaisesRegex(SystemExit, "checkpoint_actors.parquet"):
-                    guard.measure(Path("fake.exe"), root / "sample.vrf", out, checkpoints=True)
+        root = self.tmp()
+        out = root / "out"
+        out.mkdir()
+        for name in (*guard.PARQUET_FILES, "checkpoint_fields", "checkpoint_net_guids"):
+            pq.write_table(pa.table({"value": [1]}), out / f"{name}.parquet")
+        (out / "manifest.json").write_text(json.dumps({"quality": {"checkpoints": {
+            "checkpoint_actor_rows_dropped": 0,
+            "checkpoint_path_resolution_mode": "preceding_literal_zero_based",
+            "checkpoint_literal_paths": 1,
+            "checkpoint_indexed_paths": 0,
+            "checkpoint_resolved_path_indices": 0,
+            "checkpoint_guid_entries": 1}}}), encoding="utf-8")
+        with patch.object(guard.sc.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout="", stderr="")):
+            with self.assertRaisesRegex(SystemExit, "checkpoint_actors.parquet"):
+                guard.measure(Path("fake.exe"), root / "sample.vrf", out, checkpoints=True)
 
-            (out / "manifest.json").write_text(json.dumps({"quality": {"checkpoints": {
-                "checkpoint_actor_rows_dropped": 1,
-                "checkpoint_path_resolution_mode": "preceding_literal_zero_based",
-                "checkpoint_literal_paths": 1,
-                "checkpoint_indexed_paths": 0,
-                "checkpoint_resolved_path_indices": 0,
-                "checkpoint_guid_entries": 1}}}), encoding="utf-8")
-            self.assertIn("expected 0", " ".join(guard.checkpoint_manifest_errors(out)))
+        (out / "manifest.json").write_text(json.dumps({"quality": {"checkpoints": {
+            "checkpoint_actor_rows_dropped": 1,
+            "checkpoint_path_resolution_mode": "preceding_literal_zero_based",
+            "checkpoint_literal_paths": 1,
+            "checkpoint_indexed_paths": 0,
+            "checkpoint_resolved_path_indices": 0,
+            "checkpoint_guid_entries": 1}}}), encoding="utf-8")
+        self.assertIn("expected 0", " ".join(guard.checkpoint_manifest_errors(out)))
 
     def test_checkpoint_manifest_rejects_missing_and_mismatched_path_evidence(self):
-        with tempfile.TemporaryDirectory() as temp:
-            manifest = Path(temp) / "manifest.json"
-            manifest.write_text(json.dumps({"quality": {"checkpoints": {
-                "checkpoint_actor_rows_dropped": 0}}}), encoding="utf-8")
-            self.assertIn("omits required", " ".join(guard.checkpoint_manifest_errors(Path(temp))))
-            manifest.write_text(json.dumps({"quality": {"checkpoints": {
-                "checkpoint_actor_rows_dropped": 0,
-                "checkpoint_path_resolution_mode": "legacy_decimal",
-                "checkpoint_literal_paths": 2,
-                "checkpoint_indexed_paths": 1,
-                "checkpoint_resolved_path_indices": 0,
-                "checkpoint_guid_entries": 4}}}), encoding="utf-8")
-            problems = guard.checkpoint_manifest_errors(Path(temp))
-            self.assertTrue(any("mode" in problem for problem in problems), problems)
-            self.assertTrue(any("literals + indices" in problem for problem in problems), problems)
-            self.assertTrue(any("resolved indices" in problem for problem in problems), problems)
+        temp = self.tmp()
+        manifest = temp / "manifest.json"
+        manifest.write_text(json.dumps({"quality": {"checkpoints": {
+            "checkpoint_actor_rows_dropped": 0}}}), encoding="utf-8")
+        self.assertIn("omits required", " ".join(guard.checkpoint_manifest_errors(temp)))
+        manifest.write_text(json.dumps({"quality": {"checkpoints": {
+            "checkpoint_actor_rows_dropped": 0,
+            "checkpoint_path_resolution_mode": "legacy_decimal",
+            "checkpoint_literal_paths": 2,
+            "checkpoint_indexed_paths": 1,
+            "checkpoint_resolved_path_indices": 0,
+            "checkpoint_guid_entries": 4}}}), encoding="utf-8")
+        problems = guard.checkpoint_manifest_errors(temp)
+        self.assertTrue(any("mode" in problem for problem in problems), problems)
+        self.assertTrue(any("literals + indices" in problem for problem in problems), problems)
+        self.assertTrue(any("resolved indices" in problem for problem in problems), problems)
 
     def test_manifest_path_counts_must_match_summary_and_have_integer_types(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            manifest = root / "manifest.json"
-            cp = {"checkpoint_actor_rows_dropped": 0,
-                  "checkpoint_path_resolution_mode": "preceding_literal_zero_based",
-                  "checkpoint_literal_paths": 2, "checkpoint_indexed_paths": 1,
-                  "checkpoint_resolved_path_indices": 1, "checkpoint_guid_entries": 3}
-            counters = {"cp_literal_paths": 2, "cp_indexed_paths": 1,
-                        "cp_resolved_path_indices": 1, "cp_guid_entries": 3}
-            manifest.write_text(json.dumps({"quality": {"checkpoints": cp}}), encoding="utf-8")
-            self.assertEqual(guard.checkpoint_manifest_errors(root, counters), [])
-            self.assertIn("disagrees", " ".join(guard.checkpoint_manifest_errors(
-                root, dict(counters, cp_literal_paths=3, cp_guid_entries=4))))
-            for value in (None, True, "2", 2.0, -1):
-                with self.subTest(value=value):
-                    changed = dict(cp, checkpoint_literal_paths=value)
-                    manifest.write_text(json.dumps({"quality": {"checkpoints": changed}}), encoding="utf-8")
-                    self.assertIn("nonnegative integers", " ".join(guard.checkpoint_manifest_errors(root)))
+        root = self.tmp()
+        manifest = root / "manifest.json"
+        cp = {"checkpoint_actor_rows_dropped": 0,
+              "checkpoint_path_resolution_mode": "preceding_literal_zero_based",
+              "checkpoint_literal_paths": 2, "checkpoint_indexed_paths": 1,
+              "checkpoint_resolved_path_indices": 1, "checkpoint_guid_entries": 3}
+        counters = {"cp_literal_paths": 2, "cp_indexed_paths": 1,
+                    "cp_resolved_path_indices": 1, "cp_guid_entries": 3}
+        manifest.write_text(json.dumps({"quality": {"checkpoints": cp}}), encoding="utf-8")
+        self.assertEqual(guard.checkpoint_manifest_errors(root, counters), [])
+        self.assertIn("disagrees", " ".join(guard.checkpoint_manifest_errors(
+            root, dict(counters, cp_literal_paths=3, cp_guid_entries=4))))
+        for value in (None, True, "2", 2.0, -1):
+            with self.subTest(value=value):
+                changed = dict(cp, checkpoint_literal_paths=value)
+                manifest.write_text(json.dumps({"quality": {"checkpoints": changed}}), encoding="utf-8")
+                self.assertIn("nonnegative integers", " ".join(guard.checkpoint_manifest_errors(root)))
 
 
 #: Checkpoint GUID declarations, independent of how an index is encoded:
@@ -287,14 +285,13 @@ def write_guid_tables(out, entries, main=MAIN_GUIDS, duplicate=None):
     }), out / "net_guids.parquet")
 
 
-class CheckpointGuidCrossCheckTests(unittest.TestCase):
+class CheckpointGuidCrossCheckTests(TempDirTestCase):
     """The main stream is the independent side of the path-index rule's check."""
 
     def crosscheck(self, entries, main=MAIN_GUIDS, duplicate=None):
-        with tempfile.TemporaryDirectory() as temp:
-            out = Path(temp)
-            write_guid_tables(out, entries, main, duplicate)
-            return guard.checkpoint_guid_crosscheck(out)
+        out = self.tmp()
+        write_guid_tables(out, entries, main, duplicate)
+        return guard.checkpoint_guid_crosscheck(out)
 
     def test_the_readers_rule_agrees_with_the_main_stream(self):
         counts, errors = self.crosscheck(encode_guid_entries())
@@ -406,19 +403,18 @@ class CheckpointGuidCrossCheckTests(unittest.TestCase):
                 self.assertIn("not a complete raw record", " ".join(errors))
 
     def test_a_missing_table_or_column_is_reported_not_raised(self):
-        with tempfile.TemporaryDirectory() as temp:
-            out = Path(temp)
-            write_guid_tables(out, encode_guid_entries())
-            (out / "net_guids.parquet").unlink()
-            counts, errors = guard.checkpoint_guid_crosscheck(out)
-            self.assertIn("cannot read", " ".join(errors))
-            write_guid_tables(out, encode_guid_entries())
-            entries = pq.read_table(out / "checkpoint_guid_entries.parquet")
-            pq.write_table(entries.drop_columns(["name_index"]),
-                           out / "checkpoint_guid_entries.parquet")
-            counts, errors = guard.checkpoint_guid_crosscheck(out)
-            self.assertIn("cannot read", " ".join(errors))
-            self.assertEqual(set(counts.values()), {0})
+        out = self.tmp()
+        write_guid_tables(out, encode_guid_entries())
+        (out / "net_guids.parquet").unlink()
+        counts, errors = guard.checkpoint_guid_crosscheck(out)
+        self.assertIn("cannot read", " ".join(errors))
+        write_guid_tables(out, encode_guid_entries())
+        entries = pq.read_table(out / "checkpoint_guid_entries.parquet")
+        pq.write_table(entries.drop_columns(["name_index"]),
+                       out / "checkpoint_guid_entries.parquet")
+        counts, errors = guard.checkpoint_guid_crosscheck(out)
+        self.assertIn("cannot read", " ".join(errors))
+        self.assertEqual(set(counts.values()), {0})
 
     def test_every_count_is_printed_including_zeros(self):
         counts, _ = self.crosscheck(encode_guid_entries())
@@ -518,16 +514,15 @@ AGREEING_COUNTERS = {**MAIN_SINK, **{"cp_" + k: v for k, v in CP_SINK.items()},
                      "cp_trailing_bytes": 14}
 
 
-class ManifestCheckTests(unittest.TestCase):
+class ManifestCheckTests(TempDirTestCase):
     """Each MANIFEST_CHECKS count must equal the summary's in both passes,
     zeros included, and be a count the manifest actually holds."""
 
     def errors(self, quality, counters, checkpoints=True):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "manifest.json").write_text(json.dumps({"quality": quality}),
-                                                encoding="utf-8")
-            return " ".join(guard.manifest_errors(root, counters, checkpoints))
+        root = self.tmp()
+        (root / "manifest.json").write_text(json.dumps({"quality": quality}),
+                                            encoding="utf-8")
+        return " ".join(guard.manifest_errors(root, counters, checkpoints))
 
     def test_every_count_must_match_the_summary_in_its_pass(self):
         self.assertEqual(self.errors(manifest_quality(), AGREEING_COUNTERS), "")
@@ -574,7 +569,7 @@ class ManifestCheckTests(unittest.TestCase):
                       self.errors(flat, AGREEING_COUNTERS))
 
 
-class MainTests(unittest.TestCase):
+class MainTests(TempDirTestCase):
     """`main`'s input handling: a machine path is never pinned, a bare name
     resolves against VRFKIT_CORPUS_DIR, and a missing replay is fatal only
     when required."""
@@ -600,43 +595,40 @@ class MainTests(unittest.TestCase):
         return code, output.getvalue(), measured
 
     def test_an_absolute_replay_is_refused_before_the_export_runs(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "match.vrf").write_bytes(b"replay")
-            code, output, measured = self.run_main(
-                root, "--replay", str(root / "match.vrf"), "--update")
-            self.assertEqual(code, 2, output)
-            self.assertIn("pass --replay match.vrf", output)
-            measured.assert_not_called()
-            self.assertFalse((root / "baseline.json").exists())
+        root = self.tmp()
+        (root / "match.vrf").write_bytes(b"replay")
+        code, output, measured = self.run_main(
+            root, "--replay", str(root / "match.vrf"), "--update")
+        self.assertEqual(code, 2, output)
+        self.assertIn("pass --replay match.vrf", output)
+        measured.assert_not_called()
+        self.assertFalse((root / "baseline.json").exists())
 
     def test_a_bare_replay_is_pinned_as_given_not_as_resolved(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "match.vrf").write_bytes(b"replay")
-            code, output, measured = self.run_main(root, "--replay", "match.vrf", "--update",
-                                                   corpus_dir=str(root))
-            self.assertEqual(code, 0, output)
-            self.assertEqual(measured.call_args.args[1], root / "match.vrf")
-            stored = json.loads((root / "baseline.json").read_text(encoding="utf-8"))
-            self.assertEqual(stored["replay"], "match.vrf")
+        root = self.tmp()
+        (root / "match.vrf").write_bytes(b"replay")
+        code, output, measured = self.run_main(root, "--replay", "match.vrf", "--update",
+                                               corpus_dir=str(root))
+        self.assertEqual(code, 0, output)
+        self.assertEqual(measured.call_args.args[1], root / "match.vrf")
+        stored = json.loads((root / "baseline.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["replay"], "match.vrf")
 
     def test_a_missing_replay_skips_unless_required(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "baseline.json").write_text(json.dumps({"replay": "missing.vrf"}),
-                                                encoding="utf-8")
-            for extra, require, code, marker in (
-                    ((), None, 0, "SKIP:"), (("--require-input",), None, 2, "REQUIRED INPUT"),
-                    ((), "1", 2, "REQUIRED INPUT MISSING")):
-                with self.subTest(extra=extra, require=require):
-                    got, output, measured = self.run_main(root, *extra, require=require)
-                    self.assertEqual(got, code, output)
-                    self.assertIn(marker, output)
-                    measured.assert_not_called()
+        root = self.tmp()
+        (root / "baseline.json").write_text(json.dumps({"replay": "missing.vrf"}),
+                                            encoding="utf-8")
+        for extra, require, code, marker in (
+                ((), None, 0, "SKIP:"), (("--require-input",), None, 2, "REQUIRED INPUT"),
+                ((), "1", 2, "REQUIRED INPUT MISSING")):
+            with self.subTest(extra=extra, require=require):
+                got, output, measured = self.run_main(root, *extra, require=require)
+                self.assertEqual(got, code, output)
+                self.assertIn(marker, output)
+                measured.assert_not_called()
 
 
-class TransactionalOutputTests(unittest.TestCase):
+class TransactionalOutputTests(TempDirTestCase):
     SUMMARY = """
 Total content blocks: 1
 Fields emitted: 1
@@ -655,9 +647,7 @@ ActiveBlinds trailers: 0 empty deltas
 """
 
     def run_fake_export(self, *, fail: bool):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
+        root = self.tmp()
         replay = root / "match.vrf"
         replay.write_bytes(b"replay")
         output = root / "published"
@@ -693,9 +683,7 @@ ActiveBlinds trailers: 0 empty deltas
                 encoding="utf-8",
             )
 
-        previous = Path.cwd()
-        os.chdir(root)
-        try:
+        with contextlib.chdir(root):
             if fail:
                 with self.assertRaises(SystemExit) as caught:
                     guard.measure(Path(sys.executable), replay, output)
@@ -704,8 +692,6 @@ ActiveBlinds trailers: 0 empty deltas
                 result = None
             else:
                 result = guard.measure(Path(sys.executable), replay, output)
-        finally:
-            os.chdir(previous)
         return output, sentinel, result
 
     def test_failed_export_preserves_previous_complete_output(self):
@@ -720,7 +706,3 @@ ActiveBlinds trailers: 0 empty deltas
         self.assertFalse(sentinel.exists())
         self.assertTrue((output / "fields.parquet").is_file())
         self.assertEqual(result["parquet"]["fields"]["rows"], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

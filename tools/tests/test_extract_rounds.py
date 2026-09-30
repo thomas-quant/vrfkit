@@ -1,18 +1,12 @@
 """`extract_rounds.py`: rows come from the phase RPCs, never from RoundResults."""
 from __future__ import annotations
 
-import contextlib
-import io
-import sys
-import tempfile
-import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_rounds as rounds  # noqa: E402
+from support import TempDirTestCase, run_cli
+import extract_rounds as rounds
 
 
 def phase_rows(reset, *, buy_end=True, post=True):
@@ -36,11 +30,10 @@ EVENTS = [("roundStarted", 1011, 0), ("spikePlanted", 2200, None),
           ("spikeExploded", 2490, None), ("roundStarted", 2010, 1)]
 
 
-class ExtractRoundsTests(unittest.TestCase):
+class ExtractRoundsTests(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.export = Path(self._tmp.name) / "export"
+        self.root = self.tmp()
+        self.export = self.root / "export"
         self.export.mkdir()
 
     def write(self, fields, events):
@@ -63,10 +56,7 @@ class ExtractRoundsTests(unittest.TestCase):
         return self.write(fields, events)
 
     def run_main(self, out):
-        with contextlib.redirect_stdout(io.StringIO()) as stdout, \
-                contextlib.redirect_stderr(io.StringIO()) as stderr:
-            code = rounds.main(["--export", str(self.export), "--out", str(out)])
-        return code, stdout.getvalue(), stderr.getvalue()
+        return run_cli(rounds.main, "--export", self.export, "--out", out)
 
     def test_a_round_is_its_phases_joined_to_its_events_and_result(self):
         rows, counts, problems = rounds.build(self.two_rounds())
@@ -82,7 +72,7 @@ class ExtractRoundsTests(unittest.TestCase):
 
     def test_a_buy_phase_end_off_its_rpc_fails_and_writes_nothing(self):
         self.two_rounds(move_buy_end=7)
-        out = Path(self._tmp.name) / "rounds.parquet"
+        out = self.root / "rounds.parquet"
         code, _, stderr = self.run_main(out)
         self.assertEqual(code, 1)
         self.assertIn("phase 4", stderr)
@@ -123,7 +113,7 @@ class ExtractRoundsTests(unittest.TestCase):
         self.assertEqual([(r["side_switch_ms"], r["buy_end_ms"], r["round_number"]) for r in rows],
                          [(1600, 1100, None), (None, None, None)])
         self.write(fields(1601), [])
-        code, _, stderr = self.run_main(Path(self._tmp.name) / "rounds.parquet")
+        code, _, stderr = self.run_main(self.root / "rounds.parquet")
         self.assertEqual(code, 1)
         self.assertIn("phase 6", stderr)
 
@@ -136,7 +126,7 @@ class ExtractRoundsTests(unittest.TestCase):
 
     def test_the_cli_writes_the_table_and_prints_every_count(self):
         self.two_rounds()
-        out = Path(self._tmp.name) / "rounds.parquet"
+        out = self.root / "rounds.parquet"
         code, stdout, _ = self.run_main(out)
         self.assertEqual(code, 0)
         self.assertEqual(pq.read_table(out).schema, rounds.SCHEMA)
@@ -144,7 +134,3 @@ class ExtractRoundsTests(unittest.TestCase):
             self.assertIn(f"  {key}: ", stdout)
         self.assertIn("  non-null: round_ordinal 2, round_number 2, reset_ms 2", stdout)
         self.assertEqual(self.run_main(self.export / "fields.parquet")[0], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

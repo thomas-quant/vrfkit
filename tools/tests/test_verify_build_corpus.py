@@ -1,7 +1,6 @@
 """Ensure a uniform audit cannot turn missing work or preserved loss into a pass."""
 from copy import deepcopy
 from pathlib import Path
-import sys
 import unittest
 from unittest.mock import patch
 import json
@@ -13,7 +12,7 @@ from io import StringIO
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support import TempDirTestCase
 import verify_build_corpus as audit
 
 
@@ -208,12 +207,10 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(build["checkpoint_evidence"], "absent")
 
 
-class AuditExecutionTests(unittest.TestCase):
+class AuditExecutionTests(TempDirTestCase):
     """Exercise the orchestration seam with controlled external process outputs."""
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = self.tmp()
         self.replay = self.root / "private.vrf"
         self.replay.write_bytes(b"replay fixture")
         self.digest = audit.sha256_file(self.replay)
@@ -234,7 +231,7 @@ class AuditExecutionTests(unittest.TestCase):
             output = Path(args[args.index("--out") + 1])
             output.mkdir()
             if self.write_manifest:
-                (output / "manifest.json").write_text(json.dumps(self.data))
+                (output / "manifest.json").write_text(json.dumps(self.data), encoding="utf-8")
         return subprocess.CompletedProcess(args, self.codes[command == "export"],
                                            stdout=ValidationTests.TEXT if command == "validate" else "export", stderr="")
 
@@ -251,7 +248,7 @@ class AuditExecutionTests(unittest.TestCase):
                                                           self.guid_counts)))
             stack.enter_context(patch.object(audit.evidence, "validate", side_effect=evidence_result))
             result = audit.audit_one((self.digest, self.replay), Path("vrfkit.exe"), self.work, [])
-        saved = json.loads((self.work / self.digest / "result.json").read_text())
+        saved = json.loads((self.work / self.digest / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(result, saved)
         return result, run
 
@@ -319,7 +316,7 @@ class AuditExecutionTests(unittest.TestCase):
         result, _ = self.run_audit(error=error)
         self.assertTrue(result["failures"])
         self.assertNotIn(str(self.root), json.dumps(result))
-        self.assertIn(repr(str(self.replay)), (self.work / self.digest / "error.txt").read_text())
+        self.assertIn(repr(str(self.replay)), (self.work / self.digest / "error.txt").read_text(encoding="utf-8"))
 
     def test_guid_crosscheck_counts_reach_the_result_zeros_included(self):
         result, _ = self.run_audit()
@@ -367,11 +364,9 @@ class CheckExportTests(unittest.TestCase):
             self.assertIn("indexed path differs 2", str(raised.exception))
 
 
-class AuditCommandTests(unittest.TestCase):
+class AuditCommandTests(TempDirTestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = self.tmp()
         self.corpus = self.root / "corpus"
         self.corpus.mkdir()
         (self.corpus / "a.vrf").write_bytes(b"sample")
@@ -391,7 +386,7 @@ class AuditCommandTests(unittest.TestCase):
                                "checkpoint_overlay_decoded_ok": int(checkpoint)}}
         with patch.object(audit, "audit_one", side_effect=inspect), redirect_stdout(StringIO()):
             code = audit.main(self.args)
-        return code, json.loads(self.output.read_text())
+        return code, json.loads(self.output.read_text(encoding="utf-8"))
 
     def test_content_duplicates_are_checked_once_including_nested_uppercase_vrf(self):
         nested = self.corpus / "nested"
@@ -420,11 +415,11 @@ class AuditCommandTests(unittest.TestCase):
         self.assertTrue(report["executable_changed"])
 
     def test_existing_output_is_never_overwritten(self):
-        self.output.write_text("keep me")
+        self.output.write_text("keep me", encoding="utf-8")
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
             audit.main(self.args)
         self.assertEqual(raised.exception.code, 2)
-        self.assertEqual(self.output.read_text(), "keep me")
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "keep me")
 
     def test_empty_corpus_is_an_error(self):
         empty = self.root / "empty"
@@ -434,7 +429,3 @@ class AuditCommandTests(unittest.TestCase):
             audit.main(self.args)
         self.assertEqual(raised.exception.code, 2)
         self.assertFalse(self.output.exists())
-
-
-if __name__ == "__main__":
-    unittest.main()

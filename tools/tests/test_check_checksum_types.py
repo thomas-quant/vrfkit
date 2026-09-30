@@ -11,17 +11,14 @@ if four things hold, each breakable without anything else noticing:
     other mismatch still fails, and an item that applies to the input and
     covers nothing is STALE and fails.
 """
-import contextlib
-import io
 import json
 import random
-import sys
-import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_checksum_types as cct  # noqa: E402
+from support import TempDirTestCase, run_cli
+import check_checksum_types as cct
 
 
 # A second implementation of the formula, written from UE 5.3 FCrc rather than
@@ -608,10 +605,7 @@ def write_export(root: Path, name: str, groups, build="++Ares-Core+release-13.06
 
 
 def run_main(*argv):
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cct.main(list(argv))
-    return code, out.getvalue(), err.getvalue()
+    return run_cli(cct.main, *argv)
 
 
 # Identities typed by the committed tables in ways no pending change touches:
@@ -636,13 +630,9 @@ def write_checkpoint(d: Path, groups=((0, INVENTORY),), **fields):
                    d / "checkpoint_export_fields.parquet")
 
 
-class MainTests(unittest.TestCase):
+class MainTests(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
+        self.root = self.tmp()
 
     def test_a_clean_export_exits_0_and_prints_its_zeros(self):
         d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX),
@@ -681,12 +671,8 @@ class MainTests(unittest.TestCase):
         d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
         trimmed = {k: v for k, v in cct.CPP_TYPES.items() if k != "FTextTree"}
         self.assertNotEqual(len(trimmed), len(cct.CPP_TYPES), "the fixture must remove a variant")
-        original = cct.CPP_TYPES
-        cct.CPP_TYPES = trimmed
-        try:
+        with mock.patch.object(cct, "CPP_TYPES", trimmed):
             code, out, err = run_main("--export", str(d))
-        finally:
-            cct.CPP_TYPES = original
         self.assertEqual(code, 2, out + err)
         self.assertIn("FieldType variant(s) ['FTextTree'] are not classified in CPP_TYPES", err)
         self.assertNotIn("OK:", out)
@@ -905,14 +891,14 @@ class ExpectedShapeTests(unittest.TestCase):
         self.assertEqual(cct.declared_checksums(ids), {5})
 
 
-class ExpectedListLoadTests(unittest.TestCase):
+class ExpectedListLoadTests(TempDirTestCase):
     PARENTS = {label for label, _ in cct.Seeds().named}
 
     def load(self, items):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "expected.json"
-            path.write_text(json.dumps({"expected": items}), encoding="utf-8")
-            return cct.load_expected(path, self.PARENTS)
+        tmp = self.tmp()
+        path = tmp / "expected.json"
+        path.write_text(json.dumps({"expected": items}), encoding="utf-8")
+        return cct.load_expected(path, self.PARENTS)
 
     def test_an_item_loads_with_its_type_canonical(self):
         (item,) = self.load([listed(vrfkit_type="FieldType::VectorDouble")])
@@ -944,15 +930,15 @@ class ExpectedListLoadTests(unittest.TestCase):
             self.load([listed(), listed(reason="the same shape again")])
 
     def test_a_file_that_is_not_a_list_is_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "expected.json"
-            for text in ("not json", json.dumps({"items": []}), json.dumps([listed()])):
-                with self.subTest(text=text[:20]):
-                    path.write_text(text, encoding="utf-8")
-                    with self.assertRaises(cct.ExpectedListError):
-                        cct.load_expected(path, self.PARENTS)
-            with self.assertRaises(cct.ExpectedListError):
-                cct.load_expected(Path(tmp) / "absent.json", self.PARENTS)
+        tmp = self.tmp()
+        path = tmp / "expected.json"
+        for text in ("not json", json.dumps({"items": []}), json.dumps([listed()])):
+            with self.subTest(text=text[:20]):
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(cct.ExpectedListError):
+                    cct.load_expected(path, self.PARENTS)
+        with self.assertRaises(cct.ExpectedListError):
+            cct.load_expected(tmp / "absent.json", self.PARENTS)
 
     def test_every_committed_item_is_a_real_mismatch(self):
         """Each committed item's arithmetic, recomputed with the tool and with
@@ -983,15 +969,11 @@ class ExpectedListLoadTests(unittest.TestCase):
                 self.assertTrue(item.reason.isascii() and item.evidence.isascii())
 
 
-class ExpectedMainTests(unittest.TestCase):
+class ExpectedMainTests(TempDirTestCase):
     """End to end, through `main` and the committed tables."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
+        self.root = self.tmp()
 
     def write_list(self, *items) -> Path:
         path = self.root / "expected.json"
@@ -1088,7 +1070,3 @@ class ExpectedMainTests(unittest.TestCase):
                 code, _, err = run_main("--export", str(d), "--expected", str(path))
                 self.assertEqual(code, 2)
                 self.assertIn("FAILED: expected list", err)
-
-
-if __name__ == "__main__":
-    unittest.main()

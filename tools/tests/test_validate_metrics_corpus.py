@@ -2,63 +2,51 @@
 even when another completes, and a previous run's output is never read as
 this run's (see `fresh_dir`).
 """
-import contextlib
-import io
 import json
 import sys
-import tempfile
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import validate_metrics_corpus as guard  # noqa: E402
+from support import TempDirTestCase, run_cli
+import validate_metrics_corpus as guard
 
 OK = {"id": "a", "stage": "ok", "elapsed_s": 1.0, "sections": {"combat": "EXACT"}}
 
 
-class FreshDirTests(unittest.TestCase):
+class FreshDirTests(TempDirTestCase):
     def test_a_stale_file_does_not_survive_into_the_next_run(self):
-        with tempfile.TemporaryDirectory() as parent:
-            target = Path(parent) / "xval" / "some-id"
-            target.mkdir(parents=True)
-            stale = target / "metrics.json"
-            stale.write_text('{"combat": "from the previous run"}',
-                             encoding="utf-8")
+        parent = self.tmp()
+        target = parent / "xval" / "some-id"
+        target.mkdir(parents=True)
+        stale = target / "metrics.json"
+        stale.write_text('{"combat": "from the previous run"}',
+                         encoding="utf-8")
 
-            guard.fresh_dir(target)
+        guard.fresh_dir(target)
 
-            self.assertTrue(target.is_dir())
-            self.assertFalse(stale.exists())
+        self.assertTrue(target.is_dir())
+        self.assertFalse(stale.exists())
 
     def test_a_directory_that_does_not_exist_yet_is_created(self):
-        with tempfile.TemporaryDirectory() as parent:
-            target = Path(parent) / "never" / "existed"
-            guard.fresh_dir(target)
-            self.assertTrue(target.is_dir())
+        parent = self.tmp()
+        target = parent / "never" / "existed"
+        guard.fresh_dir(target)
+        self.assertTrue(target.is_dir())
 
 
-class UnsafeReplayIdTests(unittest.TestCase):
+class UnsafeReplayIdTests(TempDirTestCase):
     """An untrusted --only value must never become an rmtree target."""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        self.saved = {name: getattr(guard, name)
-                      for name in ("REPO", "EXPORTS", "VRF_DIR", "VRFKIT")}
-        guard.REPO = self.root / "repo"
-        guard.EXPORTS = self.root / "references"
-        guard.VRF_DIR = self.root / "replays"
-        guard.VRFKIT = Path(sys.executable)
+        self.root = self.tmp()
+        self.enterContext(mock.patch.multiple(
+            guard, REPO=self.root / "repo", EXPORTS=self.root / "references",
+            VRF_DIR=self.root / "replays", VRFKIT=Path(sys.executable)))
         for directory in (guard.REPO, guard.EXPORTS, guard.VRF_DIR):
             directory.mkdir(parents=True)
-
-    def tearDown(self):
-        for name, value in self.saved.items():
-            setattr(guard, name, value)
-        self.temp.cleanup()
 
     def _assert_rejected_without_deleting(self, replay_id: str, victim: Path):
         victim.mkdir(parents=True)
@@ -132,14 +120,12 @@ class _SyncPool:
         return fut
 
 
-class MainWiringTests(unittest.TestCase):
+class MainWiringTests(TempDirTestCase):
     """`failures()` is pinned on synthetic results above; these pin that
     `main()` calls it and acts on what it returns."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        root = Path(self._tmp.name)
+        root = self.tmp()
         self.root = root
 
         vrf_dir = root / "vrf"
@@ -193,19 +179,11 @@ class MainWiringTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-        self._argv = sys.argv
-
     def run_main(self, only=("a", "b"), extra=()):
-        sys.argv = ["validate_metrics_corpus.py", "--jobs", "1", *extra]
-        for r in only:
-            sys.argv += ["--only", r]
-        out = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                code = guard.main()
-        finally:
-            sys.argv = self._argv
-        return code, out.getvalue()
+        only = [arg for r in only for arg in ("--only", r)]
+        code, out, _ = run_cli(guard.main, "--jobs", "1", *extra, *only,
+                               prog="validate_metrics_corpus.py", merged=True)
+        return code, out
 
     def test_one_completed_replay_does_not_mask_a_dead_one(self):
         """`a` finishes and `b` never does: the run still fails."""
@@ -239,7 +217,3 @@ class MainWiringTests(unittest.TestCase):
                 [sys.executable, str(guard.cmb.COMPUTE_METRICS), str(bundle_dir)],
             ],
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

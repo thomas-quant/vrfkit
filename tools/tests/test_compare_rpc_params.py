@@ -10,8 +10,6 @@ describes (STALE fails the run).
 import collections
 import io
 import json
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,8 +18,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import compare_rpc_params as guard  # noqa: E402
+from support import TempDirTestCase, run_cli
+import compare_rpc_params as guard
 
 
 ONE_RPC = {"MulticastEndRound": [("NewRoundNumber", "int")]}
@@ -39,9 +37,7 @@ def records(values=None):
 
 def run(**kwargs):
     """`main`'s exit code and what it printed."""
-    with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
-        code = guard.main(**kwargs)
-    return code, out.getvalue()
+    return run_cli(lambda _: guard.main(**kwargs))[:2]
 
 
 class ExitCodeTests(unittest.TestCase):
@@ -174,11 +170,9 @@ def write_ours(path, rows):
     return path
 
 
-class FileTest(unittest.TestCase):
+class FileTest(TempDirTestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.dir = Path(tmp.name)
+        self.dir = self.tmp()
 
     def compare_files(self, reference_rows, our_rows, sha=LISTED.replay_sha256):
         reference = write_reference(self.dir, reference_rows, sha)
@@ -296,7 +290,3 @@ class RecordTests(FileTest):
                          guard.load_rust_records(ours))
         self.assertEqual(guard.load_cs_records(reference)[0][0],
                          (1000, 576, 576, 10, "MulticastNotifyKilledEnemy"))
-
-
-if __name__ == "__main__":
-    unittest.main()

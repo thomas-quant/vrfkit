@@ -6,17 +6,15 @@ import contextlib
 import io
 import json
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import compare_with_csharp as guard  # noqa: E402
+from support import TempDirTestCase
+import compare_with_csharp as guard
 
 
 PAIR_A = ("/Script/ShooterGame.Thing", "Health")
@@ -46,24 +44,23 @@ class CoverageProblemTests(unittest.TestCase):
         self.assertEqual(guard.coverage_problems({PAIR_A, PAIR_B}, {PAIR_A}), [])
 
 
-class CoverageTextTests(unittest.TestCase):
+class CoverageTextTests(TempDirTestCase):
     def test_unattributed_rows_are_counted_without_becoming_named_coverage(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            events = root / "events.ndjson"
-            events.write_text("\n".join(json.dumps(row) for row in [
-                {"type": "export_group_received", "export_group_path": PAIR_A[0],
-                 "payload": {"Health": 100}},
-                {"type": "export_group_received", "export_group_path": None,
-                 "payload": {"Health": 100}},
-            ]), encoding="utf-8")
-            parquet = root / "fields.parquet"
-            pq.write_table(pa.table({
-                "group_path": [PAIR_A[0], PAIR_A[0], None, PAIR_A[0]],
-                "field_name": ["Health", None, "Health",
-                               guard.UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME],
-            }), parquet)
-            report, problems = guard.compare_group_field_coverage(events, parquet)
+        root = self.tmp()
+        events = root / "events.ndjson"
+        events.write_text("\n".join(json.dumps(row) for row in [
+            {"type": "export_group_received", "export_group_path": PAIR_A[0],
+             "payload": {"Health": 100}},
+            {"type": "export_group_received", "export_group_path": None,
+             "payload": {"Health": 100}},
+        ]), encoding="utf-8")
+        parquet = root / "fields.parquet"
+        pq.write_table(pa.table({
+            "group_path": [PAIR_A[0], PAIR_A[0], None, PAIR_A[0]],
+            "field_name": ["Health", None, "Health",
+                           guard.UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME],
+        }), parquet)
+        report, problems = guard.compare_group_field_coverage(events, parquet)
         self.assertEqual(problems, [])
         self.assertIn("Distinct (group, field) pairs from vrfkit: 1", report)
         self.assertIn("vrfkit rows without a group/name: 2 (excluded)", report)
@@ -84,7 +81,7 @@ class CoverageTextTests(unittest.TestCase):
         self.assertIn("Armor", joined)
 
 
-class RpcNameTests(unittest.TestCase):
+class RpcNameTests(TempDirTestCase):
     """vrfkit writes no RPC-name column or manifest key: its RPC names are the
     `Function.` prefixes of its ClassNetCache rows, the rows
     to_valplay_bundle.py builds rpc_received from."""
@@ -92,37 +89,36 @@ class RpcNameTests(unittest.TestCase):
     CNC = "/Script/ShooterGame.Thing_ClassNetCache"
 
     def section_4(self) -> str:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            cs, vk = root / "cs", root / "vk"
-            cs.mkdir()
-            vk.mkdir()
-            (cs / "manifest.json").write_text("{}", encoding="utf-8")
-            (vk / "manifest.json").write_text("{}", encoding="utf-8")
-            (cs / "events.ndjson").write_text("".join(json.dumps(row) + "\n" for row in [
-                {"type": "export_group_received", "export_group_path": PAIR_A[0],
-                 "payload": {"Health": 100}},
-                {"type": "rpc_received", "function_name": "MulticastShared"},
-                {"type": "rpc_received", "function_name": "MulticastShared"},
-                {"type": "rpc_received", "function_name": "ClientCsharpOnly"},
-            ]), encoding="utf-8")
-            rows = [
-                (PAIR_A[0], "Health"),
-                (self.CNC, "MulticastShared.Damage"),
-                (self.CNC, "MulticastShared.Target"),
-                (self.CNC, "ZeroParamOnly"),        # a zero-parameter RPC is its bare name
-                (self.CNC, guard.UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME),
-                (self.CNC, None),
-                (PAIR_A[0], "Rounds[3].Score"),     # an array leaf, not an RPC
-            ]
-            pq.write_table(pa.table({"group_path": [g for g, _ in rows],
-                                     "field_name": [f for _, f in rows]}),
-                           vk / "fields.parquet")
-            output = io.StringIO()
-            with mock.patch.object(sys, "argv", ["compare_with_csharp.py", str(cs), str(vk)]), \
-                    contextlib.redirect_stdout(output), \
-                    contextlib.redirect_stderr(io.StringIO()):
-                guard.main()
+        root = self.tmp()
+        cs, vk = root / "cs", root / "vk"
+        cs.mkdir()
+        vk.mkdir()
+        (cs / "manifest.json").write_text("{}", encoding="utf-8")
+        (vk / "manifest.json").write_text("{}", encoding="utf-8")
+        (cs / "events.ndjson").write_text("".join(json.dumps(row) + "\n" for row in [
+            {"type": "export_group_received", "export_group_path": PAIR_A[0],
+             "payload": {"Health": 100}},
+            {"type": "rpc_received", "function_name": "MulticastShared"},
+            {"type": "rpc_received", "function_name": "MulticastShared"},
+            {"type": "rpc_received", "function_name": "ClientCsharpOnly"},
+        ]), encoding="utf-8")
+        rows = [
+            (PAIR_A[0], "Health"),
+            (self.CNC, "MulticastShared.Damage"),
+            (self.CNC, "MulticastShared.Target"),
+            (self.CNC, "ZeroParamOnly"),        # a zero-parameter RPC is its bare name
+            (self.CNC, guard.UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME),
+            (self.CNC, None),
+            (PAIR_A[0], "Rounds[3].Score"),     # an array leaf, not an RPC
+        ]
+        pq.write_table(pa.table({"group_path": [g for g, _ in rows],
+                                 "field_name": [f for _, f in rows]}),
+                       vk / "fields.parquet")
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["compare_with_csharp.py", str(cs), str(vk)]), \
+                contextlib.redirect_stdout(output), \
+                contextlib.redirect_stderr(io.StringIO()):
+            guard.main()
         report = output.getvalue()
         return report.split("## 4. RPC name comparison", 1)[1].split("## 5.", 1)[0]
 
@@ -138,34 +134,33 @@ class RpcNameTests(unittest.TestCase):
         self.assertNotIn("rpcs_by_name", section)
 
 
-class MovementMultiplicityTests(unittest.TestCase):
+class MovementMultiplicityTests(TempDirTestCase):
     def compare(self, csharp_rows: list[dict], vrfkit_rows: list[dict]) -> str:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            csharp = root / "movement.ndjson"
-            parquet = root / "movement.parquet"
-            csharp.write_text(
-                "".join(json.dumps(row) + "\n" for row in csharp_rows),
-                encoding="utf-8",
-            )
-            table = pa.table(
-                {
-                    "time_ms": pa.array([r["time_ms"] for r in vrfkit_rows], pa.uint32()),
-                    "character_net_guid": pa.array(
-                        [r["character_net_guid"] for r in vrfkit_rows], pa.uint32()
-                    ),
-                    "pos_x": pa.array([r.get("pos_x", 0.0) for r in vrfkit_rows]),
-                    "pos_y": pa.array([r.get("pos_y", 0.0) for r in vrfkit_rows]),
-                    "pos_z": pa.array([r.get("pos_z", 0.0) for r in vrfkit_rows]),
-                    "yaw": pa.array([r.get("yaw", 0.0) for r in vrfkit_rows]),
-                    "pitch": pa.array([r.get("pitch", 0.0) for r in vrfkit_rows]),
-                    "vel_x": pa.array([r.get("vel_x", 0.0) for r in vrfkit_rows]),
-                    "vel_y": pa.array([r.get("vel_y", 0.0) for r in vrfkit_rows]),
-                    "vel_z": pa.array([r.get("vel_z", 0.0) for r in vrfkit_rows]),
-                }
-            )
-            pq.write_table(table, parquet)
-            return guard.compare_movement(csharp, parquet)
+        root = self.tmp()
+        csharp = root / "movement.ndjson"
+        parquet = root / "movement.parquet"
+        csharp.write_text(
+            "".join(json.dumps(row) + "\n" for row in csharp_rows),
+            encoding="utf-8",
+        )
+        table = pa.table(
+            {
+                "time_ms": pa.array([r["time_ms"] for r in vrfkit_rows], pa.uint32()),
+                "character_net_guid": pa.array(
+                    [r["character_net_guid"] for r in vrfkit_rows], pa.uint32()
+                ),
+                "pos_x": pa.array([r.get("pos_x", 0.0) for r in vrfkit_rows]),
+                "pos_y": pa.array([r.get("pos_y", 0.0) for r in vrfkit_rows]),
+                "pos_z": pa.array([r.get("pos_z", 0.0) for r in vrfkit_rows]),
+                "yaw": pa.array([r.get("yaw", 0.0) for r in vrfkit_rows]),
+                "pitch": pa.array([r.get("pitch", 0.0) for r in vrfkit_rows]),
+                "vel_x": pa.array([r.get("vel_x", 0.0) for r in vrfkit_rows]),
+                "vel_y": pa.array([r.get("vel_y", 0.0) for r in vrfkit_rows]),
+                "vel_z": pa.array([r.get("vel_z", 0.0) for r in vrfkit_rows]),
+            }
+        )
+        pq.write_table(table, parquet)
+        return guard.compare_movement(csharp, parquet)
 
     @staticmethod
     def csharp_row(x: float) -> dict:
@@ -203,7 +198,3 @@ class MovementMultiplicityTests(unittest.TestCase):
                                        "pos_x": 1, "yaw": 170.0}])
         self.assertIn("Yaw: no data", report)
         self.assertIn("Pitch (1 rows)", report)
-
-
-if __name__ == "__main__":
-    unittest.main()

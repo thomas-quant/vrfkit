@@ -1,21 +1,15 @@
 import json
-import sys
-import tempfile
-import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
+from support import TempDirTestCase
 import extract_player_effects as effects
 
 
-class PlayerEffectTests(unittest.TestCase):
+class PlayerEffectTests(TempDirTestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = self.tmp()
 
     def export(self, fields, players=None):
         if players is None:
@@ -150,7 +144,3 @@ class PlayerEffectTests(unittest.TestCase):
         self.assertIsNone(doc["records"][0]["values"]["InitialDuration"])
         self.assertNotIn("EffectID", doc["records"][0]["values"])
         self.assertEqual(doc["totals"]["untyped_members"], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

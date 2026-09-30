@@ -1,20 +1,16 @@
 """Guards for the shared `.vrf` corpus discovery: top level by default, the
 subdirectory files it leaves out always counted, case-insensitive suffixes."""
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import corpus_scan  # noqa: E402
+from support import TempDirTestCase
+import corpus_scan
 
 
-class DiscoverTests(unittest.TestCase):
+class DiscoverTests(TempDirTestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = self.tmp()
         for name in ("a.vrf", "b.vrf", "old/c.vrf", "old/d.vrf", "old/e.vrf", "notes.txt"):
             (self.root / name).parent.mkdir(exist_ok=True)
             (self.root / name).write_bytes(b"")
@@ -31,37 +27,35 @@ class DiscoverTests(unittest.TestCase):
 
     def test_a_flat_corpus_excludes_nothing_either_way(self):
         """No subdirectory at all: both modes must agree, and say so."""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            (root / "a.vrf").write_bytes(b"")
-            (root / "b.vrf").write_bytes(b"")
-            flat = corpus_scan.discover(root, recursive=False)
-            deep = corpus_scan.discover(root, recursive=True)
-            self.assertEqual(flat.excluded, 0)
-            self.assertEqual([p.name for p in flat.files], [p.name for p in deep.files])
+        root = self.tmp()
+        (root / "a.vrf").write_bytes(b"")
+        (root / "b.vrf").write_bytes(b"")
+        flat = corpus_scan.discover(root, recursive=False)
+        deep = corpus_scan.discover(root, recursive=True)
+        self.assertEqual(flat.excluded, 0)
+        self.assertEqual([p.name for p in flat.files], [p.name for p in deep.files])
 
     def test_uppercase_extension_is_a_replay_on_case_sensitive_filesystems(self):
         """POSIX glob("*.vrf") does not match MATCH.VRF."""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            lower = root / "lower.vrf"
-            upper = root / "UPPER.VRF"
-            lower.write_bytes(b"")
-            upper.write_bytes(b"")
+        root = self.tmp()
+        lower = root / "lower.vrf"
+        upper = root / "UPPER.VRF"
+        lower.write_bytes(b"")
+        upper.write_bytes(b"")
 
-            class CaseSensitiveRoot:
-                """Expose POSIX-style glob results even when this test runs on Windows."""
+        class CaseSensitiveRoot:
+            """Expose POSIX-style glob results even when this test runs on Windows."""
 
-                def glob(self, pattern):
-                    if pattern == "*.vrf":
-                        return iter([lower])
-                    if pattern == "*":
-                        return iter([lower, upper])
-                    raise AssertionError(pattern)
+            def glob(self, pattern):
+                if pattern == "*.vrf":
+                    return iter([lower])
+                if pattern == "*":
+                    return iter([lower, upper])
+                raise AssertionError(pattern)
 
-                rglob = glob
+            rglob = glob
 
-            scan = corpus_scan.discover(CaseSensitiveRoot(), recursive=True)
+        scan = corpus_scan.discover(CaseSensitiveRoot(), recursive=True)
 
         self.assertEqual({p.name for p in scan.files}, {"UPPER.VRF", "lower.vrf"})
 
@@ -106,7 +100,3 @@ class DiagnosticTests(unittest.TestCase):
     def test_unredacted_diagnostic_preserves_existing_output(self):
         detail = "exit 1: useful diagnostic"
         self.assertEqual(corpus_scan.diagnostic(detail, False), detail)
-
-
-if __name__ == "__main__":
-    unittest.main()

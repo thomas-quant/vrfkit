@@ -5,19 +5,17 @@ none, so team_score was empty.
 """
 import contextlib
 import copy
-import io
 import json
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_metrics_baseline as guard  # noqa: E402
+from support import TempDirTestCase, run_cli
+import check_metrics_baseline as guard
 
 
 # A healthy 13.02 fixture run, as pinned.
@@ -304,14 +302,12 @@ print("metrics ok")
 '''
 
 
-class MainWiringTests(unittest.TestCase):
+class MainWiringTests(TempDirTestCase):
     """`main()` must call the pure functions above and act on them before
     deciding an exit code."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = self.tmp()
         (self.root / "export").write_text(FAKE_EXPORT_SCRIPT, encoding="utf-8")
         self.bundle_tool = self.root / "fake_bundle.py"
         self.bundle_tool.write_text(FAKE_BUNDLE_SCRIPT, encoding="utf-8")
@@ -321,28 +317,10 @@ class MainWiringTests(unittest.TestCase):
         self.replay = self.root / "match.vrf"
         self.replay.write_bytes(b"not a real replay")
 
-        self._orig_bundle_tool = guard.BUNDLE_TOOL
-        self._orig_compute_metrics = guard.COMPUTE_METRICS
-        self._orig_replays = guard.REPLAYS
-        guard.BUNDLE_TOOL = self.bundle_tool
-        guard.COMPUTE_METRICS = self.compute_metrics
-        guard.REPLAYS = {"test": str(self.replay)}
-        self.addCleanup(self._restore_module_state)
-
-        self._previous_cwd = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, self._previous_cwd)
-
-        self._argv = sys.argv
-        self.addCleanup(self._restore_argv)
-
-    def _restore_module_state(self):
-        guard.BUNDLE_TOOL = self._orig_bundle_tool
-        guard.COMPUTE_METRICS = self._orig_compute_metrics
-        guard.REPLAYS = self._orig_replays
-
-    def _restore_argv(self):
-        sys.argv = self._argv
+        self.enterContext(mock.patch.multiple(guard, BUNDLE_TOOL=self.bundle_tool,
+                                              COMPUTE_METRICS=self.compute_metrics,
+                                              REPLAYS={"test": str(self.replay)}))
+        self.enterContext(contextlib.chdir(self.root))
 
     def stage_metrics(self, metrics: dict) -> None:
         staged = self.root / "desired_metrics.json"
@@ -351,13 +329,9 @@ class MainWiringTests(unittest.TestCase):
         self.addCleanup(os.environ.pop, "VRFKIT_TEST_DESIRED_METRICS", None)
 
     def run_main(self, extra_args=()):
-        argv = ["check_metrics_baseline.py", "--exe", sys.executable,
-                "--only", "test", "--jobs", "1", *extra_args]
-        sys.argv = argv
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            code = guard.main()
-        return code, out.getvalue()
+        code, out, _ = run_cli(guard.main, "--exe", sys.executable, "--only", "test", "--jobs", "1",
+                               *extra_args, prog="check_metrics_baseline.py", merged=True)
+        return code, out
 
     def test_a_healthy_run_matching_the_baseline_exits_zero(self):
         self.stage_metrics(RAW_METRICS)
@@ -440,7 +414,3 @@ class MainWiringTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("did not complete the pipeline", output)
         self.assertIn("replay not found", output)
-
-
-if __name__ == "__main__":
-    unittest.main()

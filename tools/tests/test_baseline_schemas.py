@@ -1,15 +1,12 @@
 import json
-import sys
-import tempfile
-import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_baseline_schemas as schemas  # noqa: E402
+from support import TempDirTestCase
+import check_baseline_schemas as schemas
 
 
-class BaselineSchemaTests(unittest.TestCase):
+class BaselineSchemaTests(TempDirTestCase):
     def test_committed_baselines_are_schema_valid_and_cross_consistent(self):
         self.assertEqual(schemas.validate_repository(), [])
 
@@ -48,10 +45,9 @@ class BaselineSchemaTests(unittest.TestCase):
         self.assertTrue(any("cp_net_guid_rows_written" in problem for problem in problems), problems)
 
     def test_unknown_baseline_json_fails_closed(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "unvalidated.json").write_text("{}", encoding="utf-8")
-            problems = schemas.validate_repository(root)
+        root = self.tmp()
+        (root / "unvalidated.json").write_text("{}", encoding="utf-8")
+        problems = schemas.validate_repository(root)
         self.assertTrue(any("unvalidated.json" in p and "unknown" in p for p in problems),
                         problems)
 
@@ -91,7 +87,3 @@ class BaselineSchemaTests(unittest.TestCase):
         for expected in ("replays.12.10", "kills", "players", "damage_dealt",
                          "team_score.Red"):
             self.assertIn(expected, joined)
-
-
-if __name__ == "__main__":
-    unittest.main()

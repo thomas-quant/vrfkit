@@ -3,15 +3,12 @@ must fail the run, not print a WARNING beside exit 0."""
 import collections
 import contextlib
 import io
-import os
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import validate_corpus as guard  # noqa: E402
+from support import TempDirTestCase, run_cli
+import validate_corpus as guard
 
 
 class ProblemTests(unittest.TestCase):
@@ -104,32 +101,24 @@ print("ORACLE PASS RATE: 100.000000%")
 '''
 
 
-class MainWiringTests(unittest.TestCase):
+class MainWiringTests(TempDirTestCase):
     """`ProblemTests` pins what `problems()` returns; these pin that `main()`
     reads it before choosing an exit code."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = self.tmp()
         (self.root / "validate").write_text(FAKE_VALIDATE_SCRIPT, encoding="utf-8")
         self.corpus = self.root / "corpus"
         self.corpus.mkdir()
-        self._previous_cwd = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, self._previous_cwd)
+        self.enterContext(contextlib.chdir(self.root))
 
     def make_replay(self, name: str) -> None:
         (self.corpus / name).write_bytes(b"not a real replay")
 
     def run_main(self, limit: str | None = None):
-        argv = ["validate_corpus.py", sys.executable, str(self.corpus)]
-        if limit is not None:
-            argv.append(limit)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            code = guard.main(argv)
-        return code, out.getvalue()
+        extra = () if limit is None else (limit,)
+        code, out, _ = run_cli(guard.main, "validate_corpus.py", sys.executable, self.corpus, *extra, merged=True)
+        return code, out
 
     def test_a_clean_sweep_exits_zero(self):
         self.make_replay("a.vrf")
@@ -168,7 +157,3 @@ class MainWiringTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 guard.main(["validate_corpus.py", sys.executable, str(self.corpus)])
         self.assertIn("no .vrf under", str(caught.exception))
-
-
-if __name__ == "__main__":
-    unittest.main()

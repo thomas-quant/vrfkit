@@ -2,23 +2,17 @@
 import contextlib
 import io
 import json
-from pathlib import Path
-import sys
-import tempfile
-import unittest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support import TempDirTestCase
 import summarize_value_coverage as coverage
 
 
-class PhysicalCoverageTests(unittest.TestCase):
+class PhysicalCoverageTests(TempDirTestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = self.tmp()
 
     def write(self, directory, filename="fields.parquet"):
         directory.mkdir(exist_ok=True)
@@ -113,7 +107,3 @@ class PhysicalCoverageTests(unittest.TestCase):
         pq.write_table(pa.table({"different": [1]}), empty)
         with self.assertRaisesRegex(ValueError, "missing value columns"):
             coverage.count_table(empty)
-
-
-if __name__ == "__main__":
-    unittest.main()

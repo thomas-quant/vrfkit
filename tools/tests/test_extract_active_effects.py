@@ -5,16 +5,14 @@ from __future__ import annotations
 
 import contextlib
 import io
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_active_effects as effects  # noqa: E402
+from support import TempDirTestCase
+import extract_active_effects as effects
 
 CLASS = "/Game/Characters/Pandemic/S0/Ability_Q/GameObject_Pandemic_Q_Smoke.GameObject_X_C"
 
@@ -37,34 +35,32 @@ def _export(tmp: Path, rows: list[tuple[int, str, int]]) -> Path:
     return out
 
 
-class DormantCloseTests(unittest.TestCase):
+class DormantCloseTests(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-        self.addCleanup(self._tmp.cleanup)
+        self.root = self.tmp()
 
     def test_a_dormant_actor_does_not_end_its_effect_instance(self):
         """Dormancy is not destruction: the instance stays open-ended."""
-        rows = effects.build_with_tally(_export(self.tmp, [(7, "open", 100), (7, "dormant", 500)]))[0]
+        rows = effects.build_with_tally(_export(self.root, [(7, "open", 100), (7, "dormant", 500)]))[0]
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["close_ms"])
         self.assertIsNone(rows[0]["duration_ms"])
 
     def test_a_dormant_instance_is_counted_rather_than_quietly_open_ended(self):
         """The table alone cannot tell it from a row the export cut off."""
-        out = _export(self.tmp, [(7, "open", 100), (7, "dormant", 500)])
+        out = _export(self.root, [(7, "open", 100), (7, "dormant", 500)])
         self.assertEqual(effects.build_with_tally(out)[1]["went_dormant"], 1)
 
     def test_a_real_close_still_ends_the_instance(self):
-        rows = effects.build_with_tally(_export(self.tmp, [(7, "open", 100), (7, "close", 500)]))[0]
+        rows = effects.build_with_tally(_export(self.root, [(7, "open", 100), (7, "close", 500)]))[0]
         self.assertEqual((rows[0]["close_ms"], rows[0]["duration_ms"]), (500, 400))
         self.assertEqual(
-            effects.build_with_tally(_export(self.tmp, [(7, "open", 100), (7, "close", 500)]))[1]
+            effects.build_with_tally(_export(self.root, [(7, "open", 100), (7, "close", 500)]))[1]
             ["went_dormant"], 0)
 
     def test_an_actor_that_wakes_after_dormancy_keeps_one_instance(self):
         """Never gone: two instances would be a false despawn/respawn pair."""
-        out = _export(self.tmp, [(7, "open", 100), (7, "dormant", 300), (7, "close", 900)])
+        out = _export(self.root, [(7, "open", 100), (7, "dormant", 300), (7, "close", 900)])
         rows, tally = effects.build_with_tally(out)
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0]["open_ms"], rows[0]["close_ms"]), (100, 900))
@@ -117,7 +113,7 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(effects.classify(ULT_ORB), "orb")
 
 
-class ActorKindTests(unittest.TestCase):
+class ActorKindTests(TempDirTestCase):
     """The table keeps a projectile and the zone it places as two rows, by
     design; `actor_kind` lets a consumer count one of them."""
 
@@ -137,8 +133,8 @@ class ActorKindTests(unittest.TestCase):
                 self.assertEqual(effects.actor_kind(path), kind)
 
     def test_every_row_carries_its_actor_kind(self):
-        with tempfile.TemporaryDirectory() as temp:
-            rows = effects.build_with_tally(_export(Path(temp), [(7, "open", 100), (7, "close", 500)]))[0]
+        temp = self.tmp()
+        rows = effects.build_with_tally(_export(temp, [(7, "open", 100), (7, "close", 500)]))[0]
         self.assertEqual(rows[0]["actor_kind"], "game_object")
         self.assertIn("actor_kind", effects.SCHEMA.names)
 
@@ -149,13 +145,12 @@ MOVEMENT = ('{"linear_velocity":{"x":643,"y":-766,"z":-29},"location":{"x":-339,
             '"rotation":{"pitch":1.4,"yaw":310.78125,"roll":0}}')
 
 
-class TracksTests(unittest.TestCase):
+class TracksTests(TempDirTestCase):
     """`--tracks` flattens movement rows; an untyped one stays, counted."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.export = _export(Path(self._tmp.name), [(7, "open", 100)])
+        self.root = self.tmp()
+        self.export = _export(self.root, [(7, "open", 100)])
         rows = [(SMOKE, "ReplicatedMovement", MOVEMENT), (SMOKE, "ReplicatedMovement", None),
                 (WALL_MANAGER, "MulticastAddSmokeScreenPoint.Translation", "(1.5,-2,3)"),
                 (SMOKE, "Other", "x")]
@@ -174,7 +169,7 @@ class TracksTests(unittest.TestCase):
         self.assertEqual(untyped, {"Projectile_Wushu_4_Smoke_C": 1})
 
     def test_the_cli_writes_the_tracks_and_prints_the_untyped_count(self):
-        out = Path(self._tmp.name)
+        out = self.root
         with contextlib.redirect_stdout(io.StringIO()) as stdout:
             code = effects.main(["--export", str(self.export), "--out", str(out / "effects.parquet"),
                                  "--tracks", str(out / "tracks.parquet")])
@@ -187,11 +182,7 @@ class TracksTests(unittest.TestCase):
         for out, tracks in (("effects.parquet", self.export / "fields.parquet"),
                             (self.export / "actors.parquet", "tracks.parquet"), ("same", "same")):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                code = effects.main(["--export", str(self.export), "--out", str(Path(self._tmp.name, out)),
-                                     "--tracks", str(Path(self._tmp.name, tracks))])
+                code = effects.main(["--export", str(self.export), "--out", str(self.root / out),
+                                     "--tracks", str(self.root / tracks)])
             self.assertEqual(code, 1)
         self.assertEqual({path: path.read_bytes() for path in self.export.iterdir()}, inputs)
-
-
-if __name__ == "__main__":
-    unittest.main()

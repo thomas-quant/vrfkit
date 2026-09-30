@@ -11,14 +11,12 @@ overlay comments cite them, and this file is where those citations can fail.
 Each fact also names the `FieldType` `checksum_table.rs` gives that checksum,
 when it has an entry, so a retyped donor whose table was not regenerated fails.
 """
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_checksum_types as ect  # noqa: E402
-import generate_scoped_types as gst  # noqa: E402
-from check_checksum_types import chain_checksum  # noqa: E402
+import support  # puts tools/ on sys.path
+import extract_checksum_types as ect
+import generate_scoped_types as gst
+from check_checksum_types import chain_checksum
 
 #: (replay checksum, chain, rival leaf types that must NOT reproduce it,
 #:  the FieldType checksum_table.rs must give it or None when it has no entry,
@@ -312,7 +310,3 @@ class ScopedFactTests(unittest.TestCase):
                 for entry in carriers:
                     self.assertEqual(entry["field"], name)
                     self.assertEqual(gst.TYPES[entry["type"]], (field_type,))
-
-
-if __name__ == "__main__":
-    unittest.main()

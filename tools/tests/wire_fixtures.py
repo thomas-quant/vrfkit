@@ -6,6 +6,7 @@ evidence a reader is checked against, so nothing here imports tools/.
 from __future__ import annotations
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 
 def packed(*values: int) -> bytes:
@@ -55,6 +56,14 @@ class BitWriter:
         return bytes(out), len(self.bits)
 
 
+def pack_bits(*fields: tuple[int, int]) -> tuple[bytes, int]:
+    """(value, width) pairs, LSB first, as (bytes, bit_count)."""
+    out = BitWriter()
+    for value, width in fields:
+        out.write(value, width)
+    return out.to_bytes()
+
+
 def array(elements) -> tuple[bytes, int]:
     """A replicated dynamic array as (bytes, bit_count).
 
@@ -83,3 +92,25 @@ FIELD_SCHEMA = pa.schema([
 CHECKPOINT_FIELD_SCHEMA = pa.schema(
     [("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()), *FIELD_SCHEMA]
 )
+_CP = ("checkpoint_index", pa.uint32())
+#: Export tables the kill extractors open that these fixtures leave empty.
+EMPTY_TABLE_SCHEMAS = {
+    "checkpoint_fields": CHECKPOINT_FIELD_SCHEMA,
+    "net_guids": pa.schema([("net_guid", pa.uint32())]),
+    "checkpoint_actors": pa.schema([_CP, ("actor_net_guid", pa.uint32())]),
+    "checkpoint_net_guids": pa.schema([_CP, ("net_guid", pa.uint32())]),
+    "checkpoint_export_groups": pa.schema([_CP, ("ordinal", pa.uint32()), ("group_path", pa.string())]),
+    "checkpoint_export_fields": pa.schema([_CP, ("group_ordinal", pa.uint32()), ("handle", pa.uint32()),
+                                           ("rendered_name", pa.string()),
+                                           ("compatible_checksum", pa.uint32())]),
+}
+
+
+def write_empty_tables(root) -> None:
+    for name, schema in EMPTY_TABLE_SCHEMAS.items():
+        pq.write_table(pa.Table.from_pylist([], schema=schema), root / f"{name}.parquet")
+
+
+def field_row(defaults=(), **kw) -> dict:
+    """A fields.parquet row: every column null unless `defaults` or `kw` sets it."""
+    return {**dict.fromkeys(FIELD_SCHEMA.names), **dict(defaults), **kw}

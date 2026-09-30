@@ -1,14 +1,13 @@
-import contextlib, copy, io, json, struct, sys, tempfile, unittest
-from pathlib import Path
+import contextlib, copy, io, json, struct
 import pyarrow as pa, pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from support import TempDirTestCase
 import extract_healing_observations as tool
-from tools.tests.wire_fixtures import (
+from wire_fixtures import (
     CHECKPOINT_FIELD_SCHEMA as CHECKPOINT_SCHEMA,
     FIELD_SCHEMA as SCHEMA,
     array,
+    field_row,
     packed,
 )
 
@@ -18,25 +17,9 @@ def ref(v):
 
 
 def row(name, crc=None, raw=b"", bits=0, **kw):
-    x = {
-        "time_ms": 1000,
-        "packet_id": 2,
-        "channel_index": 3,
-        "actor_net_guid": 40,
-        "object_net_guid": 41,
-        "group_path": tool.OUTER_GROUP,
-        "handle": 6,
-        "field_name": name,
-        "compatible_checksum": crc,
-        "bit_count": bits,
-        "raw_bits": raw,
-        "value_i64": None,
-        "value_f64": None,
-        "value_bool": None,
-        "value_str": None,
-    }
-    x.update(kw)
-    return x
+    return field_row(dict(time_ms=1000, packet_id=2, channel_index=3, actor_net_guid=40, object_net_guid=41,
+                          group_path=tool.OUTER_GROUP, handle=6, field_name=name, compatible_checksum=crc,
+                          bit_count=bits, raw_bits=raw), **kw)
 
 
 def fixture(value=-0.0, causer=True):
@@ -119,10 +102,9 @@ def manifest():
     }
 
 
-class Tests(unittest.TestCase):
+class Tests(TempDirTestCase):
     def make(self, rows=None, actors=None, checkpoint=None):
-        td = tempfile.TemporaryDirectory()
-        p = Path(td.name)
+        p = self.tmp()
         (p / "manifest.json").write_text(json.dumps(manifest()), encoding="utf-8")
         pq.write_table(
             pa.Table.from_pylist(rows or fixture(), schema=SCHEMA), p / "fields.parquet"
@@ -156,11 +138,10 @@ class Tests(unittest.TestCase):
             ),
             p / "net_guids.parquet",
         )
-        return td, p
+        return p
 
     def test_signed_zero_missing_causer_keeps_valid_amount_and_edges(self):
-        td, p = self.make(fixture(causer=False))
-        self.addCleanup(td.cleanup)
+        p = self.make(fixture(causer=False))
         d = tool.extract(p)
         o = d["observations"][0]
         self.assertEqual(o["amount"]["status"], "validated")
@@ -182,8 +163,7 @@ class Tests(unittest.TestCase):
                 (None, "no_prior_actor_open", "no_prior_actor_open"),
                 (opened, "no_manifest_character_reference", "active")):
             with self.subTest(source=source):
-                td, p = self.make(actors=actors)
-                self.addCleanup(td.cleanup)
+                p = self.make(actors=actors)
                 counts = tool.extract(p)["counts"]
                 self.assertEqual(counts["source_status"],
                                  {s: int(s == source) for s in tool.SOURCE_STATUSES})
@@ -201,16 +181,14 @@ class Tests(unittest.TestCase):
         other = copy.deepcopy(rows[0])
         other["actor_net_guid"] = 99
         other["object_net_guid"] = 100
-        td, p = self.make(rows[:1] + [other] + rows[1:] + [duplicate])
-        self.addCleanup(td.cleanup)
+        p = self.make(rows[:1] + [other] + rows[1:] + [duplicate])
         obs = tool.extract(p)["observations"]
         target = next(x for x in obs if x["identity"]["actor_net_guid"] == 40)
         self.assertIn("duplicate_same_coordinate_member", target["ambiguity_reasons"])
         self.assertIn("disjoint_physical_segments", target["ambiguity_reasons"])
         rows = fixture()
         rows.insert(6, row("Unrelated", raw=b"\0", bits=1))
-        td2, p2 = self.make(rows)
-        self.addCleanup(td2.cleanup)
+        p2 = self.make(rows)
         d = tool.extract(p2)
         self.assertIn("disjoint_physical_segments", d["observations"][0]["ambiguity_reasons"])
         self.assertEqual(d["summaries"]["validated_observations"], 0)
@@ -226,8 +204,7 @@ class Tests(unittest.TestCase):
                 "class_path": "/Game/Characters/X/Abilities/A.A_C",
             }
         ]
-        td, p = self.make(actors=actors)
-        self.addCleanup(td.cleanup)
+        p = self.make(actors=actors)
         s = tool.extract(p)["observations"][0]["source_corroboration"]
         self.assertEqual(s["status"], "lifecycle_boundary_same_time")
         self.assertEqual(s["event_instigator"]["value"], 12)
@@ -235,8 +212,7 @@ class Tests(unittest.TestCase):
     def test_raw_typed_mismatch_fails_atomically(self):
         rows = fixture(1.0)
         rows[0]["value_f64"] = 2.0
-        td, p = self.make(rows)
-        self.addCleanup(td.cleanup)
+        p = self.make(rows)
         out = p / "out.json"
         out.write_text("old", encoding="utf-8")
         self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
@@ -254,8 +230,7 @@ class Tests(unittest.TestCase):
             **copy.deepcopy(fixture()[0]),
         }
         cp = [first, second]
-        td, p = self.make(checkpoint=cp)
-        self.addCleanup(td.cleanup)
+        p = self.make(checkpoint=cp)
         d = tool.extract(p)
         self.assertEqual(d["counts"]["checkpoint_selected_rows"], 2)
         self.assertEqual(
@@ -267,8 +242,7 @@ class Tests(unittest.TestCase):
         )
 
     def test_optional_declarations_may_be_jointly_absent_with_no_source_rows(self):
-        td, p = self.make(fixture(causer=False)[:6])
-        self.addCleanup(td.cleanup)
+        p = self.make(fixture(causer=False)[:6])
         data = manifest()
         data["net_field_export_groups"][1]["fields"] = [
             x for x in data["net_field_export_groups"][1]["fields"] if x["handle"] <= 5
@@ -281,8 +255,7 @@ class Tests(unittest.TestCase):
         )
 
     def test_observed_undeclared_optional_edge_and_changed_declaration_fail(self):
-        td, p = self.make()
-        self.addCleanup(td.cleanup)
+        p = self.make()
         data = manifest()
         data["net_field_export_groups"][1]["fields"] = [
             x for x in data["net_field_export_groups"][1]["fields"] if x["handle"] != 9
@@ -299,8 +272,7 @@ class Tests(unittest.TestCase):
             tool.extract(p)
 
     def test_a_declared_unknown_parameter_is_a_schema_error(self):
-        td, p = self.make(fixture() + [row("MulticastNotifyHeal.HealSource", 12345, b"\0", 1)])
-        self.addCleanup(td.cleanup)
+        p = self.make(fixture() + [row("MulticastNotifyHeal.HealSource", 12345, b"\0", 1)])
         data = manifest()
         data["net_field_export_groups"][1]["fields"].append(
             {"handle": 6, "name": "HealSource", "compatible_checksum": 12345})
@@ -311,8 +283,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(o["schema_errors"], [{"source_row": 9, "error": "unknown heal parameter row"}])
 
     def test_another_routes_declarations_do_not_gate_healing(self):
-        td, p = self.make()
-        self.addCleanup(td.cleanup)
+        p = self.make()
         data = manifest()
         field = {"handle": 0, "name": "DamageTaken", "compatible_checksum": 373546733}
         data["net_field_export_groups"].append({
@@ -324,8 +295,7 @@ class Tests(unittest.TestCase):
     def test_foreign_schema_is_preserved_but_not_validated(self):
         rows = fixture()
         rows[0]["group_path"] = "/Script/Foreign"
-        td, p = self.make(rows)
-        self.addCleanup(td.cleanup)
+        p = self.make(rows)
         o = tool.extract(p)["observations"][0]
         self.assertEqual(o["amount"]["status"], "invalid")
         self.assertIn("foreign_or_invalid_schema", o["ambiguity_reasons"])
@@ -366,28 +336,24 @@ class Tests(unittest.TestCase):
             handle=0,
             value_i64=50,
         )
-        td, p = self.make(fixture() + [owner], actors)
-        self.addCleanup(td.cleanup)
+        p = self.make(fixture() + [owner], actors)
         s = tool.extract(p)["observations"][0]["source_corroboration"]
         self.assertEqual(s["status"], "actor_reopened_without_unique_active_instance")
         bad = copy.deepcopy(owner)
         bad["value_i64"] = 51
-        td2, p2 = self.make(fixture() + [bad], actors[:1])
-        self.addCleanup(td2.cleanup)
+        p2 = self.make(fixture() + [bad], actors[:1])
         with self.assertRaises(tool.IntegrityError):
             tool.extract(p2)
 
     def test_output_may_not_alias_an_input(self):
-        td, p = self.make()
-        self.addCleanup(td.cleanup)
+        p = self.make()
         source = p / "fields.parquet"
         before = source.read_bytes()
         self.assertEqual(tool.main(["--export", str(p), "--out", str(source)]), 1)
         self.assertEqual(source.read_bytes(), before)
 
     def test_typed_instigator_edges_are_present_and_raw_checked(self):
-        td, p = self.make()
-        self.addCleanup(td.cleanup)
+        p = self.make()
         d = tool.extract(p)
         s = d["observations"][0]["source_corroboration"]
         for key, value in (("event_instigator", 12), ("event_instigator_pawn", 50)):
@@ -411,8 +377,7 @@ class Tests(unittest.TestCase):
                     r for r in rows if r["field_name"] == "MulticastNotifyHeal." + name
                 )
                 target["value_i64"] += 1
-                td, p = self.make(rows)
-                self.addCleanup(td.cleanup)
+                p = self.make(rows)
                 out = p / "out.json"
                 out.write_text("old", encoding="utf-8")
                 self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
@@ -426,8 +391,7 @@ class Tests(unittest.TestCase):
             r for r in rows if r["field_name"] == "MulticastNotifyHeal.EventInstigator"
         )
         target["bit_count"] += 8
-        td, p = self.make(rows)
-        self.addCleanup(td.cleanup)
+        p = self.make(rows)
         d = tool.extract(p)
         o = d["observations"][0]
         self.assertEqual(o["amount"]["status"], "validated")
@@ -445,15 +409,12 @@ class Tests(unittest.TestCase):
                     r for r in rows if r["field_name"] == "MulticastNotifyHeal." + name
                 )
                 target["value_i64"] = None
-                td, p = self.make(rows)
-                self.addCleanup(td.cleanup)
+                p = self.make(rows)
                 with self.assertRaisesRegex(tool.IntegrityError, "untyped"):
                     tool.extract(p)
 
     def test_selected_batch_ordinals_include_filtered_rows_and_boundary(self):
-        td = tempfile.TemporaryDirectory()
-        self.addCleanup(td.cleanup)
-        path = Path(td.name) / "fields.parquet"
+        path = self.tmp() / "fields.parquet"
         filler = row("Unrelated", raw=b"\0", bits=1)
         rows = [filler] * 65534 + [fixture()[0], filler, fixture()[1]]
         pq.write_table(
@@ -463,7 +424,7 @@ class Tests(unittest.TestCase):
         self.assertEqual([ordinal for ordinal, _ in got], [65534, 65536])
 
 
-class EarlierPawnTests(unittest.TestCase):
+class EarlierPawnTests(TempDirTestCase):
     """The recipient pawn 40 is the one a player had before reconnecting:
     SpawnedCharacter goes 40 -> 0 -> 45 and the manifest keeps 45."""
 
@@ -476,8 +437,7 @@ class EarlierPawnTests(unittest.TestCase):
                 object_net_guid=None, group_path=state, handle=0, value_i64=v)
             for t, v in ((10, 40), (20, 0), (30, 45))
         ]
-        td, p = self.make(history + fixture())
-        self.addCleanup(td.cleanup)
+        p = self.make(history + fixture())
         data = manifest()
         data["players"] = [
             {"actor_net_guid": 7, "subject": "recipient", "character_net_guid": 45},
@@ -490,7 +450,3 @@ class EarlierPawnTests(unittest.TestCase):
         self.assertEqual(recipient["subject"], "recipient")
         self.assertEqual(d["player_identity"]["non_final_spawned_character_pawns"], 1)
         self.assertEqual(d["counts"]["amount_validated"], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

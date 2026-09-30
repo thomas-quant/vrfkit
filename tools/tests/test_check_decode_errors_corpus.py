@@ -4,17 +4,14 @@ The summary patterns themselves are test_summary_counters.py's.
 """
 import ast
 import contextlib
-import io
-import os
 import re
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_decode_errors_corpus as guard  # noqa: E402
+from support import TempDirTestCase, run_cli
+import check_decode_errors_corpus as guard
 
 #: The main-pass sink lines, failure counters at zero. Values from a real 13.02
 #: `--checkpoints` export log, except the CNC, tail, trailer, route and walk lines.
@@ -313,31 +310,20 @@ emit()
 '''.replace("import sys\n", "import re\nimport sys\n", 1)
 
 
-class MainWiringTests(unittest.TestCase):
+class MainWiringTests(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = self.tmp()
         (self.root / "export").write_text(FAKE_EXPORT_SCRIPT, encoding="utf-8")
         self.corpus = self.root / "corpus"
         self.corpus.mkdir()
-        self._previous_cwd = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, self._previous_cwd)
-        self._argv = sys.argv
+        self.enterContext(contextlib.chdir(self.root))
 
     def run_main(self, *names, extra_args=()):
         for name in names:
             (self.corpus / name).write_bytes(b"not a real replay")
-        sys.argv = ["check_decode_errors_corpus.py", sys.executable, str(self.corpus),
-                    "--jobs", "1", *extra_args]
-        out = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                code = guard.main()
-        finally:
-            sys.argv = self._argv
-        return code, out.getvalue()
+        code, out, _ = run_cli(guard.main, sys.executable, self.corpus, "--jobs", "1", *extra_args,
+                               prog="check_decode_errors_corpus.py", merged=True)
+        return code, out
 
     def test_a_clean_checkpoint_run_prints_every_total_and_what_backs_its_zeros(self):
         """Every total prints, zeros included, and the OK line separates the
@@ -434,7 +420,3 @@ class MainWiringTests(unittest.TestCase):
     def test_no_vrf_files_is_a_controlled_failure(self):
         code, output = self.run_main()
         self.assertEqual(code, 2, output)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -4,17 +4,13 @@ only the manifest's last one, and never a pawn merely carrying the player's
 """
 import json
 import re
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-TOOLS = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(TOOLS))
-import player_identity as identity  # noqa: E402
+from support import TOOLS, TempDirTestCase
+import player_identity as identity
 
 BOMB, SWIFT = identity.PLAYER_STATE_GROUPS
 FIELD_SCHEMA = pa.schema([
@@ -62,11 +58,6 @@ class PlayerBodiesTests(unittest.TestCase):
         bodies = self.bodies([spawned(256, 1510, 100, 1), spawned(256, 45530, 0, 2)])
         self.assertEqual([value for _, _, value in bodies.history[256]], [1510, 45530])
         self.assertEqual(bodies.counts["manifest_history_disagreements"], 0)
-
-    def test_the_final_provenance_string_is_the_one_records_already_carry(self):
-        """Records the manifest join labelled must come out byte-identical."""
-        self.assertEqual(identity.FINAL_PROVENANCE,
-                         "manifest.players.character_net_guid (SpawnedCharacter)")
 
     def test_a_swiftplay_player_state_names_bodies_like_the_bomb_class(self):
         rows = [dict(row, group_path=SWIFT) for row in RECONNECT]
@@ -146,21 +137,47 @@ class PlayerBodiesTests(unittest.TestCase):
             self.bodies([spawned(256, -1, 66)])
 
 
-class LoadTests(unittest.TestCase):
+class ManifestBodyListTests(unittest.TestCase):
+    """The manifest's `character_net_guids` must equal the fields' history in last-write order."""
+
+    def disagreements(self, player, rows=RECONNECT):
+        manifest = {"players": [dict(player, actor_net_guid=256, subject="s")]}
+        return identity.player_bodies(manifest, rows).counts["manifest_history_disagreements"]
+
+    def test_the_list_must_equal_the_history_in_last_write_order(self):
+        self.assertEqual(self.disagreements(
+            {"character_net_guid": 45530, "character_net_guids": [1510, 45530]}), 0)
+        for wrong in ([45530], [45530, 1510], [1510, 45530, 7], []):
+            with self.subTest(wrong=wrong):
+                self.assertEqual(self.disagreements(
+                    {"character_net_guid": 45530, "character_net_guids": wrong}), 1)
+
+    def test_a_repeat_moves_to_the_end(self):
+        rows = [spawned(256, 7, 1), spawned(256, 8, 2), spawned(256, 7, 3)]
+        self.assertEqual(self.disagreements(
+            {"character_net_guid": 7, "character_net_guids": [8, 7]}, rows), 0)
+        self.assertEqual(self.disagreements(
+            {"character_net_guid": 7, "character_net_guids": [7, 8]}, rows), 1)
+
+    def test_an_older_manifest_without_the_list_compares_the_last_body_only(self):
+        self.assertEqual(self.disagreements({"character_net_guid": 45530}), 0)
+        self.assertEqual(self.disagreements({"character_net_guid": 1510}), 1)
+
+
+class LoadTests(TempDirTestCase):
     def test_only_spawned_character_proves_a_body(self):
         """A pawn that carries the player's PlayerState, or is possessed by the
         player, is not a body: the Rift_TargetingForm case, 1,236 pawns in the
         audit corpus."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "manifest.json").write_text(json.dumps(MANIFEST), encoding="utf-8")
-            rows = RECONNECT + [
-                spawned(256, 777, 90, name="PossessedCharacter"),
-                spawned(777, 256, 91, group="/Game/Characters/Rift/Rift_TargetingForm_PC.Rift_TargetingForm_PC_C",
-                        name="PlayerState")]
-            pq.write_table(pa.Table.from_pylist(rows, schema=FIELD_SCHEMA),
-                           root / "fields.parquet")
-            bodies = identity.load_player_bodies(root)
+        root = self.tmp()
+        (root / "manifest.json").write_text(json.dumps(MANIFEST), encoding="utf-8")
+        rows = RECONNECT + [
+            spawned(256, 777, 90, name="PossessedCharacter"),
+            spawned(777, 256, 91, group="/Game/Characters/Rift/Rift_TargetingForm_PC.Rift_TargetingForm_PC_C",
+                    name="PlayerState")]
+        pq.write_table(pa.Table.from_pylist(rows, schema=FIELD_SCHEMA),
+                       root / "fields.parquet")
+        bodies = identity.load_player_bodies(root)
         # 990 has no history row here; the manifest alone still admits it.
         self.assertEqual(bodies.subjects,
                          {1510: "reconnected", 45530: "reconnected", 990: "steady"})
@@ -181,7 +198,3 @@ class AliasTableTests(unittest.TestCase):
         aliases = {alias for alias, target in pairs if target == BOMB}
         self.assertEqual(aliases, {SWIFT})
         self.assertEqual(set(identity.PLAYER_STATE_GROUPS), aliases | {BOMB})
-
-
-if __name__ == "__main__":
-    unittest.main()

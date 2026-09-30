@@ -2,10 +2,9 @@ import os
 import subprocess
 import sys
 import unittest
-from pathlib import Path
+from support import TOOLS
 
 
-TOOLS = Path(__file__).resolve().parents[1]
 SCRIPTS = {
     # These two use argparse and accept --help.
     "extract_match_observations.py": 0,
@@ -32,7 +31,3 @@ class DirectScriptImportTests(unittest.TestCase):
                 self.assertNotIn("ImportWarning", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertIn("usage:", (result.stdout + result.stderr).lower())
-
-
-if __name__ == "__main__":
-    unittest.main()

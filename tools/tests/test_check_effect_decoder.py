@@ -1,10 +1,8 @@
-import sys
 import unittest
-from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_effect_decoder as checker  # noqa: E402
+import support  # puts tools/ on sys.path
+import check_effect_decoder as checker
 
 
 class CheckEffectDecoderTests(unittest.TestCase):
@@ -26,7 +24,3 @@ class CheckEffectDecoderTests(unittest.TestCase):
             checker.check("not_a_case"),
             ["unknown case to corrupt: not_a_case"],
         )
-
-
-if __name__ == "__main__":
-    unittest.main()
