@@ -549,13 +549,13 @@ decides by exact consumption.
 Every class the table types was observed, so no entry rests on the default
 alone. Sixty more are exact scoped identities
 (`tools/fixtures/scoped_type_evidence.json`, each entry with its own
-figures), measured by the tool on 123 replays: every replay of the
-11.06-12.09 folders and 15 per 13.x build. The ten `Pawn_*`/`AIPawn_*`
-classes -- the Boom Bot, `Pawn_Killjoy_E_Turret_C` and
-`Pawn_Killjoy_Q_StealthAlarmbot_C` among them -- pack two decimals with short
-rotators (ratio 99.998-100.003, every join within 0.0504 of spawn); the other
-50, Raze's satchel, Paint Shells and rocket among them, pack whole units with
-byte rotators (0.9997-1.0004, within 0.5).
+figures): the Boom Bot, measured on the 1,018 replays, and 59 measured by the
+tool on 123 (every replay of the 11.06-12.09 folders, 15 per 13.x build),
+where the Boom Bot reads the same. The ten `Pawn_*`/`AIPawn_*` classes --
+`Pawn_Killjoy_E_Turret_C` and `Pawn_Killjoy_Q_StealthAlarmbot_C` among them --
+pack two decimals with short rotators (ratio 99.998-100.003, every join within
+0.0504 of spawn); the other 50, Raze's satchel, Paint Shells and rocket among
+them, pack whole units with byte rotators (0.9997-1.0004, within 0.5).
 
 What the evidence does **not** cover:
 
