@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import apply_type_corrections as atc
 
 #: The handle table after OVERLAY_TABLE, naming a pinned key: applying must
@@ -63,20 +63,13 @@ class MainTests(TempDirTestCase):
     """`main()` on a temporary table.rs."""
 
     def setUp(self):
-        self._real_table = atc.TABLE_RS
         self.path = self.tmp() / "table.rs"
-        atc.TABLE_RS = self.path
-
-    def tearDown(self):
-        atc.TABLE_RS = self._real_table
+        self.enterContext(mock.patch.object(atc, "TABLE_RS", self.path))
 
     def run_main(self, source, *args):
         """`(exit_code, stdout, stderr)` for one main() run over `source`."""
         self.path.write_text(source, encoding="utf-8")
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = atc.main(list(args))
-        return code, out.getvalue(), err.getvalue()
+        return run_cli(atc.main, *args)
 
     def assert_unchanged(self, source):
         self.assertEqual(self.path.read_text(encoding="utf-8"), source)

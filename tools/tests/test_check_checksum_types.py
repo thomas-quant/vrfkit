@@ -11,14 +11,13 @@ if four things hold, each breakable without anything else noticing:
     other mismatch still fails, and an item that applies to the input and
     covers nothing is STALE and fails.
 """
-import contextlib
-import io
 import json
 import random
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import check_checksum_types as cct
 
 
@@ -606,10 +605,7 @@ def write_export(root: Path, name: str, groups, build="++Ares-Core+release-13.06
 
 
 def run_main(*argv):
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cct.main(list(argv))
-    return code, out.getvalue(), err.getvalue()
+    return run_cli(cct.main, *argv)
 
 
 # Identities typed by the committed tables in ways no pending change touches:
@@ -675,12 +671,8 @@ class MainTests(TempDirTestCase):
         d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
         trimmed = {k: v for k, v in cct.CPP_TYPES.items() if k != "FTextTree"}
         self.assertNotEqual(len(trimmed), len(cct.CPP_TYPES), "the fixture must remove a variant")
-        original = cct.CPP_TYPES
-        cct.CPP_TYPES = trimmed
-        try:
+        with mock.patch.object(cct, "CPP_TYPES", trimmed):
             code, out, err = run_main("--export", str(d))
-        finally:
-            cct.CPP_TYPES = original
         self.assertEqual(code, 2, out + err)
         self.assertIn("FieldType variant(s) ['FTextTree'] are not classified in CPP_TYPES", err)
         self.assertNotIn("OK:", out)

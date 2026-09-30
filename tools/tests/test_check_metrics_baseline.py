@@ -5,7 +5,6 @@ none, so team_score was empty.
 """
 import contextlib
 import copy
-import io
 import json
 import os
 import subprocess
@@ -15,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import check_metrics_baseline as guard
 
 
@@ -318,28 +317,10 @@ class MainWiringTests(TempDirTestCase):
         self.replay = self.root / "match.vrf"
         self.replay.write_bytes(b"not a real replay")
 
-        self._orig_bundle_tool = guard.BUNDLE_TOOL
-        self._orig_compute_metrics = guard.COMPUTE_METRICS
-        self._orig_replays = guard.REPLAYS
-        guard.BUNDLE_TOOL = self.bundle_tool
-        guard.COMPUTE_METRICS = self.compute_metrics
-        guard.REPLAYS = {"test": str(self.replay)}
-        self.addCleanup(self._restore_module_state)
-
-        self._previous_cwd = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, self._previous_cwd)
-
-        self._argv = sys.argv
-        self.addCleanup(self._restore_argv)
-
-    def _restore_module_state(self):
-        guard.BUNDLE_TOOL = self._orig_bundle_tool
-        guard.COMPUTE_METRICS = self._orig_compute_metrics
-        guard.REPLAYS = self._orig_replays
-
-    def _restore_argv(self):
-        sys.argv = self._argv
+        self.enterContext(mock.patch.multiple(guard, BUNDLE_TOOL=self.bundle_tool,
+                                              COMPUTE_METRICS=self.compute_metrics,
+                                              REPLAYS={"test": str(self.replay)}))
+        self.enterContext(contextlib.chdir(self.root))
 
     def stage_metrics(self, metrics: dict) -> None:
         staged = self.root / "desired_metrics.json"
@@ -348,13 +329,9 @@ class MainWiringTests(TempDirTestCase):
         self.addCleanup(os.environ.pop, "VRFKIT_TEST_DESIRED_METRICS", None)
 
     def run_main(self, extra_args=()):
-        argv = ["check_metrics_baseline.py", "--exe", sys.executable,
-                "--only", "test", "--jobs", "1", *extra_args]
-        sys.argv = argv
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            code = guard.main()
-        return code, out.getvalue()
+        code, out, _ = run_cli(guard.main, "--exe", sys.executable, "--only", "test", "--jobs", "1",
+                               *extra_args, prog="check_metrics_baseline.py", merged=True)
+        return code, out
 
     def test_a_healthy_run_matching_the_baseline_exits_zero(self):
         self.stage_metrics(RAW_METRICS)

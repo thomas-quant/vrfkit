@@ -683,9 +683,7 @@ ActiveBlinds trailers: 0 empty deltas
                 encoding="utf-8",
             )
 
-        previous = Path.cwd()
-        os.chdir(root)
-        try:
+        with contextlib.chdir(root):
             if fail:
                 with self.assertRaises(SystemExit) as caught:
                     guard.measure(Path(sys.executable), replay, output)
@@ -694,8 +692,6 @@ ActiveBlinds trailers: 0 empty deltas
                 result = None
             else:
                 result = guard.measure(Path(sys.executable), replay, output)
-        finally:
-            os.chdir(previous)
         return output, sentinel, result
 
     def test_failed_export_preserves_previous_complete_output(self):

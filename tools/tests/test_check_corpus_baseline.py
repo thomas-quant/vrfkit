@@ -3,7 +3,6 @@ unprinted counter must not be pinned (the same rule check_metrics_baseline.py
 applies), and a baseline naming no corpus is missing input.
 """
 import contextlib
-import io
 import json
 import os
 import sys
@@ -13,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import check_corpus_baseline as guard
 
 
@@ -85,12 +84,8 @@ ORACLE PASS RATE: 100.000000%
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"replay")
         (root / "validate").write_text(script, encoding="utf-8")
-        previous = Path.cwd()
-        os.chdir(root)
-        try:
+        with contextlib.chdir(root):
             return guard.measure(Path(sys.executable), corpus)
-        finally:
-            os.chdir(previous)
 
     def test_duplicate_basenames_are_keyed_by_relative_path(self):
         script = (
@@ -133,19 +128,15 @@ class UpdateCorpusNameTests(TempDirTestCase):
     refuses the same for --replay."""
 
     def run_update(self, root: Path, corpus: str, corpus_dir: str | None):
-        argv = ["check_corpus_baseline.py", "--baseline", str(root / "baseline.json"),
-                "--exe", sys.executable, "--corpus", corpus, "--update"]
-        output = io.StringIO()
-        with mock.patch.dict(os.environ), mock.patch.object(sys, "argv", argv), \
-                mock.patch.object(guard, "measure",
-                                  return_value=measurement({"a.vrf": CLEAN_ENTRY})) as measured, \
-                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        with mock.patch.dict(os.environ), mock.patch.object(
+                guard, "measure", return_value=measurement({"a.vrf": CLEAN_ENTRY})) as measured:
             os.environ.pop("VRFKIT_CORPUS_DIR", None)
             os.environ.pop("VRFKIT_REQUIRE_CORPUS", None)
             if corpus_dir is not None:
                 os.environ["VRFKIT_CORPUS_DIR"] = corpus_dir
-            code = guard.main()
-        return code, output.getvalue(), measured
+            code, output, _ = run_cli(guard.main, "--baseline", root / "baseline.json", "--exe", sys.executable,
+                                      "--corpus", corpus, "--update", prog="check_corpus_baseline.py", merged=True)
+        return code, output, measured
 
     def test_an_absolute_corpus_is_refused_before_the_oracle_runs(self):
         root = self.tmp()
@@ -174,18 +165,10 @@ class NoCorpusNamedTests(unittest.TestCase):
     pin that walk as `"corpus": "."`."""
 
     def run_main(self, root: Path, *extra: str) -> tuple[int, str]:
-        argv = ["check_corpus_baseline.py", "--baseline", str(root / "baseline.json"),
-                "--exe", sys.executable, *extra]
-        output = io.StringIO()
-        previous = Path.cwd()
-        os.chdir(root)
-        try:
-            with mock.patch.object(sys, "argv", argv), \
-                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                code = guard.main()
-        finally:
-            os.chdir(previous)
-        return code, output.getvalue()
+        with contextlib.chdir(root):
+            code, output, _ = run_cli(guard.main, "--baseline", root / "baseline.json", "--exe", sys.executable,
+                                      *extra, prog="check_corpus_baseline.py", merged=True)
+        return code, output
 
     def test_no_corpus_named_is_missing_input_not_the_working_directory(self):
         with tempfile.TemporaryDirectory() as temp, \

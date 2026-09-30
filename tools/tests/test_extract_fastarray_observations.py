@@ -1,6 +1,4 @@
 """Wire boundaries and preserved failure evidence for numeric FastArray updates."""
-import contextlib
-import io
 import json
 from pathlib import Path
 import struct
@@ -10,7 +8,7 @@ from unittest.mock import patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import extract_fastarray_observations as fast
 from wire_fixtures import packed
 
@@ -73,12 +71,8 @@ def records(out):
     return [json.loads(line) for line in (out / "observations.ndjson").read_text().splitlines()]
 
 
-def run_cli(source, out):
-    printed = io.StringIO()
-    with patch.object(fast.sys, "argv", ["extract", "--export-dir", str(source), "--out-dir", str(out)]), \
-            contextlib.redirect_stdout(printed):
-        code = fast.main()
-    return code, printed.getvalue()
+def run(source, out):
+    return run_cli(fast.main, "--export-dir", source, "--out-dir", out, prog="extract")[:2]
 
 
 class FastArrayTests(TempDirTestCase):
@@ -245,7 +239,7 @@ class FastArrayTests(TempDirTestCase):
         tmp = self.tmp()
         root = tmp; out = root / "result"
         source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
-        code, printed = run_cli(source, out)
+        code, printed = run(source, out)
         self.assertEqual(code, 0)
         receipt = json.loads((out / "receipt.json").read_text())
         counts = receipt["counts"]
@@ -283,7 +277,7 @@ class FastArrayTests(TempDirTestCase):
                 root = Path(tmp); out = root / "result"
                 rows = [field_row(identity, raw, count)]
                 source = write_export(root, build, **{"fields" if stream == "fields" else "checkpoint": rows})
-                code, printed = run_cli(source, out)
+                code, printed = run(source, out)
                 self.assertEqual(code, 1 if reason else 0)
                 receipt = json.loads((out / "receipt.json").read_text())
                 self.assertEqual(json.loads(printed), receipt["counts"])
@@ -329,7 +323,7 @@ class FastArrayTests(TempDirTestCase):
         tmp = self.tmp()
         root = tmp; out = root / "result"
         source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count + 1)])
-        code, _ = run_cli(source, out)
+        code, _ = run(source, out)
         self.assertEqual(code, 1)
         receipt = json.loads((out / "receipt.json").read_text())
         self.assertEqual(receipt["counts"]["rejected"], 1)

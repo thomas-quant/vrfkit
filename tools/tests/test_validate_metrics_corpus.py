@@ -2,8 +2,6 @@
 even when another completes, and a previous run's output is never read as
 this run's (see `fresh_dir`).
 """
-import contextlib
-import io
 import json
 import sys
 import unittest
@@ -12,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import validate_metrics_corpus as guard
 
 OK = {"id": "a", "stage": "ok", "elapsed_s": 1.0, "sections": {"combat": "EXACT"}}
@@ -44,18 +42,11 @@ class UnsafeReplayIdTests(TempDirTestCase):
 
     def setUp(self):
         self.root = self.tmp()
-        self.saved = {name: getattr(guard, name)
-                      for name in ("REPO", "EXPORTS", "VRF_DIR", "VRFKIT")}
-        guard.REPO = self.root / "repo"
-        guard.EXPORTS = self.root / "references"
-        guard.VRF_DIR = self.root / "replays"
-        guard.VRFKIT = Path(sys.executable)
+        self.enterContext(mock.patch.multiple(
+            guard, REPO=self.root / "repo", EXPORTS=self.root / "references",
+            VRF_DIR=self.root / "replays", VRFKIT=Path(sys.executable)))
         for directory in (guard.REPO, guard.EXPORTS, guard.VRF_DIR):
             directory.mkdir(parents=True)
-
-    def tearDown(self):
-        for name, value in self.saved.items():
-            setattr(guard, name, value)
 
     def _assert_rejected_without_deleting(self, replay_id: str, victim: Path):
         victim.mkdir(parents=True)
@@ -188,19 +179,11 @@ class MainWiringTests(TempDirTestCase):
             p.start()
             self.addCleanup(p.stop)
 
-        self._argv = sys.argv
-
     def run_main(self, only=("a", "b"), extra=()):
-        sys.argv = ["validate_metrics_corpus.py", "--jobs", "1", *extra]
-        for r in only:
-            sys.argv += ["--only", r]
-        out = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                code = guard.main()
-        finally:
-            sys.argv = self._argv
-        return code, out.getvalue()
+        only = [arg for r in only for arg in ("--only", r)]
+        code, out, _ = run_cli(guard.main, "--jobs", "1", *extra, *only,
+                               prog="validate_metrics_corpus.py", merged=True)
+        return code, out
 
     def test_one_completed_replay_does_not_mask_a_dead_one(self):
         """`a` finishes and `b` never does: the run still fails."""

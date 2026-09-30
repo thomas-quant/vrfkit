@@ -3,13 +3,11 @@ must fail the run, not print a WARNING beside exit 0."""
 import collections
 import contextlib
 import io
-import os
 import sys
 import unittest
-from pathlib import Path
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import validate_corpus as guard
 
 
@@ -112,21 +110,15 @@ class MainWiringTests(TempDirTestCase):
         (self.root / "validate").write_text(FAKE_VALIDATE_SCRIPT, encoding="utf-8")
         self.corpus = self.root / "corpus"
         self.corpus.mkdir()
-        self._previous_cwd = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, self._previous_cwd)
+        self.enterContext(contextlib.chdir(self.root))
 
     def make_replay(self, name: str) -> None:
         (self.corpus / name).write_bytes(b"not a real replay")
 
     def run_main(self, limit: str | None = None):
-        argv = ["validate_corpus.py", sys.executable, str(self.corpus)]
-        if limit is not None:
-            argv.append(limit)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            code = guard.main(argv)
-        return code, out.getvalue()
+        extra = () if limit is None else (limit,)
+        code, out, _ = run_cli(guard.main, "validate_corpus.py", sys.executable, self.corpus, *extra, merged=True)
+        return code, out
 
     def test_a_clean_sweep_exits_zero(self):
         self.make_replay("a.vrf")

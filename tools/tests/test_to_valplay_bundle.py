@@ -517,18 +517,12 @@ class TransactionalConversionTests(TempDirTestCase):
         (staging / "manifest.json").write_text("new", encoding="utf-8")
         (output / "manifest.json").write_text("old", encoding="utf-8")
 
-        real_remove_tree = bundle.remove_tree
-
         def fail_cleanup(path, parent):
             raise OSError(f"cannot remove {path} under {parent}")
 
-        bundle.remove_tree = fail_cleanup
         stderr = io.StringIO()
-        try:
-            with contextlib.redirect_stderr(stderr):
-                bundle._publish_bundle(staging, output)
-        finally:
-            bundle.remove_tree = real_remove_tree
+        with mock.patch.object(bundle, "remove_tree", fail_cleanup), contextlib.redirect_stderr(stderr):
+            bundle._publish_bundle(staging, output)
 
         self.assertEqual(
             (output / "manifest.json").read_text(encoding="utf-8"), "new"

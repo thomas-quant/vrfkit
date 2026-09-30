@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
 import os
-import sys
 from pathlib import Path
 from unittest import mock
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import atomic_io
 import bench_export
 import check_metrics_baseline
@@ -44,10 +41,9 @@ class AtomicOutputTests(TempDirTestCase):
             path.write_text("input", encoding="utf-8")
 
         def run(target):
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                return atomic_io.run_json_cli("", lambda e: {"n": 1}, lambda d, o: ["ok"],
-                                              ["--export", str(export), "--out", str(target)],
-                                              sources=[source])
+            return run_cli(lambda argv: atomic_io.run_json_cli("", lambda e: {"n": 1}, lambda d, o: ["ok"],
+                                                               argv, sources=[source]),
+                           "--export", export, "--out", target)[0]
 
         for target in (table, export / "manifest.json", source):
             with self.subTest(target=target.name):
@@ -72,20 +68,9 @@ class AtomicOutputTests(TempDirTestCase):
         baseline = root / "bench.json"
 
         def update():
-            argv = sys.argv
-            sys.argv = [
-                "bench_export.py",
-                "--exe", str(executable),
-                "--replay", str(replay),
-                "--baseline", str(baseline),
-                "--repeats", "1",
-                "--update",
-            ]
-            try:
-                with mock.patch.object(bench_export, "time_export", return_value=[1.0]):
-                    bench_export.main()
-            finally:
-                sys.argv = argv
+            with mock.patch.object(bench_export, "time_export", return_value=[1.0]):
+                run_cli(bench_export.main, "--exe", executable, "--replay", replay, "--baseline", baseline,
+                        "--repeats", "1", "--update", prog="bench_export.py")
 
         self.assert_preserved_when_replace_fails(
             baseline, update, previous='{"sentinel": "previous"}\n'
@@ -109,27 +94,11 @@ class AtomicOutputTests(TempDirTestCase):
         }
 
         def update():
-            argv = sys.argv
-            sys.argv = [
-                "check_metrics_baseline.py",
-                "--exe", str(executable),
-                "--baseline", str(baseline),
-                "--jobs", "1",
-                "--update",
-            ]
-            try:
-                with mock.patch.object(
-                    check_metrics_baseline, "COMPUTE_METRICS", compute_metrics
-                ), mock.patch.object(
-                    check_metrics_baseline, "REPLAYS", {"13.01": str(replay)}
-                ), mock.patch.object(
-                    check_metrics_baseline,
-                    "run_one",
-                    return_value=("13.01", healthy, ""),
-                ):
-                    check_metrics_baseline.main()
-            finally:
-                sys.argv = argv
+            with mock.patch.multiple(check_metrics_baseline, COMPUTE_METRICS=compute_metrics,
+                                     REPLAYS={"13.01": str(replay)},
+                                     run_one=mock.Mock(return_value=("13.01", healthy, ""))):
+                run_cli(check_metrics_baseline.main, "--exe", executable, "--baseline", baseline,
+                        "--jobs", "1", "--update", prog="check_metrics_baseline.py")
 
         self.assert_preserved_when_replace_fails(
             baseline, update, previous='{"metrics": {"old": {}}}\n'
@@ -145,43 +114,21 @@ class AtomicOutputTests(TempDirTestCase):
         (vrfkit / "manifest.json").write_text("{}", encoding="utf-8")
         report = vrfkit / "comparison_report.txt"
 
+        stubs = {"compare_totals": "totals", "compare_group_paths": "groups",
+                 "compare_group_field_coverage": ("coverage", []), "compare_rpc_names": "rpcs",
+                 "compare_movement": "movement", "compare_raw_blobs": "raw"}
+
         def generate():
-            argv = sys.argv
-            sys.argv = ["compare_with_csharp.py", str(csharp), str(vrfkit)]
-            try:
-                with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
-                    compare_with_csharp, "compare_totals", return_value="totals"
-                ), mock.patch.object(
-                    compare_with_csharp, "compare_group_paths", return_value="groups"
-                ), mock.patch.object(
-                    compare_with_csharp,
-                    "compare_group_field_coverage",
-                    return_value=("coverage", []),
-                ), mock.patch.object(
-                    compare_with_csharp, "compare_rpc_names", return_value="rpcs"
-                ), mock.patch.object(
-                    compare_with_csharp, "compare_movement", return_value="movement"
-                ), mock.patch.object(
-                    compare_with_csharp, "compare_raw_blobs", return_value="raw"
-                ):
-                    compare_with_csharp.main()
-            finally:
-                sys.argv = argv
+            with mock.patch.multiple(compare_with_csharp,
+                                     **{name: mock.Mock(return_value=v) for name, v in stubs.items()}):
+                run_cli(compare_with_csharp.main, csharp, vrfkit, prog="compare_with_csharp.py")
 
         self.assert_preserved_when_replace_fails(report, generate)
 
     def run_parquet_cli(self, module, build_name, built, output):
         """Run one Parquet-writing CLI on a stubbed build() result."""
-        argv = sys.argv
-        sys.argv = [f"{module.__name__}.py", "--export", str(output.parent),
-                    "--out", str(output)]
-        try:
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-                io.StringIO()
-            ), mock.patch.object(module, build_name, return_value=built):
-                module.main()
-        finally:
-            sys.argv = argv
+        with mock.patch.object(module, build_name, return_value=built):
+            run_cli(module.main, "--export", output.parent, "--out", output, prog=f"{module.__name__}.py")
 
     def test_spike_carrier_parquet_preserves_previous_file(self):
         temp = self.tmp()

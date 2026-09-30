@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import compare_rpc_params as guard
 
 
@@ -37,9 +37,7 @@ def records(values=None):
 
 def run(**kwargs):
     """`main`'s exit code and what it printed."""
-    with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
-        code = guard.main(**kwargs)
-    return code, out.getvalue()
+    return run_cli(lambda _: guard.main(**kwargs))[:2]
 
 
 class ExitCodeTests(unittest.TestCase):

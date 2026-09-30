@@ -1,13 +1,11 @@
 """`extract_rounds.py`: rows come from the phase RPCs, never from RoundResults."""
 from __future__ import annotations
 
-import contextlib
-import io
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import extract_rounds as rounds
 
 
@@ -58,10 +56,7 @@ class ExtractRoundsTests(TempDirTestCase):
         return self.write(fields, events)
 
     def run_main(self, out):
-        with contextlib.redirect_stdout(io.StringIO()) as stdout, \
-                contextlib.redirect_stderr(io.StringIO()) as stderr:
-            code = rounds.main(["--export", str(self.export), "--out", str(out)])
-        return code, stdout.getvalue(), stderr.getvalue()
+        return run_cli(rounds.main, "--export", self.export, "--out", out)
 
     def test_a_round_is_its_phases_joined_to_its_events_and_result(self):
         rows, counts, problems = rounds.build(self.two_rounds())

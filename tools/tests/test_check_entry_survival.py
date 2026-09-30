@@ -12,7 +12,7 @@ import re
 import unittest
 from pathlib import Path
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import check_entry_survival as guard
 
 REFS = ["Owner", "Instigator", "AttachParent", "Controller"]
@@ -51,10 +51,7 @@ def judge(replays, cat):
 
 
 def run(replays, cat, expected=()):
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = guard.run(replays, cat, list(expected), guard.LoadStats())
-    return code, out.getvalue(), err.getvalue()
+    return run_cli(lambda _: guard.run(replays, cat, list(expected), guard.LoadStats()))
 
 
 def categories(judgement):

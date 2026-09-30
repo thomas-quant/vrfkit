@@ -4,15 +4,13 @@ The summary patterns themselves are test_summary_counters.py's.
 """
 import ast
 import contextlib
-import io
-import os
 import re
 import sys
 import unittest
 from pathlib import Path
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import check_decode_errors_corpus as guard
 
 #: The main-pass sink lines, failure counters at zero. Values from a real 13.02
@@ -318,23 +316,14 @@ class MainWiringTests(TempDirTestCase):
         (self.root / "export").write_text(FAKE_EXPORT_SCRIPT, encoding="utf-8")
         self.corpus = self.root / "corpus"
         self.corpus.mkdir()
-        self._previous_cwd = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, self._previous_cwd)
-        self._argv = sys.argv
+        self.enterContext(contextlib.chdir(self.root))
 
     def run_main(self, *names, extra_args=()):
         for name in names:
             (self.corpus / name).write_bytes(b"not a real replay")
-        sys.argv = ["check_decode_errors_corpus.py", sys.executable, str(self.corpus),
-                    "--jobs", "1", *extra_args]
-        out = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                code = guard.main()
-        finally:
-            sys.argv = self._argv
-        return code, out.getvalue()
+        code, out, _ = run_cli(guard.main, sys.executable, self.corpus, "--jobs", "1", *extra_args,
+                               prog="check_decode_errors_corpus.py", merged=True)
+        return code, out
 
     def test_a_clean_checkpoint_run_prints_every_total_and_what_backs_its_zeros(self):
         """Every total prints, zeros included, and the OK line separates the

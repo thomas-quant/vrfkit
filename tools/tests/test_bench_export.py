@@ -5,17 +5,14 @@ noise into a verdict, or let a genuinely faster run pass silently -- a run well
 under the baseline means the baseline is stale, which is the same problem as a
 regression pointed the other way.
 """
-import contextlib
-import io
 import json
 import os
-import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import bench_export as bench
 import check_baseline_schemas as schemas
 
@@ -62,13 +59,9 @@ class MainTests(TempDirTestCase):
         return path
 
     def run_bench(self, replay: Path, extra=(), seconds=1.0) -> tuple[int, str]:
-        argv = ["bench_export.py", "--exe", str(self.exe), "--replay", str(replay),
-                "--baseline", str(self.baseline), "--repeats", "1", *extra]
-        out = io.StringIO()
-        with mock.patch.object(sys, "argv", argv), \
-                mock.patch.object(bench, "time_export", return_value=[seconds]), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            return bench.main(), out.getvalue()
+        with mock.patch.object(bench, "time_export", return_value=[seconds]):
+            return run_cli(bench.main, "--exe", self.exe, "--replay", replay, "--baseline", self.baseline,
+                           "--repeats", "1", *extra, prog="bench_export.py", merged=True)[:2]
 
     def read(self) -> dict:
         return json.loads(self.baseline.read_text(encoding="utf-8"))

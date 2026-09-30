@@ -2,14 +2,12 @@
 actor, sentinels as null, and a kill feed that pairs with characterDeath."""
 from __future__ import annotations
 
-import contextlib
-import io
 import json
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import extract_damage_events as damage
 
 POINT = "MulticastNotifyDamage_Point"
@@ -63,10 +61,7 @@ class ExtractDamageEventsTests(TempDirTestCase):
 
     def run_main(self):
         out = self.root / "damage.parquet"
-        with contextlib.redirect_stdout(io.StringIO()) as stdout, \
-                contextlib.redirect_stderr(io.StringIO()):
-            code = damage.main(["--export", str(self.export), "--out", str(out)])
-        return code, stdout.getvalue(), out
+        return *run_cli(damage.main, "--export", self.export, "--out", out)[:2], out
 
     def test_two_invocations_in_one_bunch_split_on_the_repeated_parameter(self):
         rows, counts, problems = damage.build(self.write(invocation(100, PAWN) + invocation(100, PAWN), []))
