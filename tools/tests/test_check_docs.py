@@ -253,7 +253,9 @@ class SuiteMeasurementTests(unittest.TestCase):
         self.assertEqual(result, (6, 8, []))
         python = [c for c in cmds if c[0] != "cargo"]
         self.assertEqual(sorted(c[-1] for c in python), self.MODULES)
-        self.assertTrue(all(c[1:3] == ["-W", "error"] and "-b" in c for c in python), python)
+        # `-b` is a `discover` option: before it, unittest rejects -s/-p (exit 2).
+        self.assertTrue(all(c[1:3] == ["-W", "error"] and "-b" in c
+                            and c.index("-b") > c.index("discover") for c in python), python)
 
     def test_empty_output_and_zero_tests_are_not_successful_measurements(self):
         for label, output in (("rust", ""), ("python", ""),

@@ -56,7 +56,7 @@ python -W error tools/check_docs.py   # runs cargo test --workspace and the tool
 `check_docs.py` runs both test suites and fails on either, showing the last
 4,000 characters of a failing run; rerun that suite alone
 (`cargo +1.86.0 test --workspace --locked`, or
-`python -W error -m unittest -b discover -s tools/tests -p "test_*.py"`) for
+`python -W error -m unittest discover -b -s tools/tests -p "test_*.py"`) for
 its full output.
 
 For the interop lines, point `VRFKIT_INTEROP_DIR` at a private root; the Rust

@@ -705,7 +705,7 @@ def measure_tests(modules: list[str] | None = None) -> tuple[int, int, list[str]
                                       "--quiet"], 3600)
         # `-b` keeps a passing test's output out of the capture.
         tool_runs = [(module, pool.submit(_run, [sys.executable, "-W", "error", "-m", "unittest",
-                                                 "-b", "discover", "-s", "tools/tests", "-p",
+                                                 "discover", "-b", "-s", "tools/tests", "-p",
                                                  module], 1800))
                      for module in modules]
     problems = [] if tool_runs else ["found no tools test module"]
