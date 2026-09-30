@@ -1,21 +1,16 @@
 """Guards for the doc guard: nothing else catches a wrong number in prose, so
 its detection logic must not rot into something that passes everything."""
 import ast
-import contextlib
 import inspect
-import io
 import json
 import re
-import sys
 import textwrap
 import unittest
 from unittest.mock import patch
 from subprocess import CompletedProcess
-from pathlib import Path
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_docs as guard  # noqa: E402
+from support import run_cli
+import check_docs as guard
 
 
 USAGE_MENTIONING_EVERYTHING = " ".join(
@@ -511,13 +506,10 @@ class CheckCountTests(unittest.TestCase):
         return len(listed[0].elts), appended
 
     def printed_count(self, *argv: str) -> int:
-        output = io.StringIO()
-        with patch.object(sys, "argv", ["check_docs.py", *argv]), \
-                patch.object(guard, "measure_tests", return_value=(1, 1, [])), \
-                contextlib.redirect_stdout(output):
-            guard.main()
-        found = re.search(r"(\d+) checks$", output.getvalue(), re.M)
-        self.assertIsNotNone(found, output.getvalue())
+        with patch.object(guard, "measure_tests", return_value=(1, 1, [])):
+            _, output, _ = run_cli(guard.main, *argv, prog="check_docs.py")
+        found = re.search(r"(\d+) checks$", output, re.M)
+        self.assertIsNotNone(found, output)
         return int(found.group(1))
 
     def test_the_printed_count_is_the_number_of_checks_combined(self):

@@ -2,18 +2,13 @@
 must not read an empty C# side as total coverage, and must exit nonzero when
 it measured nothing.
 """
-import contextlib
-import io
 import json
-import sys
 import unittest
-from unittest import mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import compare_with_csharp as guard
 
 
@@ -114,11 +109,7 @@ class RpcNameTests(TempDirTestCase):
         pq.write_table(pa.table({"group_path": [g for g, _ in rows],
                                  "field_name": [f for _, f in rows]}),
                        vk / "fields.parquet")
-        output = io.StringIO()
-        with mock.patch.object(sys, "argv", ["compare_with_csharp.py", str(cs), str(vk)]), \
-                contextlib.redirect_stdout(output):
-            guard.main()
-        report = output.getvalue()
+        _, report, _ = run_cli(guard.main, cs, vk, prog="compare_with_csharp.py")
         return report.split("## 4. RPC name comparison", 1)[1].split("## 5.", 1)[0]
 
     def test_vrfkit_rpc_names_come_from_class_net_cache_prefixes(self):

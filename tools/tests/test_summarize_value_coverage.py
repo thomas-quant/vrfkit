@@ -1,12 +1,10 @@
 """Physical coverage counts rows once and never substitutes truthiness for null."""
-import contextlib
-import io
 import json
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import summarize_value_coverage as coverage
 
 
@@ -52,10 +50,8 @@ class PhysicalCoverageTests(TempDirTestCase):
             ".pub2.vrfkit-previous-4242-7", ".pub2.vrfkit-staging-55396-0")]
 
         self.assertEqual(coverage.discover([self.root]), [(self.root / "pub2").resolve()])
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = coverage.main([str(self.root), "--jobs", "1"])
-        report = json.loads(output.getvalue())
+        code, output, _ = run_cli(coverage.main, self.root, "--jobs", "1")
+        report = json.loads(output)
         self.assertEqual(code, 0)
         self.assertEqual(report["export_count"], 1)
         self.assertEqual(report["tables"]["fields"]["rows"], 5)
@@ -71,10 +67,8 @@ class PhysicalCoverageTests(TempDirTestCase):
         broken = self.root / "broken"
         broken.mkdir()
         (broken / "fields.parquet").write_bytes(b"not parquet")
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = coverage.main([str(self.root)])
-        report = json.loads(output.getvalue())
+        code, output, _ = run_cli(coverage.main, self.root)
+        report = json.loads(output)
         self.assertEqual(code, 1)
         self.assertFalse(report["complete"])
         self.assertEqual(report["successful_exports"], 1)
@@ -87,10 +81,8 @@ class PhysicalCoverageTests(TempDirTestCase):
         partial = self.root / "partial"
         self.write(partial)
         (partial / "manifest.json").unlink()
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = coverage.main([str(self.root)])
-        report = json.loads(output.getvalue())
+        code, output, _ = run_cli(coverage.main, self.root)
+        report = json.loads(output)
         self.assertEqual((code, report["complete"], report["successful_exports"]), (1, False, 1))
         self.assertIn("manifest.json", report["errors"][0]["error"])
 

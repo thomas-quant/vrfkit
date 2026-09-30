@@ -1,8 +1,6 @@
 """Guards for the component-remap check: the strict verdict for each pair
 kind, the rename signal, and a run that checked nothing. Fixture row counts
 are measured shapes from real exports."""
-import contextlib
-import io
 import os
 import subprocess
 import sys
@@ -11,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import TOOLS, TempDirTestCase
+from support import TOOLS, TempDirTestCase, run_cli
 import check_component_remaps as guard
 
 SCRIPT = TOOLS / "check_component_remaps.py"
@@ -176,12 +174,9 @@ class MainTests(TempDirTestCase):
 
     def run_main(self, rows):
         """(exit code, stdout, stderr) of `main` over an export of `rows`."""
-        out, err = io.StringIO(), io.StringIO()
-        with tempfile.TemporaryDirectory() as directory, \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with tempfile.TemporaryDirectory() as directory:
             write_fields(directory, rows)
-            code = guard.main(["--export", directory])
-        return code, out.getvalue(), err.getvalue()
+            return run_cli(guard.main, "--export", directory)
 
     def test_a_missing_export_fails_with_exit_2(self):
         """`--export` is required, so no fields.parquet is a wrong path, not a
