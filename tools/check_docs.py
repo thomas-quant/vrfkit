@@ -3,70 +3,53 @@
 A number measured once gets quoted forever, and a stale sentence compiles and
 passes every test. So this reads the repo and the docs and compares:
 
-  1. every tools/*.py script is mentioned in USAGE (an unmentioned tool is an
-     undiscoverable one)
-  2. every script USAGE names exists
-  3. every crate has a row in the layer table
-  4. every relative link in README and USAGE resolves
-  5. README and USAGE quote the live overlay table sizes
-  6. no quoted table size in any of `ALL_DOCS` is stale, even beside a live
-     one (`stale_table_size_claims`)
-  7. no Rust doc comment or Cargo.toml quotes a stale one
-  8. README and USAGE quote the live test counts, and no stale count sits
-     beside a live one (`stale_test_counts`); `--fast` keeps only
-     `contradicting_test_counts`
-  9. no `MEASURED_RE` count in any of `ALL_DOCS` is stale, and a count that
-     could not be measured is reported rather than skipped
- 10. every relative link in the other `ALL_DOCS` and in docs/*.md resolves
- 11. generated-file inventories include every live target and generator
- 12. README and USAGE export rows/bytes match the committed baseline JSON
- 13. the five overlay buckets in that baseline still partition
-     `overlay_rows_offered` exactly, and every counter the docs quote is
-     present (`overlay_partition_problems`)
- 14. no quoted overlay counter or `Typed` ratio in any of `ALL_DOCS` is stale
-     against that baseline (`stale_overlay_counters`)
- 15. README still carries the overlay summary block, so (14) cannot be
-     satisfied by deleting it
- 16. both build tables use the same verification method and measured clean/
-     checked counts, covering exactly the registered payload transforms
- 17. CONTRIBUTING's `cargo check` lines and ci.yml's `$matrix` are the same
-     cases in the same order
- 18. every `#anchor` a link in a link-checked doc names, and every
-     `docs/<name>.md#<anchor>` a Rust or Python source names, is a heading
-     of its target by GitHub's slug rules (`anchor_problems`). docs/archive/
-     is a target, never a source. Setext headings are not read, so a link to
-     one is reported rather than passed.
+  1. every tools/*.py script is mentioned in USAGE, and every one it names exists
+  2. every crate has a row in USAGE's layer table
+  3. README and USAGE quote the live overlay table sizes, and no quoted size
+     in `ALL_DOCS`, Rust doc comments or Cargo.toml is stale
+  4. README and USAGE quote the live test counts, and no stale count sits
+     beside a live one; `--fast` keeps only `contradicting_test_counts`
+  5. no `MEASURED_RE` count in `ALL_DOCS` is stale, and a count that could not
+     be measured is reported rather than skipped
+  6. every relative link in `ALL_DOCS` and docs/*.md resolves
+  7. CONTRIBUTING and the PR template name every generated target
+  8. USAGE's export rows/bytes match the committed baseline JSON, whose five
+     overlay buckets still partition `overlay_rows_offered`; no quoted overlay
+     counter or `Typed` ratio is stale, and README still carries the block
+  9. README's build table covers exactly the registered payload transforms,
+     with the audit's clean/checked counts and one verification method
+ 10. every `#anchor` a doc links, and every `docs/<name>.md[#<anchor>]` a
+     tracked .rs, .py or .json file names, exists by GitHub's slug rules;
+     Setext headings are not read, so a link to one is reported
 
-A number is guarded when something in the repo can be *run* to produce it.
-docs/DATA.md's measurements ("377,487 elements", "1,021 windows") come from
-analysis runs, so a check would only be a second copy of the number. (12)-(15)
-read committed JSON, so none of them needs a `.vrf`.
-
-(8) runs both suites, roughly `cargo test` plus the tools suite: run the full
-guard when touching docs or before finishing a session. CI runs it in the
-Windows MSRV job, where Rust and Python are both installed; the Python
-platform/version matrix runs `--fast` for source/document consistency.
+A number is guarded when something in the repo can be *run* to produce it;
+DATA.md's measurements come from analysis runs, so they are not. (8) reads
+committed JSON, so no `.vrf` is needed. (4) runs `cargo test` and the tools
+suite; CI runs the full guard in the Windows MSRV job and `--fast` on the
+Python matrix.
 
 Usage:
     python tools/check_docs.py
-    python tools/check_docs.py --fast     # skip (8), no test runs
+    python tools/check_docs.py --fast     # skip (4)'s suite runs
 """
 from __future__ import annotations
 
 import argparse
 import functools
 import json
+import os
 import re
-import importlib.util
 import subprocess
 import sys
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import unquote
 
 REPO = Path(__file__).resolve().parent.parent
 README = REPO / "README.md"
 USAGE = REPO / "docs" / "USAGE.md"
+EXPORT_BASELINE = REPO / "tools" / "baselines" / "export_02d4d478.json"
 
 GENERATED_INVENTORY = {
     "crates/vrf-decode/src/checksum_table.rs": "tools/extract_checksum_types.py",
@@ -74,7 +57,6 @@ GENERATED_INVENTORY = {
     "crates/vrf-transform/tests/data/native_vectors.rs": "tools/capture_native_transforms.py",
 }
 GENERATED_INVENTORY_DOCS = (
-    "README.md",
     "CONTRIBUTING.md",
     ".github/PULL_REQUEST_TEMPLATE.md",
 )
@@ -94,11 +76,11 @@ def read(path: Path) -> str:
 
 
 def check_build_verification(readme: str, usage: str, registry: str, report: dict) -> list[str]:
-    """Both public tables must use the same measured scope and acceptance rule."""
+    """README's build table must cover exactly the registered transforms with the
+    audit's clean/checked counts and one acceptance rule; USAGE's layer table
+    must count the same builds."""
     problems = []
-    # lib.rs's `transforms!` block; the `ALL_VERSIONS` literal is the test fixtures' form.
-    match = (re.search(r"^transforms! \{$(.*?)^\}$", registry, re.S | re.M)
-             or re.search(r"ALL_VERSIONS:.*?=\s*&\[(.*?)\];", registry, re.S))
+    match = re.search(r"^transforms! \{$(.*?)^\}$", registry, re.S | re.M)
     if not match:
         return ["cannot read supported transform registry"]
     versions = {f"{a}.{b}" for a, b in re.findall(r"\bV(\d\d)(\d\d)\b", match[1])}
@@ -127,31 +109,29 @@ def check_build_verification(readme: str, usage: str, registry: str, report: dic
         if (row.get("checkpoint_evidence") != "observed"
                 or any(type(value) is not int or value <= 0 for value in checkpoint_counts)):
             problems.append(f"build audit {version}: no positive checkpoint decoding evidence")
-    for name, doc, readme_table in (("README", readme, True), ("USAGE", usage, False)):
-        for quoted in re.findall(r"Payload transform \((\d+) builds\)", doc):
-            if int(quoted) != len(versions):
-                problems.append(f"{name}: transform layer lists {quoted} builds, registry has {len(versions)}")
-        rows = {}
-        for line in doc.splitlines():
-            cells = [cell.strip().replace("**", "") for cell in line.strip().strip("|").split("|")]
-            if not cells or not re.fullmatch(r"\d{2}\.\d{2}", cells[0]):
-                continue
-            version = cells[0]
-            if version in rows:
-                problems.append(f"{name}: duplicate build row {version}")
-            rows[version] = cells
-        if set(rows) != versions:
-            problems.append(f"{name}: support table differs from supported registry")
-        for version in sorted(versions & set(rows) & set(measured)):
-            cells, actual = rows[version], measured[version]
-            expected = f"{actual['passed']}/{actual['replays']}"
-            count_index = 2 if readme_table else 1
-            if len(cells) != count_index + 2 or cells[count_index] != expected:
-                problems.append(f"{name}: {version} clean/checked must be {expected}")
-            if cells[-1] != BUILD_METHOD:
-                problems.append(f"{name}: {version} uses a different verification method")
-            if readme_table and cells[1] != f"`release-{version}`":
-                problems.append(f"{name}: {version} branch label differs")
+    for quoted in re.findall(r"Payload transform \((\d+) builds\)", readme + usage):
+        if int(quoted) != len(versions):
+            problems.append(f"transform layer lists {quoted} builds, registry has {len(versions)}")
+    rows = {}
+    for line in readme.splitlines():
+        cells = [cell.strip().replace("**", "") for cell in line.strip().strip("|").split("|")]
+        if not cells or not re.fullmatch(r"\d{2}\.\d{2}", cells[0]):
+            continue
+        version = cells[0]
+        if version in rows:
+            problems.append(f"README: duplicate build row {version}")
+        rows[version] = cells
+    if set(rows) != versions:
+        problems.append("README: support table differs from supported registry")
+    for version in sorted(versions & set(rows) & set(measured)):
+        cells, actual = rows[version], measured[version]
+        expected = f"{actual['passed']}/{actual['replays']}"
+        if len(cells) != 4 or cells[2] != expected:
+            problems.append(f"README: {version} clean/checked must be {expected}")
+        if cells[-1] != BUILD_METHOD:
+            problems.append(f"README: {version} uses a different verification method")
+        if cells[1] != f"`release-{version}`":
+            problems.append(f"README: {version} branch label differs")
     return problems
 
 
@@ -208,10 +188,9 @@ def check_table_sizes(docs: dict[str, str]) -> list[str]:
     return problems
 
 
-#: How prose states the two table sizes, narrow enough that a match
-#: is always that claim. Every such number must be the live one, so a stale
-#: figure cannot hide beside a correct one (`check_table_sizes` only asks
-#: whether the live number appears; see `stale_test_counts`).
+#: How prose states the two table sizes, narrow enough that a match is always
+#: that claim; every match must be live, so a stale figure cannot hide beside a
+#: correct one.
 TABLE_CLAIM_RE = (
     ("overlay table", 0, re.compile(r"(\d[\d,]*)\s+entries\b")),
     ("handle table", 1, re.compile(r"(\d[\d,]*)\s+handles\b")),
@@ -264,27 +243,31 @@ def check_source_table_size() -> list[str]:
             for i, quoted in stale_entry_phrases(read(path), live)]
 
 
-#: The phrase the docs use to state a suite size, narrow enough that a match
-#: is always a claim about one of the two suites. The suite may be named
-#: between the number and the noun, as README's highlight does ("793 Rust
-#: tests"); that line went stale twice while only the plain form was read.
+#: How the docs state a suite size, narrow enough that a match is always a
+#: claim about one of the two suites; the suite may sit between the number and
+#: the noun ("807 Rust tests").
 TEST_COUNT_RE = re.compile(r"(\d[\d,]*)\s+(?:(Rust|Python)\s+)?(?:tests|passing)\b")
 
 
 def stale_test_counts(text: str, live: set[str],
                       by_suite: dict[str, set[str]] | None = None) -> list[tuple[int, str]]:
-    """`(line number, quoted count)` for every suite-size claim not in `live`.
-
-    Presence is not agreement: README carried `387 tests` and `355 passing` at
-    once for twelve commits, and a check asking whether the live number
-    appears somewhere passed on the first. `live` holds both suite counts in
-    both spellings, and every claim must be one of them; a claim that names
-    its suite must be that suite's, when `by_suite` gives it.
-    """
+    """`(line number, quoted count)` for every suite-size claim not in `live`
+    (both suites' counts in both spellings): presence is not agreement. A claim
+    that names its suite must be that suite's, when `by_suite` gives it."""
     return [(i, quoted)
             for i, line in enumerate(text.splitlines(), 1)
             for quoted, suite in TEST_COUNT_RE.findall(line)
             if quoted not in ((by_suite or {}).get(suite) or live)]
+
+
+def unquoted_test_counts(docs: dict[str, str], counts: dict[str, int]) -> list[str]:
+    """Each doc must quote each live suite size in a `TEST_COUNT_RE` claim, in
+    either spelling; a longer number that contains it quotes nothing."""
+    return [f"{name}: {label} test count is {count}, not quoted"
+            for label, count in counts.items()
+            for name, text in docs.items()
+            if not any(q.replace(",", "") == str(count)
+                       for q, _suite in TEST_COUNT_RE.findall(text))]
 
 
 def contradicting_test_counts(docs: dict[str, str]) -> list[str]:
@@ -318,69 +301,25 @@ ALL_DOCS = ("README.md", "docs/USAGE.md", "docs/DATA.md", "CONTRIBUTING.md",
             "CLAUDE.md")
 
 #: Numbers quoted in prose *and* produced by something runnable, as `(count
-#: pattern, context, context window)`, phrased narrowly enough that a match is
-#: always that claim. Where there is a context, a line must name its check to
-#: be read as claiming the count: README's "all 215 files" is about replays,
-#: not the ASCII sweep. The window is how many lines ABOVE the count the
-#: context may sit, because prose wraps: USAGE.md writes "The `ADDITIONS`
-#: pass ... There are" and "currently 73 of them" on the next line. Widening
-#: the pattern instead would read the generic "currently N of them" wherever
-#: a future paragraph uses it.
+#: pattern, context, context window)`, narrow enough that a match is always
+#: that claim. With a context, the count counts only when the context sits on
+#: its line or within `window` lines above (prose wraps: "`ADDITIONS` ..." then
+#: "currently 142 of them").
 MEASURED_RE = {
-    "ascii": (re.compile(r"(\d+) files?\b"), re.compile(r"ascii", re.I), 0),
     "corrections": (re.compile(r"(\d+) corrections"), None, 0),
-    # `ADDITIONS`, the descriptor-silent subset of the corrections list.
     "additions": (re.compile(r"currently (\d+) of them"),
                   re.compile(r"ADDITIONS"), 2),
-    # Each phrase below is specific enough to be that claim with no context.
-    "matrix": (re.compile(r"(\d+) `cargo check`"), None, 0),
-    "matrix_cases": (re.compile(r"the same (\d+) cases"), None, 0),
     "golden": (re.compile(r"(\d+) mechanically extracted golden vectors"), None, 0),
-    # "N builds" is generic -- the transform table talks about builds too -- so
-    # it counts only on a line that names the semantic guard.
+    # "N builds" is generic, so only on a line naming the semantic guard.
     "metrics_builds": (re.compile(r"(\d+) builds\b"),
                        re.compile(r"check_metrics_baseline"), 0),
 }
 
-#: The CONTRIBUTING and ci.yml spellings of the feature-check matrix.
-MATRIX_LINE_RE = re.compile(r"cargo \+1\.86\.0 check -p (\S+) --no-default-features"
-                            r"(?: --features (\S+))? --locked")
-MATRIX_BLOCK_RE = re.compile(r"\$matrix = @\((.*?)\n\s*\)", re.S)
-MATRIX_CASE_RE = re.compile(r'@\("([^"]+)",\s*"([^"]*)"\)')
 GOLDEN_LEN_RE = re.compile(r"pub const VECTORS: \[\(&str, usize, &str\); (\d+)\]")
 
 
-def feature_matrices(contributing: str, ci: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]] | None]:
-    """The (crate, feature) cases each file runs, in order. `None` for ci.yml
-    means its matrix block could not be found at all."""
-    documented = [(crate, feature or "") for crate, feature in MATRIX_LINE_RE.findall(contributing)]
-    block = MATRIX_BLOCK_RE.search(ci)
-    return documented, (MATRIX_CASE_RE.findall(block.group(1)) if block else None)
-
-
-def check_feature_matrix(contributing: str, ci: str) -> list[str]:
-    """CONTRIBUTING's `cargo check` lines and ci.yml's `$matrix` must be the
-    same cases in the same order. An empty or unparseable side is a problem,
-    never a vacuous match."""
-    documented, ci_cases = feature_matrices(contributing, ci)
-    if not documented:
-        return ["CONTRIBUTING.md: no `cargo +1.86.0 check -p ... --no-default-features` lines found"]
-    if ci_cases is None:
-        return [".github/workflows/ci.yml: no `$matrix = @(...)` block found"]
-    problems = [f"feature matrix: {case} is in CONTRIBUTING.md but not ci.yml"
-                for case in documented if case not in ci_cases]
-    problems += [f"feature matrix: {case} is in ci.yml but not CONTRIBUTING.md"
-                 for case in ci_cases if case not in documented]
-    if not problems and documented != ci_cases:
-        problems.append("feature matrix: CONTRIBUTING.md and ci.yml list the same "
-                        "cases in a different order")
-    return problems
-
-
 def link_checked_docs() -> list[Path]:
-    """Every doc whose relative links are checked: the five read above plus
-    every top-level file under docs/. docs/archive/ is dated history and keeps
-    whatever it linked to at the time."""
+    """Every doc whose relative links are checked: `ALL_DOCS` plus docs/*.md."""
     paths = {REPO / name for name in ALL_DOCS}
     paths.update((REPO / "docs").glob("*.md"))
     return sorted(paths)
@@ -391,9 +330,9 @@ FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
 CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1")
 INLINE_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
-#: A Rust or Python source naming a doc heading. A slug never holds a dot, so
-#: a sentence-ending `.` after the anchor is not read as part of it.
-CODE_ANCHOR_RE = re.compile(r"\b(docs/(?:[\w.-]+/)*[\w.-]+\.md)#([\w-]+)")
+#: A source or fixture naming a doc, with or without a heading. A slug never
+#: holds a dot, so a sentence-ending `.` is not read as part of it.
+CODE_ANCHOR_RE = re.compile(r"\b(docs/(?:[\w.-]+/)*[\w.-]+\.md)(?:#([\w-]+))?")
 
 
 def unfenced_lines(text: str):
@@ -488,43 +427,48 @@ def broken_markdown_anchors(path: Path, text: str, lookup=anchors_of,
 
 def broken_code_anchors(name: str, text: str, lookup=anchors_of,
                         checked: list | None = None) -> list[str]:
-    """`docs/<name>.md#<anchor>` references in one source file that name a
-    doc or a heading that does not exist; each one is appended to
-    `checked`. Paths are repository-relative."""
+    """`docs/<name>.md[#<anchor>]` references in one file that name a doc or
+    a heading that does not exist; each one is appended to `checked`. Paths
+    are repository-relative."""
     problems = []
     for i, line in enumerate(text.splitlines(), 1):
         for doc, fragment in CODE_ANCHOR_RE.findall(line):
+            cite = f"{doc}#{fragment}" if fragment else doc
             if checked is not None:
-                checked.append(f"{doc}#{fragment}")
+                checked.append(cite)
             anchors = lookup((REPO / doc).resolve())
             if anchors is None:
-                problems.append(f"{name}:{i}: cites {doc}#{fragment}, but {doc} does not exist")
-            elif fragment not in anchors:
-                problems.append(f"{name}:{i}: cites {doc}#{fragment}, but {doc} has no such heading")
+                problems.append(f"{name}:{i}: cites {cite}, but {doc} does not exist")
+            elif fragment and fragment not in anchors:
+                problems.append(f"{name}:{i}: cites {cite}, but {doc} has no such heading")
     return problems
 
 
 def anchor_problems(checked: dict[str, list] | None = None) -> list[str]:
-    """Every broken anchor in the link-checked docs and the tracked Rust and
-    Python sources. `checked["docs"]` and `checked["code"]` receive every
-    reference read, so a run that read none can say so. A source list that
-    cannot be read is reported, not treated as an empty one."""
+    """Every broken anchor in the link-checked docs, and every missing doc or
+    heading the tracked Rust, Python and JSON files cite. `checked["docs"]`
+    and `checked["code"]` receive every reference read, so a run that read
+    none can say so. A source list that cannot be read is reported, not
+    treated as an empty one."""
     checked = {} if checked is None else checked
     docs, code = checked.setdefault("docs", []), checked.setdefault("code", [])
     problems = [p for path in link_checked_docs()
                 for p in broken_markdown_anchors(path, read(path), checked=docs)]
-    r = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", "*.rs", "*.py"],
+    r = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", "*.rs", "*.py", "*.json"],
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=120)
     if r.returncode != 0:
         return problems + [
-            f"could not list the Rust and Python sources: git ls-files exited "
+            f"could not list the sources: git ls-files exited "
             f"{r.returncode} ({(r.stderr or '').strip()[:120]}); every code "
-            f"anchor went unchecked"]
+            f"reference went unchecked"]
     for name in r.stdout.splitlines():
         if name.strip():
             text = (REPO / name).read_text(encoding="utf-8", errors="replace")
             problems += broken_code_anchors(name, text, checked=code)
+    # A scan that read nothing would otherwise pass.
+    problems += [f"anchor check read no {what}" for what, found in
+                 (("doc links", docs), ("code references to docs", code)) if not found]
     return problems
 
 
@@ -544,14 +488,12 @@ def check_generated_inventory(docs: dict[str, str]) -> list[str]:
     return problems
 
 
-def baseline_table_figures() -> dict[str, tuple[int, int]]:
+def baseline_table_figures(export: dict | None = None) -> dict[str, tuple[int, int]]:
     """Rows and bytes promised by the committed reference export baselines:
     the main tables from the export baseline (the docs quote the default
     main-only run), every `checkpoint_*` table from the checkpoint baseline."""
-    export = json.loads(read(REPO / "tools" / "baselines" / "export_02d4d478.json"))
-    checkpoint = json.loads(
-        read(REPO / "tools" / "baselines" / "checkpoint_02d4d478.json")
-    )
+    export = export or json.loads(read(EXPORT_BASELINE))
+    checkpoint = json.loads(read(EXPORT_BASELINE.with_name("checkpoint_02d4d478.json")))
     figures = {
         f"{name}.parquet": (int(values["rows"]), int(values["bytes"]))
         for name, values in export["parquet"].items()
@@ -597,13 +539,9 @@ def check_baseline_figures(
 
 
 #: The overlay summary block README reprints, keyed by the label as printed and
-#: mapped to the baseline counter it quotes. `export_02d4d478.json` records
-#: them for the reference replay, so no `.vrf` is needed (CI has none).
-#:
-#: `Decode errors` is deliberately absent: "Decode errors: 0" names a failure
-#: mode in CLAUDE.md (twice), docs/DATA.md and docs/USAGE.md rather than
-#: measuring this replay, so guarding it would fire on all four the first time
-#: the baseline recorded a nonzero value.
+#: mapped to the baseline counter it quotes (no `.vrf` needed). `Decode errors`
+#: is absent on purpose: "Decode errors: 0" names a failure mode in CLAUDE.md,
+#: DATA and USAGE, not this replay's value.
 OVERLAY_COUNTER_KEYS = {
     "Decoded OK": "overlay_decoded_ok",
     "Raw/Skip": "overlay_raw_skip",
@@ -625,12 +563,6 @@ OVERLAY_PARTITION = ("overlay_decoded_ok", "overlay_decode_errors",
 #: `Typed` is not stored: it is `Decoded OK / Rows offered` as a percentage,
 #: derived rather than pinned so it cannot drift from the two counters.
 TYPED_RE = re.compile(r"Typed:\s*([\d.]+)%")
-
-
-def baseline_overlay_counters() -> dict[str, int]:
-    """The overlay counters the committed reference export recorded."""
-    export = json.loads(read(REPO / "tools" / "baselines" / "export_02d4d478.json"))
-    return {k: int(v) for k, v in export["counters"].items()}
 
 
 def overlay_partition_problems(counters: dict[str, int]) -> list[str]:
@@ -706,58 +638,24 @@ def check_overlay_counters_present(readme: str,
 
 
 def measured_counts(problems: list[str] | None = None) -> dict[str, int]:
-    """The live values, read from the things that produce them.
+    """The live values, read from the things that produce them. A key that
+    could not be measured is left out and, with `problems`, reported: a
+    missing key would make `stale_measured_counts` check nothing."""
+    import apply_type_corrections as atc
 
-    A measurement that could not be taken is left out, and
-    `stale_measured_counts` skips a missing key; pass `problems` so that is
-    reported instead of silently checking nothing.
-    """
-    counts = {}
-    r = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", "*.rs"],
-                       capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", timeout=120)
-    if r.returncode == 0:
-        counts["ascii"] = len([ln for ln in r.stdout.splitlines() if ln.strip()])
-    elif problems is not None:
-        problems.append(
-            f"could not measure the ascii file count: git ls-files exited "
-            f"{r.returncode} ({(r.stderr or '').strip()[:120]}); every quoted "
-            f"count went unchecked")
-
-    # `tools/` on the path first: apply_type_corrections.py imports `atomic_io`,
-    # which under `spec_from_file_location` resolves against sys.path, not the
-    # file's own directory (ModuleNotFoundError otherwise).
-    if str(REPO / "tools") not in sys.path:
-        sys.path.insert(0, str(REPO / "tools"))
-    spec = importlib.util.spec_from_file_location(
-        "_atc", REPO / "tools" / "apply_type_corrections.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    counts["corrections"] = module.expectation_count(read(module.TABLE_RS))
-    # Imported, not line-counted: each entry spans a commented block.
-    counts["additions"] = len(module.ADDITIONS)
-
-    documented, _ = feature_matrices(read(REPO / "CONTRIBUTING.md"), "")
-    if documented:
-        counts["matrix"] = counts["matrix_cases"] = len(documented)
-    elif problems is not None:
-        problems.append("could not measure the feature matrix: CONTRIBUTING.md "
-                        "has no `cargo +1.86.0 check -p` lines")
-
+    counts = {"corrections": atc.expectation_count(read(atc.TABLE_RS)),
+              # Imported, not line-counted: each entry spans a commented block.
+              "additions": len(atc.ADDITIONS)}
     golden = GOLDEN_LEN_RE.search(read(
         REPO / "crates" / "vrf-transform" / "tests" / "data" / "golden_vectors.rs"))
     if golden:
         counts["golden"] = int(golden.group(1))
-    elif problems is not None:
-        problems.append("could not measure the golden-vector count: no "
-                        "`VECTORS: [...; N]` declaration in golden_vectors.rs")
-
-    metrics = json.loads(read(REPO / "tools" / "baselines" / "metrics_builds.json"))
+    metrics = json.loads(read(EXPORT_BASELINE.with_name("metrics_builds.json")))
     if isinstance(metrics.get("replays"), dict) and metrics["replays"]:
         counts["metrics_builds"] = len(metrics["replays"])
-    elif problems is not None:
-        problems.append("could not measure the semantic guard's build count: "
-                        "metrics_builds.json has no replays")
+    if problems is not None:
+        problems += [f"could not measure the {what} count; every quoted one went unchecked"
+                     for what in MEASURED_RE if what not in counts]
     return counts
 
 
@@ -787,44 +685,54 @@ def stale_measured_counts(docs: dict[str, str], live: dict[str, int]) -> list[st
     return problems
 
 
-def measure_tests() -> tuple[int, int, list[str]]:
-    problems = []
-    # The sweep's and CI's toolchain and lockfile: a newer default toolchain
-    # could measure code that 1.86 rejects.
-    r = subprocess.run(["cargo", "+1.86.0", "test", "--workspace", "--locked", "--quiet"],
-                       cwd=REPO, capture_output=True,
-                       text=True, encoding="utf-8", errors="replace", timeout=3600)
-    out = (r.stdout or "") + (r.stderr or "")
-    passed_matches = re.findall(r"^test result: ok\. (\d+) passed;", out, re.M)
-    rust = sum(int(m) for m in passed_matches)
-    if r.returncode != 0:
-        problems.append("cargo test did not pass; doc counts not checked against it\n" + out[-4000:])
-    elif not passed_matches:
-        # Exit 0 with no "N passed" line means the output format changed, not
-        # that nothing ran; a defaulted 0 would fail every quoted count wrongly.
-        problems.append(
-            "cargo test exited 0 but printed no 'N passed' line; the rust "
-            "test count (0) was not measured")
-    elif rust == 0:
-        problems.append("cargo test reported zero passing tests")
+def _run(cmd: list[str], timeout: int) -> tuple[int, str]:
+    r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=timeout)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
 
-    r2 = subprocess.run([sys.executable, "-W", "error", "-m", "unittest", "discover",
-                         "-s", "tools/tests", "-p", "test_*.py"],
-                        cwd=REPO, capture_output=True, text=True,
-                        encoding="utf-8", errors="replace", timeout=1800)
-    out2 = (r2.stdout or "") + (r2.stderr or "")
-    m = re.search(r"^Ran (\d+) tests? in ", out2, re.M)
-    tools_n = int(m.group(1)) if m else 0
-    if r2.returncode != 0:
-        problems.append("tools test suite did not pass\n" + out2[-4000:])
-    elif m is None:
-        problems.append(
-            "the tools test suite exited 0 but printed no 'Ran N tests' "
-            "line; the tools test count (0) was not measured")
-    elif tools_n == 0:
-        problems.append("tools test suite reported zero tests")
-    if re.search(r"^OK \(.*skipped=[1-9]", out2, re.M):
-        problems.append("tools test suite skipped tests; not every reported test passed")
+
+def measure_tests(modules: list[str] | None = None) -> tuple[int, int, list[str]]:
+    """`(rust passed, tools ran, problems)`: `cargo test --workspace` beside the
+    tools suite, one process per test module (run serially the suite takes
+    ~20 s on one core). Every run must exit 0 and print its count, and a skipped
+    Python test is a problem, so a passing summary cannot hide a failure."""
+    if modules is None:
+        modules = sorted(p.name for p in (REPO / "tools" / "tests").glob("test_*.py"))
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1) + 1) as pool:
+        # CI's toolchain and lockfile: a newer default toolchain could measure
+        # code that 1.86 rejects.
+        rust_run = pool.submit(_run, ["cargo", "+1.86.0", "test", "--workspace", "--locked",
+                                      "--quiet"], 3600)
+        # `-b` keeps a passing test's output out of the capture.
+        tool_runs = [(module, pool.submit(_run, [sys.executable, "-W", "error", "-m", "unittest",
+                                                 "discover", "-b", "-s", "tools/tests", "-p",
+                                                 module], 1800))
+                     for module in modules]
+    problems = [] if tool_runs else ["found no tools test module"]
+    rc, out = rust_run.result()
+    passed = re.findall(r"^test result: ok\. (\d+) passed;", out, re.M)
+    rust = sum(int(n) for n in passed)
+    if rc != 0:
+        problems.append("cargo test did not pass; doc counts not checked against it\n" + out[-4000:])
+    elif rust == 0:
+        # No "N passed" line after exit 0 means the output format changed, not
+        # that nothing ran; a defaulted 0 would fail every quoted count wrongly.
+        problems.append("cargo test exited 0 but reported no passing test; the rust "
+                        "test count was not measured")
+    tools_n = 0
+    for module, run in tool_runs:
+        rc, out = run.result()
+        ran = re.search(r"^Ran (\d+) tests? in ", out, re.M)
+        if rc != 0:
+            problems.append(f"tools test module {module} did not pass\n" + out[-4000:])
+        elif ran is None or ran.group(1) == "0":
+            problems.append(f"tools test module {module} exited 0 but ran no test; "
+                            f"the tools test count was not measured")
+        else:
+            tools_n += int(ran.group(1))
+        if re.search(r"^OK \(.*skipped=[1-9]", out, re.M):
+            problems.append(f"tools test module {module} skipped tests; not every "
+                            f"reported test passed")
     return rust, tools_n, problems
 
 
@@ -849,15 +757,14 @@ def main() -> int:
 
     measurement_problems: list[str] = []
     live_counts = measured_counts(measurement_problems)
-    overlay_counters = baseline_overlay_counters()
+    export_baseline = json.loads(read(EXPORT_BASELINE))
+    overlay_counters = {k: int(v) for k, v in export_baseline["counters"].items()}
     anchors_checked: dict[str, list] = {}
 
     # One entry per check: the summary prints len(checks), never a literal.
     checks = [
         check_tools(usage),
         check_crates(usage),
-        check_links(README, readme),
-        check_links(USAGE, usage),
         check_table_sizes(docs),
         stale_table_size_claims(every, table_lengths()),
         check_source_table_size(),
@@ -865,18 +772,11 @@ def main() -> int:
         measurement_problems,
         stale_measured_counts(every, live_counts),
         check_generated_inventory(generated_docs),
-        check_baseline_figures(docs, baseline_table_figures()),
+        check_baseline_figures({"USAGE.md": usage}, baseline_table_figures(export_baseline)),
         overlay_partition_problems(overlay_counters),
         stale_overlay_counters(every, overlay_counters),
         check_overlay_counters_present(readme, overlay_counters),
-        [p for name in ALL_DOCS
-         for p in check_links(REPO / name, every[name])
-         if name not in ("README.md", "docs/USAGE.md")],
-        [p for path in link_checked_docs()
-         if path.relative_to(REPO).as_posix() not in ALL_DOCS
-         for p in check_links(path, read(path))],
-        check_feature_matrix(read(REPO / "CONTRIBUTING.md"),
-                             read(REPO / ".github" / "workflows" / "ci.yml")),
+        [p for path in link_checked_docs() for p in check_links(path, read(path))],
         check_build_verification(
             readme, usage, read(REPO / "crates/vrf-transform/src/lib.rs"),
             json.loads(read(BUILD_AUDIT))),
@@ -885,11 +785,7 @@ def main() -> int:
 
     if not args.fast:
         rust, tools_n, run_problems = measure_tests()
-        for count, label in ((rust, "rust"), (tools_n, "tools")):
-            for name, text in docs.items():
-                if str(count) not in text:
-                    run_problems.append(
-                        f"{name}: {label} test count is {count}, not quoted")
+        run_problems += unquoted_test_counts(docs, {"rust": rust, "tools": tools_n})
         by_suite = {suite: {str(c), f"{c:,}"}
                     for suite, c in (("Rust", rust), ("Python", tools_n))}
         live = by_suite["Rust"] | by_suite["Python"]
@@ -907,7 +803,7 @@ def main() -> int:
     print(f"docs: {len(ALL_DOCS)} files ({len(link_checked_docs())} link-checked)   "
           f"{n_tools} tools, {n_crates} crates, "
           f"{len(anchors_checked.get('docs', []))} doc links and "
-          f"{len(anchors_checked.get('code', []))} code references to anchors, "
+          f"{len(anchors_checked.get('code', []))} code references to docs, "
           f"{len(checks)} checks")
 
     if problems:

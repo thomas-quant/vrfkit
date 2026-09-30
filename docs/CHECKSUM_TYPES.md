@@ -4,10 +4,8 @@
 descriptor, table or decoder in this repo contributed: the `compatible_checksum`
 the replay declares for every field. Unreal computes it from the property's name
 and its C++ type, so recomputing it from the type vrfkit decodes either
-reproduces the declared value or it does not.
-
-Every figure below was measured on 2026-09-28 against the tables at `9f92756`
-unless it says otherwise.
+reproduces the declared value or it does not. Figures are from the
+1,018-replay declaration corpus.
 
 ## The formula
 
@@ -25,26 +23,20 @@ crc = MemCrc32(u32 LE static index, crc)
 (non-NetSerialize) struct continues from its struct property's checksum, and a
 `TArray`'s element from the array's -- the element has the array's name.
 
-**Provenance.** The game-file analysis of 2026-09-28 measured the formula on the
-installed 13.06 build: reading the cooked Blueprint classes, 194 Blueprint
-fields declared by eight 13.06 replays reproduce by name and checksum, and
-several native identities reproduce once their struct nesting is known. This
-tool re-implements it; it does not import that code. Two cross-checks:
+**Provenance.** The formula was measured on the installed 13.06 build: 194
+Blueprint fields declared by eight 13.06 replays reproduce by name and
+checksum. Two cross-checks:
 
-- **Against the analysis's implementation** (`gamemodel.py`, outside the repo):
-  every checksum it computes while flattening the 13.06 classes and RPCs --
-  13,046 of them -- was recomputed by `compatible_checksum` on the same inputs.
-  0 differ. Both reproduce 194 of the 194 Blueprint fields and 92 of the 115
-  Blueprint RPC parameters of those eight replays; the other 23 are enums and
-  `FTransform` members, which that reader does not flatten.
-- **Against a second implementation in the tests**: a CRC-32 table built in
-  `tools/tests/test_check_checksum_types.py`, feeding each character as four
-  bytes the way `FCrc::StrCrc32` does. It and the tool agree on 2,000 random
-  inputs and on 29 checksums declared by real replays (top-level fields,
-  `FTransform` members, struct members two to four levels deep, an array and
-  its element, a bitfield bool). Each step -- the lower-casing, the UTF-32
-  width, the index, the parent -- breaks every vector it touches when dropped,
-  and no alternative type string reproduces any of them.
+- An independent game-file reader (outside the repo) computed 13,046 checksums
+  while flattening the 13.06 classes and RPCs; `compatible_checksum` gives the
+  same value on every one.
+- `tools/tests/test_check_checksum_types.py` builds its own CRC-32 table,
+  feeding each character as four bytes like `FCrc::StrCrc32`. It and the tool
+  agree on 2,000 random inputs and on 35 checksums declared by real replays
+  (top-level fields, `FTransform` members, struct members two to four levels
+  deep, an array and its element, a bitfield bool); dropping any step --
+  lower-casing, the UTF-32 width, the index, the parent -- breaks every vector
+  it touches.
 
 **Across builds.** The formula was measured on 13.06 declarations. On the
 1,018-replay corpus it reproduces declared checksums on every one of the 24
@@ -88,21 +80,13 @@ one that no item names by its exact shape fails the run.
 
 ### The resolver is vrfkit's
 
-The resolution is a Python port, so it was checked against the Rust:
-
-- **Against `resolve_field_type_with_checksum` itself**, through a scratch
-  binary linked to `vrf-decode`: all 12,937 distinct identities the corpus
-  declares resolve to the same `FieldType`, parameters included.
-- **Against real exports**: on 7 exports (11.06, 12.05, 13.01, two 13.05, two
-  13.06), main and checkpoint streams, every row that carries a checksum was
-  mapped to its identity (an RPC parameter row to its parameter group, the way
-  `sink/rpc.rs` finds it). All 15,114 (identity, export, stream) cells the
-  resolver calls typed carry a `value_*` on every row; all 9,869 it calls
-  untyped carry none. The only other values on checksum-carrying rows are 148
-  `FloatValues` / `ObjectValues` / `VectorValues` cells, which the effect-blob
-  decoder fills after the overlay declines them. None of the 1,127,553
-  ClassNetCache function rows carries a checksum or a value, which is why the
-  tool counts those groups' fields as function slots rather than properties.
+The resolution is a Python port. Against `resolve_field_type_with_checksum`
+itself, all 12,937 distinct identities the corpus declares resolve to the same
+`FieldType`. On 7 real exports (11.06--13.06, main and checkpoint), every
+identity it calls typed carries a `value_*` on every row and every one it
+calls untyped carries none, apart from the effect-blob children the effect
+decoder fills after the overlay declines them. ClassNetCache function rows
+carry neither a checksum nor a value, so their fields count as function slots.
 
 ## Parent chains (tier 1)
 
@@ -120,9 +104,14 @@ and the tool prints how many typed identities each one decided.
 | `Handle: FForceModuleHandle`, `TimeStamp: FNetworkedMovementTimestamp` | 13.06 reflection: `UForceModuleManagerComponent` RPCs |
 | `AuthServerCorrectRepVariables: FInventoryServerCorrectRepVariables` | 13.06 reflection: `UAresInventory` |
 | `EffectID` / `CurrentEffectID: FEffectID` | 13.06 reflection: the effect RPCs |
-| `ServerActiveEffects: TArray > FActiveEffectInfo` (and its `EffectID`, `Transform`) | 13.06 reflection: `UEffectManagerComponent` |
-| `AuthBlindManagerState: FBlindManagerState > ActiveBlinds ...` | 13.06 reflection: `UBlindManagerComponent` |
-| `FragmentInfo: FGroundVolumeFragmentArray > Items ...` | 13.06 reflection: `UGroundVolumeComponent` |
+| `ServerActiveEffects: TArray > FActiveEffectInfo` (and its `EffectID`) | 13.06 reflection: `UEffectManagerComponent` |
+| `AuthBlindManagerState: FBlindManagerState` | 13.06 reflection: `UBlindManagerComponent` |
+
+Three deeper chains are formula vectors only, not `PARENT_CHAINS`:
+`FBlindManagerState.ActiveBlinds > FActiveBlind.BlindEffectID`,
+`UGroundVolumeComponent.FragmentInfo.Items > FGroundVolumeFragment.GridPos`
+and `FActiveEffectInfo.Transform` (13.06 reflection), pinned as `BLIND`,
+`FRAGMENT` and `ACTIVE_EFFECT` in `tools/tests/test_check_checksum_types.py`.
 
 `HARDCODED_FNAMES` maps the bare FName indices the replay writes (`249` is
 `Rotation`) the same way: UE 5.3 `UnrealNames.inl`, indices read back from the
@@ -174,9 +163,7 @@ because one of the two tiers would then be wrong about that member.
 ## Corpus result (1,018 replays, 24 builds)
 
 `python tools/check_checksum_types.py --corpus <declaration corpus>`, where each
-child holds one export's `manifest.json` and checkpoint declaration tables.
-Measured on the integration tree (`auto/integration-20260928`, with
-`game-evidence-typing-fixes` and `bp-field-typing` merged), 2026-09-28:
+child holds one export's `manifest.json` and checkpoint declaration tables:
 
 | | identities |
 |---|---:|
@@ -210,11 +197,6 @@ for `249` the difference is kept on purpose and listed as expected (next
 section). So **the tool exits 0 on the corpus**: 0 identities and 0
 `checksum_table.rs` carriers mismatch unexpectedly, beside the 8 identities and
 2 carriers the list expects (both of its items matched, none STALE).
-
-At `9f92756` the tool exited 1 on 9 more identities and 4 carriers: `EffectID`
-(2340855891, 2251343646, 1129645208) typed `UInt64` against `int64`, and
-`HandleNumber` (3336285386) `Int32` against `uint32`; both were retyped
-(`Int64`, `UInt32`) without moving a decoded bit.
 
 ## Expected mismatches
 

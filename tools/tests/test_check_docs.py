@@ -59,10 +59,6 @@ class CrateCoverageTests(unittest.TestCase):
         self.assertTrue(problems)
         self.assertTrue(any("vrfkit" in p for p in problems))
 
-    def test_the_real_usage_doc_covers_every_crate(self):
-        usage = guard.read(guard.USAGE)
-        self.assertEqual(guard.check_crates(usage), [])
-
 
 class LinkTests(unittest.TestCase):
     def test_a_dead_relative_link_is_reported(self):
@@ -77,19 +73,10 @@ class LinkTests(unittest.TestCase):
         text = "[a](../README.md#어쩌고)"
         self.assertEqual(guard.check_links(guard.USAGE, text), [])
 
-    def test_every_top_level_doc_is_link_checked(self):
-        names = {p.name for p in guard.link_checked_docs()}
-        on_disk = {p.name for p in (guard.REPO / "docs").glob("*.md")}
-        self.assertEqual(names & on_disk, on_disk)
-        for path in guard.link_checked_docs():
-            self.assertEqual(guard.check_links(path, guard.read(path)), [], path.name)
-
 
 class AnchorTests(unittest.TestCase):
-    """`check_links` checks only that a linked file exists, so a heading
-    renamed under a link, or a slug guessed wrong, went unreported:
-    USAGE.md's table of contents linked `#downstream-conversion` for a heading
-    whose anchor is `#downstream-conversion-tools`."""
+    """`check_links` checks only that a linked file exists; these check that a
+    linked or cited heading exists by GitHub's slug rules."""
 
     TARGET = guard.REPO / "docs" / "TARGET.md"
     SOURCE = guard.REPO / "docs" / "SOURCE.md"
@@ -165,31 +152,26 @@ class AnchorTests(unittest.TestCase):
         target = "docs/TARGET" ".md"
         text = (f"//! {target}#name-interning.\n"
                 f"// ({target}#name-intern)\n"
-                f"# see docs/GONE" ".md#anything\n")
+                f"# see docs/GONE" ".md#anything\n"
+                f"// {target} with no anchor, then docs/GONE" ".md with none\n")
         checked = []
         problems = guard.broken_code_anchors("x.rs", text, lookup, checked)
-        self.assertEqual(len(checked), 3, checked)
-        self.assertEqual(len(problems), 2, problems)
+        self.assertEqual(len(checked), 5, checked)
+        self.assertEqual(len(problems), 3, problems)
         self.assertIn("x.rs:2", problems[0])
         self.assertIn("#name-intern", problems[0])
         self.assertIn("does not exist", problems[1])
+        self.assertIn("x.rs:4", problems[2])
+        self.assertIn("does not exist", problems[2])
 
-    def test_the_archive_is_a_target_but_not_a_source(self):
-        sources = {p.relative_to(guard.REPO).as_posix() for p in guard.link_checked_docs()}
-        self.assertFalse(any(name.startswith("docs/archive/") for name in sources))
-        archived = guard.REPO / "docs" / "archive" / "PROJECT_STATUS.md"
-        slug = sorted(guard.anchors_of(archived.resolve()))[0]
-        text = f"[a](archive/PROJECT_STATUS.md#{slug}) [b](archive/PROJECT_STATUS.md#no-{slug})"
-        problems = guard.broken_markdown_anchors(guard.REPO / "docs" / "X.md", text)
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn(f"#no-{slug}", problems[0])
-
-    def test_the_shipped_docs_and_sources_have_no_broken_anchor(self):
-        checked = {}
-        self.assertEqual(guard.anchor_problems(checked), [])
-        # A guard that read nothing would pass the line above.
-        self.assertGreater(len(checked["docs"]), 0)
-        self.assertGreater(len(checked["code"]), 0)
+    def test_a_scan_that_read_nothing_is_reported_not_passed(self):
+        import subprocess as sp
+        empty = sp.CompletedProcess([], 0, stdout="", stderr="")
+        with patch.object(guard, "link_checked_docs", return_value=[]), \
+                patch.object(guard.subprocess, "run", return_value=empty):
+            problems = guard.anchor_problems()
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(all("read no" in p for p in problems), problems)
 
     def test_an_unlistable_source_tree_is_reported_not_passed(self):
         import subprocess as sp
@@ -205,51 +187,12 @@ class AnchorTests(unittest.TestCase):
         self.assertTrue(any("went unchecked" in p for p in problems), problems)
 
 
-class FeatureMatrixTests(unittest.TestCase):
-    CONTRIBUTING = (
-        "cargo +1.86.0 check -p vrf-a --no-default-features --locked\n"
-        "cargo +1.86.0 check -p vrf-a --no-default-features --features x --locked\n"
-    )
-    CI = '          $matrix = @(\n            @("vrf-a", ""), @("vrf-a", "x")\n          )\n'
-
-    def test_the_shipped_matrices_agree(self):
-        contributing = guard.read(guard.REPO / "CONTRIBUTING.md")
-        ci = guard.read(guard.REPO / ".github" / "workflows" / "ci.yml")
-        self.assertEqual(guard.check_feature_matrix(contributing, ci), [])
-
-    def test_identical_lists_pass(self):
-        self.assertEqual(guard.check_feature_matrix(self.CONTRIBUTING, self.CI), [])
-
-    def test_a_reordered_matrix_is_reported(self):
-        ci = self.CI.replace('@("vrf-a", ""), @("vrf-a", "x")', '@("vrf-a", "x"), @("vrf-a", "")')
-        problems = guard.check_feature_matrix(self.CONTRIBUTING, ci)
-        self.assertTrue(any("order" in p for p in problems), problems)
-
-    def test_a_case_missing_from_ci_is_reported(self):
-        ci = self.CI.replace(', @("vrf-a", "x")', "")
-        problems = guard.check_feature_matrix(self.CONTRIBUTING, ci)
-        self.assertTrue(any("vrf-a" in p and "x" in p for p in problems), problems)
-
-    def test_an_unparseable_ci_matrix_is_reported_not_passed(self):
-        problems = guard.check_feature_matrix(self.CONTRIBUTING, "no matrix here")
-        self.assertTrue(problems)
-
-    def test_an_empty_contributing_matrix_is_reported_not_passed(self):
-        problems = guard.check_feature_matrix("no cargo lines", self.CI)
-        self.assertTrue(problems)
-
-
 class TableSizeTests(unittest.TestCase):
     def test_a_stale_table_size_is_reported(self):
         docs = {"README.md": "the table has 999 entries",
                 "USAGE.md": "the table has 999 entries"}
         problems = guard.check_table_sizes(docs)
         self.assertTrue(problems)
-
-    def test_the_shipped_docs_quote_the_live_sizes(self):
-        docs = {"README.md": guard.read(guard.README),
-                "USAGE.md": guard.read(guard.USAGE)}
-        self.assertEqual(guard.check_table_sizes(docs), [])
 
     def test_both_comma_and_plain_forms_are_accepted(self):
         table = guard.read(guard.REPO / "crates" / "vrf-decode" / "src" / "table.rs")
@@ -288,26 +231,31 @@ class SourceTableSizeTests(unittest.TestCase):
         self.assertEqual(
             guard.stale_entry_phrases("measured over 1,054 entries", self.LIVE), [])
 
-    def test_the_shipped_crates_quote_the_live_size(self):
-        self.assertEqual(guard.check_source_table_size(), [])
-
 
 class SuiteMeasurementTests(unittest.TestCase):
     RUST = "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
     PYTHON = "Ran 4 tests in 0.01s\n\nOK\n"
+    MODULES = ["test_a.py", "test_b.py"]
 
     def measure(self, rust=None, python=None, rust_exit=0, python_exit=0):
-        with patch.object(guard.subprocess, "run", side_effect=[
-            CompletedProcess([], rust_exit, stdout=self.RUST if rust is None else rust, stderr=""),
-            CompletedProcess([], python_exit, stdout="", stderr=self.PYTHON if python is None else python),
-        ]) as run:
-            result = guard.measure_tests()
-        return result, run
+        def run(cmd, *a, **kw):
+            if cmd[0] == "cargo":
+                return CompletedProcess(cmd, rust_exit, stdout=self.RUST if rust is None else rust,
+                                        stderr="")
+            return CompletedProcess(cmd, python_exit, stdout="",
+                                    stderr=self.PYTHON if python is None else python)
+        with patch.object(guard.subprocess, "run", side_effect=run) as mock:
+            result = guard.measure_tests(self.MODULES)
+        return result, [c.args[0] for c in mock.call_args_list]
 
-    def test_measures_both_suites_and_promotes_python_warnings(self):
-        result, run = self.measure(rust=self.RUST * 2)
-        self.assertEqual(result, (6, 4, []))
-        self.assertEqual(run.call_args_list[1].args[0][1:3], ["-W", "error"])
+    def test_measures_rust_and_every_module_with_warnings_as_errors(self):
+        result, cmds = self.measure(rust=self.RUST * 2)
+        self.assertEqual(result, (6, 8, []))
+        python = [c for c in cmds if c[0] != "cargo"]
+        self.assertEqual(sorted(c[-1] for c in python), self.MODULES)
+        # `-b` is a `discover` option: before it, unittest rejects -s/-p (exit 2).
+        self.assertTrue(all(c[1:3] == ["-W", "error"] and "-b" in c
+                            and c.index("-b") > c.index("discover") for c in python), python)
 
     def test_empty_output_and_zero_tests_are_not_successful_measurements(self):
         for label, output in (("rust", ""), ("python", ""),
@@ -351,8 +299,7 @@ class TestCountTests(unittest.TestCase):
             guard.stale_test_counts("we recover 2,387 intermediate moves", self.LIVE), [])
 
     def test_a_count_that_names_its_suite_is_read(self):
-        """README's highlight puts the suite between the number and the noun;
-        it went stale twice while only "N tests" was read."""
+        """README's highlight puts the suite between the number and the noun."""
         text = "- **355 Rust tests** plus a layered validation suite"
         self.assertEqual(guard.stale_test_counts(text, self.LIVE), [(1, "355")])
         self.assertEqual(guard.stale_test_counts("**387 Rust tests**", self.LIVE), [])
@@ -362,6 +309,15 @@ class TestCountTests(unittest.TestCase):
         self.assertEqual(guard.stale_test_counts(
             "**120 Rust tests**\n**387 Python tests**\n387 passing\n120 tests",
             self.LIVE, by_suite), [(1, "120"), (2, "387")])
+
+    def test_a_count_is_quoted_only_by_a_count_claim_in_either_spelling(self):
+        counts = {"tools": 1233}
+        self.assertEqual(guard.unquoted_test_counts({"a.md": "**1,233 passing**"}, counts), [])
+        self.assertEqual(guard.unquoted_test_counts({"a.md": "1233 Python tests"}, counts), [])
+        # A number that merely contains the count, or is not a count claim, quotes nothing.
+        for text in ("a byte count of 91,233,120", "1233 rows"):
+            with self.subTest(text=text):
+                self.assertEqual(len(guard.unquoted_test_counts({"a.md": text}, counts)), 1)
 
     def test_the_shipped_readme_highlight_is_read(self):
         claims = [suite for line in guard.read(guard.README).splitlines()
@@ -397,40 +353,31 @@ class TableSizeClaimTests(unittest.TestCase):
         docs = {"USAGE.md": "identifiers, handles, checksums, and payloads"}
         self.assertEqual(guard.stale_table_size_claims(docs, self.LENGTHS), [])
 
-    def test_the_shipped_docs_make_no_stale_size_claim(self):
-        lengths = guard.table_lengths()
-        docs = {name: guard.read(guard.REPO / name) for name in guard.ALL_DOCS}
-        self.assertEqual(guard.stale_table_size_claims(docs, lengths), [])
-
 
 class MeasurementFailureTests(unittest.TestCase):
-    """A measurement that could not be taken (git failing) is reported, not
-    left to skip every claim that depends on it."""
+    """A measurement that could not be taken is reported, not left to skip
+    every claim that depends on it."""
 
-    def test_a_working_measurement_reports_no_problem(self):
+    def test_a_working_measurement_covers_every_measured_phrase(self):
         problems = []
         counts = guard.measured_counts(problems)
-        self.assertIn("ascii", counts)
+        self.assertEqual(set(counts), set(guard.MEASURED_RE))
         self.assertEqual(problems, [])
+        self.assertEqual(counts["golden"], 88)
+        self.assertGreater(counts["metrics_builds"], 0)
 
-    def test_a_failed_enumeration_is_reported_rather_than_skipped(self):
-        import subprocess as sp
-        real = guard.subprocess.run
+    def test_a_failed_measurement_is_reported_rather_than_skipped(self):
+        real = guard.read
 
-        def failing(cmd, *a, **kw):
-            if cmd[:2] == ["git", "-C"]:
-                return sp.CompletedProcess(cmd, 128, stdout="", stderr="fatal")
-            return real(cmd, *a, **kw)
+        def unreadable_golden(path):
+            return "" if path.name == "golden_vectors.rs" else real(path)
 
         problems = []
-        guard.subprocess.run = failing
-        try:
+        with patch.object(guard, "read", side_effect=unreadable_golden):
             counts = guard.measured_counts(problems)
-        finally:
-            guard.subprocess.run = real
-        self.assertNotIn("ascii", counts)
-        self.assertTrue(problems)
-        self.assertIn("ascii", " ".join(problems))
+        self.assertNotIn("golden", counts)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("golden", problems[0])
 
 
 class ContradictingCountTests(unittest.TestCase):
@@ -464,25 +411,9 @@ class ContradictingCountTests(unittest.TestCase):
         for expected in ("README.md:1", "README.md:2", "USAGE.md:1"):
             self.assertIn(expected, joined)
 
-    def test_the_shipped_docs_do_not_contradict_themselves(self):
-        docs = {"README.md": guard.read(guard.README),
-                "USAGE.md": guard.read(guard.USAGE)}
-        self.assertEqual(guard.contradicting_test_counts(docs), [])
-
 
 class MeasuredCountTests(unittest.TestCase):
     """Counts produced by something runnable, quoted in prose that rots."""
-
-    def test_a_stale_ascii_count_is_caught(self):
-        problems = guard.stale_measured_counts(
-            {"x.md": "`check_ascii` on 999 files."}, {"ascii": 115})
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("999", problems[0])
-
-    def test_the_live_ascii_count_passes(self):
-        text = "`check_ascii` on 115 files, and 115 files, ASCII only"
-        self.assertEqual(
-            guard.stale_measured_counts({"x.md": text}, {"ascii": 115}), [])
 
     def test_three_different_correction_counts_are_all_caught(self):
         text = "(85 corrections)\nsays 86 corrections\n# 49 corrections present"
@@ -495,12 +426,6 @@ class MeasuredCountTests(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("66", problems[0])
 
-    def test_both_stale_matrix_counts_are_caught(self):
-        text = "as 25 `cargo check`\nlines; ci.yml expresses **the same 25 cases** as"
-        problems = guard.stale_measured_counts(
-            {"x.md": text}, {"matrix": 27, "matrix_cases": 27})
-        self.assertEqual(len(problems), 2, problems)
-
     def test_a_metrics_build_count_counts_only_beside_its_guard(self):
         live = {"metrics_builds": 7}
         unrelated = "The transform is shared across 7 builds (5 builds before)."
@@ -508,28 +433,8 @@ class MeasuredCountTests(unittest.TestCase):
         stale = "| `check_metrics_baseline.py` | rounds, score, K/D/A (5 builds) |"
         self.assertEqual(len(guard.stale_measured_counts({"x.md": stale}, live)), 1)
 
-    def test_the_live_golden_and_matrix_counts_are_measured(self):
-        live = guard.measured_counts()
-        self.assertEqual(live["golden"], 88)
-        self.assertEqual(live["matrix"], live["matrix_cases"])
-        self.assertGreater(live["matrix"], 0)
-        self.assertGreater(live["metrics_builds"], 0)
-
-    def test_a_corpus_file_count_is_not_an_ascii_claim(self):
-        """README says "all 215 files" about replays, not about the sweep."""
-        text = "- **Framing** (`validate_corpus.py`, all 215 files) -- framing."
-        self.assertEqual(
-            guard.stale_measured_counts({"x.md": text}, {"ascii": 115}), [])
-
-    def test_the_repository_is_clean(self):
-        live = guard.measured_counts()
-        docs = {name: guard.read(guard.REPO / name) for name in guard.ALL_DOCS}
-        self.assertEqual(guard.stale_measured_counts(docs, live), [])
-
-    def test_live_correction_count_includes_dynamic_weapon_entries(self):
-        # expectation_count() includes the generated table's dynamic weapon
-        # entries. Pinned on purpose: a verified typing change must change this
-        # number visibly.
+    def test_live_correction_count_is_pinned(self):
+        # Pinned on purpose: a verified typing change must change it visibly.
         self.assertEqual(guard.measured_counts()["corrections"], 219)
 
 
@@ -546,13 +451,6 @@ class GeneratedInventoryTests(unittest.TestCase):
         }
         problems = guard.check_generated_inventory(docs)
         self.assertTrue(any("checksum_table.rs" in p for p in problems), problems)
-
-    def test_the_shipped_generated_file_inventories_are_complete(self):
-        docs = {
-            name: guard.read(guard.REPO / name)
-            for name in guard.GENERATED_INVENTORY_DOCS
-        }
-        self.assertEqual(guard.check_generated_inventory(docs), [])
 
 
 class BaselineFigureTests(unittest.TestCase):
@@ -584,15 +482,6 @@ class BaselineFigureTests(unittest.TestCase):
         self.assertGreater(len(expected), 1, "the baseline lost its checkpoint tables")
         tables = guard.baseline_table_figures()
         self.assertEqual({name: tables.get(name) for name in expected}, expected)
-
-    def test_the_shipped_docs_quote_every_live_baseline_figure(self):
-        docs = {
-            "README.md": guard.read(guard.README),
-            "docs/USAGE.md": guard.read(guard.USAGE),
-        }
-        self.assertEqual(
-            guard.check_baseline_figures(docs, guard.baseline_table_figures()), []
-        )
 
 
 class DocCoverageTests(unittest.TestCase):

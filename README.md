@@ -1,7 +1,8 @@
 # vrfkit
 
 A Rust toolkit that parses VALORANT replay files (`.vrf`, Unreal Engine network
-replay format) and exports them to Parquet. A workspace of 10 crates plus a
+replay format) and exports them to Parquet. A workspace of 10 crates (plus a
+test-only `dev/vrf-testkit` and the `extract-component-classes` tool) and a
 Python `tools/` validation suite. `#![forbid(unsafe_code)]` is in every crate;
 there is no `unsafe` block anywhere in the workspace. The only native FFI the
 parser depends on is Oodle decompression, and that lives entirely in the
@@ -26,18 +27,9 @@ on **1,018 unique replays**; all **1,018** meet every strict criterion. See
 [build verification](docs/BUILD_VERIFICATION.md) for the measured scope, common
 checks and remaining limits.
 
-- Run it: [`docs/USAGE.md`](docs/USAGE.md)
-- What's extractable: [`docs/DATA.md`](docs/DATA.md)
-- Current corpus status and remaining work: [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md)
-- Latest build verification: [`docs/BUILD_VERIFICATION.md`](docs/BUILD_VERIFICATION.md)
-- Historical field inventory: [`docs/TARGETING_AND_HEAL_VALUES.md`](docs/TARGETING_AND_HEAL_VALUES.md)
-- Character-death and KillData state: [`docs/KILL_LEDGER.md`](docs/KILL_LEDGER.md)
-- Damage, healing, decay and reset observations: [`docs/SECTION_OBSERVATIONS.md`](docs/SECTION_OBSERVATIONS.md)
-- Section timelines, strict and packet-ordered: [`docs/SECTION_TIMELINE.md`](docs/SECTION_TIMELINE.md)
-- Numeric FastArray observations and remaining item semantics: [`docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md`](docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md)
-- Ground-area volume cells (molotov, slow, net and wire patches): [`docs/GROUND_VOLUMES.md`](docs/GROUND_VOLUMES.md)
-- Build it, test it, open a PR: [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- Working conventions (for an AI agent): [`CLAUDE.md`](CLAUDE.md)
+- Run it, every tool and every output column: [`docs/USAGE.md`](docs/USAGE.md)
+- What's extractable, and whether it is typed: [`docs/DATA.md`](docs/DATA.md)
+- Build it, test it, open a PR: [`CONTRIBUTING.md`](CONTRIBUTING.md) (agents: [`CLAUDE.md`](CLAUDE.md))
 
 ## Why this exists
 
@@ -82,17 +74,17 @@ can be represented by their rows instead of a duplicate raw RPC.
 | **11.07** | `release-11.07` | 3/3 | Validation + checkpoints + typed/raw |
 | **11.06** | `release-11.06` | 3/3 | Validation + checkpoints + typed/raw |
 
-Measured 2026-09-28 on all **1,018 unique available replays** across the 24
+Measured on all **1,018 unique available replays** across the 24
 supported branches, every row by the [same acceptance rule](docs/BUILD_VERIFICATION.md):
 ReplayData validation, checkpoint-enabled export, the independent comparisons on
 observed evidence fields, and the strict array and array-leaf error counters.
 ✅ **1,018/1,018** are clean -- not a claim that every field is understood.
 Structured-array child rows are admitted per build and per route: all
 measured routes on 13.01--13.06, a measured subset on 11.06--13.00
-([legacy route table](docs/LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
+([legacy route table](docs/LEGACY_BUILD_SUPPORT.md#measured-array-routes)).
 
 All branches are `++Ares-Core+release-<build>`. Adding a build is one
-`SeededTransform` impl; see [Adding a new build](#supported-builds-and-the-cost-of-a-new-build).
+`transforms!` line; see [Adding a new build](#supported-builds-and-the-cost-of-a-new-build).
 
 ## Highlights
 
@@ -148,13 +140,11 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - [Quick start](#quick-start)
 - [Output](#output)
 - [Status](#status)
-- [Performance](#performance)
 - [The Event chunk -- the server's own timeline](#the-event-chunk----the-servers-own-timeline)
 - [Whole-corpus robustness](#whole-corpus-robustness)
 - [Type overlay](#type-overlay)
 - [Supported builds and the cost of a new build](#supported-builds-and-the-cost-of-a-new-build)
 - [Design](#design)
-- [Validation suite](#validation-suite)
 - [Generated files](#generated-files)
 - [License](#license)
 
@@ -175,43 +165,6 @@ writes the Parquet tables and manifest described under [Output](#output) into
 `--out`, which must be new, empty or a previous export: anything else in it
 is refused, never deleted.
 
-`export` is a default feature. Drop it with `--no-default-features` and
-`arrow`/`parquet`/`zstd` never enter the dependency tree:
-
-```bash
-cargo +1.86.0 tree -p vrfkit --no-default-features --locked | grep -E "arrow|parquet|zstd"
-# (no output)
-```
-
-A binary built without `export` **refuses the subcommand rather than failing
-silently** -- a subcommand that printed nothing and exited 0 would be
-indistinguishable from one that wrote the files.
-
-On `02d4d478` (48,215,213 bytes, build 13.01), `export` produces thirteen
-Parquet files plus a manifest when checkpoints are included:
-
-| File | Rows | Bytes |
-|---|---|---|
-| `fields.parquet` | 1,296,660 | 12,691,843 |
-| `movement.parquet` | 1,844,147 | 19,984,802 |
-| `actors.parquet` | 3,827 | 76,830 |
-| `net_guids.parquet` | 16,167 | 114,423 |
-| `events.parquet` | 195 | 12,455 |
-| `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,193,006 |
-| `checkpoint_actors.parquet` | 3,014 | 25,848 |
-| `checkpoint_net_guids.parquet` | 74,270 | 175,916 |
-| `checkpoint_blocks.parquet` | 22,247 | 112,649 |
-| `checkpoint_guid_entries.parquet` | 74,270 | 219,662 |
-| `checkpoint_export_groups.parquet` | 8,307 | 16,481 |
-| `checkpoint_export_fields.parquet` | 49,314 | 106,370 |
-| `manifest.json` |  | ~660,030 |
-
-`checkpoint_fields.parquet` requires `--checkpoints`. The partials row above
-shows the default main-only export; both modes currently contain zero
-rejected partial rows and occupy 2,505 bytes. The five original main tables remain
-byte-for-byte identical across the checkpoint flag.
-
 > Column schemas, the `tools/` scripts, the full validation suite, and
 > per-crate usage live in [`docs/USAGE.md`](docs/USAGE.md).
 > This document is about *why it is built this way*.
@@ -219,29 +172,17 @@ byte-for-byte identical across the checkpoint flag.
 ## Output
 
 The main export writes six Parquet tables plus `manifest.json`; `--checkpoints`
-adds seven checkpoint tables. String columns are dictionary-encoded with ZSTD.
-The tables, their columns and the join rules are described in
-[`docs/USAGE.md` section 3](docs/USAGE.md#3-output). Four traps to know before
-reading them:
-
-- `movement.parquet`'s `timestamp` is the 128 Hz server tick and **resets each
-  round**; use `time_ms` for a global timeline.
-- Posture is `fields.parquet`'s `bCrouchHeld`, not `movement_state`.
-- `actors.parquet`'s `event` is `open` / `close` / `dormant`, and **only `close`
-  is a despawn**. A dormant actor is alive and keeps its channel's archetype
-  (`crates/vrfkit/src/sink/stream.rs`), so the next `open` is a wake-up, not a
-  new instance.
-- `manifest.json`'s `timestamp_ticks` is a UE `FDateTime` (100-nanosecond ticks
-  since 0001-01-01), **not** a Windows FILETIME -- read as one it gives the year
-  3626.
+adds seven checkpoint tables. The tables, their columns, the join rules and
+the traps (a per-round tick, `open` / `close` / `dormant`, an `FDateTime`
+timestamp) are in [`docs/USAGE.md` section 3](docs/USAGE.md#3-output).
 
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
 **807 passing**; the full Python suite also has **1233 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
-records replay validation, checkpoint export, independent value checks and
-the resolved array findings and remaining semantic limits for each supported build.
+records replay validation, checkpoint export and independent value checks for
+each supported build.
 
 Tagged Windows releases provide a ZIP and SHA-256 checksum. The release
 workflow runs the complete CI on the tagged commit, checks the packaged binary
@@ -253,43 +194,12 @@ What CI runs, three pinned public replays included, is in
 [CONTRIBUTING.md](CONTRIBUTING.md#what-ci-runs); the private-corpus checks stay
 local.
 
-Re-measure per-crate counts with `cargo test -p <crate>`. Counts are omitted
-from the table below on purpose -- they go stale, and re-measuring is one line.
-
-| Layer | Crate | Feature flags |
-|---|---|---|
-| Bit reader / UE wire format | `vrf-bitio` | `alloc` (default; drop it for `no_std`) |
-| Payload transform (24 builds) | `vrf-transform` | none (`ALL_VERSIONS` is a length-independent slice) |
-| Container (info/header/chunk/event/checkpoint, Oodle) | `vrf-container` | `oodle` `event` `checkpoint` |
-| DemoFrame traversal | `vrf-frame` | none (sections are byte ranges for cursor alignment) |
-| Replay dynamic schema + GUID cache + checkpoint tables | `vrf-schema` | `checkpoint` |
-| Replication (packet/bunch/content block/field) | `vrf-net` | `diagnostics` |
-| Field decoder + nested arrays + type overlay + effects | `vrf-decode` | `array` `effect` `overlay` `structs` |
-| Movement decoder | `vrf-movement` | none (single protocol) |
-| Parquet export | `vrf-export` | `parquet` + per-table |
-| Unified CLI | `vrfkit` | `export` (default) |
-
-ZSTD is deliberately *not* feature-gated out -- every writer picks it, so
-disabling it would produce files this crate could not explain.
-
-CI checks every core-only and singleton feature of the table. The cases are
-listed in [`CONTRIBUTING.md`](CONTRIBUTING.md#before-you-open-a-pr) and in
-`ci.yml`'s `$matrix`, and `tools/check_docs.py` (also with `--fast`) fails if
-the two differ in membership or order: add a case to both.
-
-## Performance
-
-Historical optimization measurement on `02d4d478` (48,215,213 bytes), August
-2026. These timings predate the current decoding additions:
-
-| | Before optimization | After optimization |
-|---|---|---|
-| `export` | 1.64 s / 201 MB | **0.85 s / 109 MB** |
-| `validate` | 1.42 s / 65 MB | **0.693 s / 65 MB** |
-
-Figures are wall-clock / peak memory. Output is **byte-for-byte identical**
-before and after. Detail and the optimizations measured and then rejected are
-in `docs/archive/PROJECT_STATUS.md` section 25.
+The crates, their layers and feature flags are in
+[`docs/USAGE.md` section 4](docs/USAGE.md#4-using-it-as-a-library), and the
+layered validation suite and what each layer misses in
+[section 6](docs/USAGE.md#6-validation-suite). Timing
+is `tools/bench_export.py`; the optimizations kept and rejected, with their
+measurements, are in [`docs/PERFORMANCE_NOTES.md`](docs/PERFORMANCE_NOTES.md).
 
 ## The Event chunk -- the server's own timeline
 
@@ -324,14 +234,10 @@ original is always left intact in `raw_payload`.
 
 ## Whole-corpus robustness
 
-The 2026-09-28 [common audit](docs/BUILD_VERIFICATION.md) checks 1,018 unique
-replays across 24 builds. Every ReplayData validation and checkpoint export
-succeeds. Independent typed/raw comparisons match 13,387,751
-observed values. All 1,018 pass the strict quality gate. On 2026-09-25, the
-two ActiveBlinds fixes resolved the earlier 81-file findings and recovered 522
-additional typed children in the 986-replay corpus; an independent
-before/after comparison verified those values and preserved every existing
-field row and raw payload.
+The [common audit](docs/BUILD_VERIFICATION.md) checks 1,018 unique replays
+across 24 builds: every ReplayData validation and checkpoint export succeeds,
+independent typed/raw comparisons match 13,387,751 observed values, and all
+1,018 pass the strict quality gate.
 
 A 100% block pass rate means every measured block reached an ordinary
 field/RPC row or an explicit preservation row; partial reassembly rejections
@@ -340,13 +246,7 @@ transport stages kept every payload. It is **not** a typing claim either: a
 block that cannot be assigned a `_ClassNetCache` group has inner handles
 nothing can name, so it becomes one reserved row (`handle = u32::MAX`, the
 complete decoded payload in `raw_bits`) counted under `RPC unresolved/raw` --
-uninterpreted, not lost. The earlier sweeps, from the 215-replay 13.01 run that
-first exposed unattributed blocks to the 714-replay tail preservation, are in
-[`docs/archive/CORPUS_SWEEPS.md`](docs/archive/CORPUS_SWEEPS.md).
-
-The controller's opening bunch was once framed nine bits early (the
-spawn-velocity bit and the net-player-index byte); see
-`crates/vrf-net/src/pipeline/spawn.rs` and `docs/archive/PROJECT_STATUS.md` 17-A.
+uninterpreted, not lost.
 
 ## Type overlay
 
@@ -359,24 +259,15 @@ row (`handle` = `u32::MAX`, full payload in `raw_bits`) and an explicit
 unresolved/raw diagnostic rather than pretending the properties were decoded.
 
 The overlay table (`crates/vrf-decode/src/table.rs`) -- 222 groups, 1,118
-entries, 96 handles -- was extracted mechanically from descriptors rather
-than transcribed by hand, and `tools/apply_type_corrections.py --check` keeps
-every measured correction in it.
-
-Four names resolve without a table entry: `Owner`, `Instigator`, `AttachParent`
-and `Controller` are `AActor` / `USceneComponent` object references Unreal
-replicates on every actor, always as a NetGUID. The descriptors declare them
-only for the classes they happen to cover, which left the same four names typed
-on 129 group/field pairs and untyped on 203 more. Since the type is fixed by the
-engine rather than by the class, they resolve by name after the table misses --
-a claim about Unreal, not a guess about any one Blueprint, and it holds for
-groups no replay has spawned yet. In the historical 215-replay release-13.01
-export sweep, it typed 6,048 further rows with decode errors still at zero.
+entries, 96 handles -- is maintained in the repository, and
+`tools/apply_type_corrections.py --check` keeps every measured type in it.
+Four names resolve without a table entry: `Owner`, `Instigator`,
+`AttachParent` and `Controller` are object references the engine replicates
+on every actor, always as a NetGUID, so they resolve by name after the table
+and the scoped types miss -- a claim about Unreal, not about one Blueprint.
 
 `02d4d478` (`02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf`), as recorded by the
-committed export baseline `tools/baselines/export_02d4d478.json` after the
-partial-header and shot-array corrections and the component remaps read from the
-13.06 game:
+committed export baseline `tools/baselines/export_02d4d478.json`:
 
 ```
 Decoded OK:   822,185      Decode errors:      0
@@ -396,59 +287,16 @@ would double-count and move the baseline for unrelated reasons. `Effect blobs`
 is reported separately -- without it, 61,617 rows gain a value yet the summary
 prints identically.
 
-Physical value coverage is the fraction of `fields.parquet` rows with at
-least one non-null `value_*` column. It cannot be computed by adding overlay,
-effect-blob or struct counters: these count different units and may describe
-parent/child expansions of the same input. The current reference
-baseline has 939,382 typed rows out of 1,296,660 (72.45%), measured directly
-from its columns.
-Adding raw child windows changes this denominator even when every old typed
-value survives; compare raw preservation and newly typed values separately.
-That snapshot is not a fraction of all game information understood.
-
-Measure the files you actually use, with checkpoint rows reported separately:
-
-```bash
-python tools/summarize_value_coverage.py <export-directory> > coverage.json
-python tools/summarize_value_coverage.py <parent-of-export-directories> --jobs 4
-```
-
-`Typed` is the ratio printed in the summary: rows the overlay decoded
-successfully (`Decoded OK`) over rows it examined (`Rows offered`). The
-denominator includes every RPC parameter, so it reads low -- most of `Not in
-table` is RPC parameters without a descriptor, plus the groups the replay
-declares (475) that are not in the table. (Rows with a filled `value_*` also
-include additive decoders like effects and structs, so that is a different
-population from the overlay's input rows.) Unknown ordinary properties retain
-raw bytes. The absence of a typed value does not by itself establish loss;
-conversely, a high typing ratio does not establish complete block preservation.
-
-`fields.parquet` also carries the replay's own `compatible_checksum` per row,
-which turns that leftover into something searchable. Unreal hashes a property's
-type into it, so it identifies the property across builds; bucketing untyped
-rows on it separates three situations that otherwise look identical -- a type
-the overlay knows and failed to apply, a described property nothing has typed,
-and a value addressed inside a payload that declares no handle at all. Over 20
-replays that splits 10,062,142 untyped rows 0.5% / 48.6% / 51.0%, and the first
-bucket is supposed to be empty. The recipe is in
-[`docs/USAGE.md`](docs/USAGE.md#fieldsparquet).
-
-Decode errors are checked by `tools/check_decode_errors_corpus.py`, separately,
-because `vrfkit validate` prints no overlay counters and `validate_corpus.py`
-alone cannot see a wrong type. Reaching zero on the 215-replay 13.01 sweep found
-three places where the wire disagreed with the declared types; they are
-recorded with evidence in `tools/apply_type_corrections.py` (219 corrections,
-verified with `--check`).
-
-| Symptom | Actual | Evidence |
-|---|---|---|
-| Time-related `Float` field consumes more than 32 bits | Wire is `Double` (64-bit) | Every error is "32 bits consumed, 32 bits residual" |
-| `215`/`216` `Int32` field arrives in 3 bits | 3-bit actor bookkeeping, read as `EnumRemainingBits` | Every row is 3 bits wide and decodes to 3 or 1 |
-| SmokeScreen projectile `ReplicatedMovement` EOF | Rotation is `ByteComponents` | A short read runs off the end: 137 EOF failures on one 13.01 replay, all in this group |
-
-Byte-width handling was also corrected. A byte property inside an array stores
-only its significant bits, so a fixed 8-bit read fails. Before this fix, all 364 rows of
-`AssistType` (5 bits) were left without a value.
+Physical value coverage -- `fields.parquet` rows with a non-null `value_*` --
+is a different population from the overlay's input rows: the reference
+baseline has 939,382 typed rows out of 1,296,660 (72.45%), measured from its
+columns, and it is not a fraction of all game information understood.
+`Typed`, the overlay counter, the `compatible_checksum` buckets that separate
+"nobody described this" from "we missed this", and
+`tools/summarize_value_coverage.py` for your own exports are in
+[`docs/USAGE.md`](docs/USAGE.md#fieldsparquet). Decode errors are checked
+separately by `tools/check_decode_errors_corpus.py`, because `vrfkit validate`
+prints no overlay counters.
 
 ## Supported builds and the cost of a new build
 
@@ -488,41 +336,35 @@ S-box stage is used) plus these constants:
 
 In all twenty-four supported builds the **tail-XOR byte equals the low byte of the seed
 addend.** It is a derived value, not an independent constant: `SeededTransform`
-defaults `TAIL_XOR` to `SEED_ADDEND as u8` (`versions/mod.rs`), and a build
-that broke the pattern would fail its 1- and 7-bit vectors, which
-`vectors_cover_the_staging_boundaries` in `crates/vrf-transform/tests/golden.rs`
-requires for every registered build.
+in `crates/vrf-transform/src/lib.rs` defaults `TAIL_XOR` to `SEED_ADDEND as
+u8`, and a build that broke the pattern would fail its 1- and 7-bit vectors,
+which `vectors_cover_the_staging_boundaries` in
+`crates/vrf-transform/tests/golden.rs` requires for every registered build.
 
-So adding a build is one `SeededTransform` impl: its branch, `SEED_ADDEND`,
-`INIT_A_OFFSET`, optionally `ADD_OFFSET` and `TAIL_XOR` (both defaulted), and
-three word functions (`word64` / `word32` / `byte`); everything else is shared.
+So adding a build is one `transforms!` line in `crates/vrf-transform/src/lib.rs`:
+its branch, `SEED_ADDEND`, signed `INIT_A_OFFSET` and the step list of its
+word64 / word32 / byte stages; everything else is shared.
 
 Every build in the table above is confirmed on live replays, not only by
-transform vectors. The 13.04 corpus was also exported with checkpoints on
-2026-08-31: all 108 replays carried them and reported zero typed-overlay,
-struct-blob and checkpoint failures over 110,152,399 offered rows, 20,756
-decoded struct blobs, 3,129,483 decoded checkpoint fields and 1,872 decoded
-checkpoint blobs. A machine-local corpus can rotate; the reproducible oracle is
+transform vectors. A machine-local corpus can rotate; the reproducible oracle is
 88 mechanically extracted golden vectors (11 staging boundaries per
 build, eight builds) plus 1,264 native-machine-code vectors for the sixteen
 recovered 11.06--12.09 builds, with a full 48-sample main/checkpoint validation
-([build support validation report](docs/LEGACY_BUILD_SUPPORT.md)). 13.06 was
-first validated on six real replays
-([record](docs/archive/DESCRIPTOR_ADOPTION_VALIDATION.md#1306-replay-validation));
-the 2026-09-28 [common audit](docs/BUILD_VERIFICATION.md) checks 38.
+([build support validation report](docs/LEGACY_BUILD_SUPPORT.md)). The
+[common audit](docs/BUILD_VERIFICATION.md) checks 38 13.06 replays.
 
 The 768-byte S-box is shared across builds, which makes it usable as a
 **signature for locating the transform function in a binary.**
 
 ## Design
 
-### 1. A clean parallelization point
+### 1. Parallel across replays, sequential within one
 
-The content-block **header and declared bit-length are plaintext**; the
-transform only touches the payload that follows. So framing (sequential,
-unavoidable because of the replication state machine) and block decode (fully
-independent) can be separated. The transform is determined solely by
-`(bits, seed)`, so it parallelizes per block.
+The content-block header and declared bit-length are plaintext, and only the
+payload transform is a pure function of `(bits, seed)`. Decode is not: it reads
+the GUID cache and channel state earlier blocks mutate, and a stale group sets
+the wrong handle width, so a replay decodes in order and parallelism is per
+replay ([why](docs/PERFORMANCE_NOTES.md#decode-stays-sequential-within-a-replay)).
 
 ### 2. Output is Parquet
 
@@ -531,37 +373,14 @@ encoding, zstd compresses it well, and it reads directly in `pyarrow` /
 `polars` / `pandas` / `duckdb`. NDJSON is reader-bound: on a 1.8-million-row
 movement stream, JSON parsing was measured at 84% of processing time.
 
-## Validation suite
-
-The checks are layered, and the layers catch different things; each is in
-[`docs/USAGE.md`](docs/USAGE.md) section 6 with what it misses:
-
-- **Common build audit** (`verify_build_corpus.py`) -- one set of checks on
-  every available replay; per-build results are the support table above.
-- **Framing** (`validate_corpus.py`) -- content-block framing, loss accounting
-  and unresolved-payload preservation.
-- **Bytes** (`check_export_baseline.py`) -- regression in any export counter
-  or in a file's rows, bytes or SHA-256.
-- **Decode** (`check_decode_errors_corpus.py`) -- overlay, struct, array,
-  movement and brute-force failures, and the work counters behind them.
-- **Semantics** (`check_metrics_baseline.py`, 8 builds) -- round count,
-  score, K/D/A invariants that need no baseline.
-
 ## Generated files
 
-The following files are generated and must never be edited by hand:
-
-| Generated file | Generator | Notes |
-|---|---|---|
-| `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` | Replay-observed checksum-to-type propagation table; conflicting donors are omitted |
-| `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum types for ambiguous or descriptor-silent field names, including declared geometry and enum shapes; no cross-group propagation |
-| `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` | Expected bytes from pinned original executable readers |
-
-Regenerate them as [`CONTRIBUTING.md`](CONTRIBUTING.md#generated-files--never-hand-edit)
-describes. The S-box and golden-vector generators need a C# source checkout,
-and each refuses to write a table that fails its integrity check: the S-box
-must be a permutation of 0..255, and each golden vector's hex length must match
-its bit count. The overlay table (`crates/vrf-decode/src/table.rs`) and
+Three files are generated and must never be edited by hand; their targets,
+generators and regeneration steps are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md#generated-files--never-hand-edit). The
+S-box and golden vectors are extracted tables whose integrity
+`extracted_tables_are_intact` (`crates/vrf-transform/tests/golden.rs`) checks.
+The overlay table (`crates/vrf-decode/src/table.rs`) and
 `tools/equippable_table.py` are maintained in the repository, not generated.
 
 ## License
