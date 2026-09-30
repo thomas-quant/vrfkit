@@ -6,8 +6,7 @@ from unittest.mock import patch
 import json
 import subprocess
 import tempfile
-from contextlib import ExitStack, redirect_stdout, redirect_stderr
-from io import StringIO
+from contextlib import ExitStack
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -394,7 +393,7 @@ class AuditCommandTests(TempDirTestCase):
                     "failures": ["array error"] if failure else [],
                     "counts": {"checkpoint_content_blocks": int(checkpoint),
                                "checkpoint_overlay_decoded_ok": int(checkpoint)}}
-        with patch.object(audit, "audit_one", side_effect=inspect), redirect_stdout(StringIO()):
+        with patch.object(audit, "audit_one", side_effect=inspect):
             code = audit.main(self.args)
         return code, json.loads(self.output.read_text(encoding="utf-8"))
 
@@ -426,7 +425,7 @@ class AuditCommandTests(TempDirTestCase):
 
     def test_existing_output_is_never_overwritten(self):
         self.output.write_text("keep me", encoding="utf-8")
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
+        with self.assertRaises(SystemExit) as raised:
             audit.main(self.args)
         self.assertEqual(raised.exception.code, 2)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "keep me")
@@ -435,7 +434,7 @@ class AuditCommandTests(TempDirTestCase):
         empty = self.root / "empty"
         empty.mkdir()
         self.args[self.args.index("--corpus") + 1] = str(empty)
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
+        with self.assertRaises(SystemExit) as raised:
             audit.main(self.args)
         self.assertEqual(raised.exception.code, 2)
         self.assertFalse(self.output.exists())
