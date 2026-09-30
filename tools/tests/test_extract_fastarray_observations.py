@@ -208,7 +208,7 @@ class FastArrayTests(TempDirTestCase):
     def test_only_exact_route_pairs_are_selected(self):
         raw, count = payload([1, 3])
         near_misses = [
-            field_row((CNC_H1[0], CHAINED[1]), raw, count),  # the pair the old cross product allowed
+            field_row((CNC_H1[0], CHAINED[1]), raw, count),  # a cross product of two routes' halves
             field_row((CHAINED[0], CNC_H1[1]), raw, count),
             field_row(("AbilitiesAndBuffsComponent_ClassNetCache", CNC_H1[1]), raw, count),
             field_row((CHAINED[0], "OwnerActor"), raw, count),  # not a route name, so not counted

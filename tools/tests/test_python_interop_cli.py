@@ -41,10 +41,8 @@ class ExactFixtureSelectionTests(TempDirTestCase):
         self.assertNotIn(str(stale), output)
 
     def test_environment_names_the_rust_root_and_selects_its_interop_child(self):
-        # VRFKIT_INTEROP_DIR is the root the Rust write_interop_files test
-        # is given, and that test writes its files to `<root>/interop`. The
-        # script used to read the variable as the fixture directory itself,
-        # so the documented setting found nothing.
+        # VRFKIT_INTEROP_DIR is the root the Rust write_interop_files test is
+        # given; its files are in `<root>/interop`, not in the root itself.
         temp = self.tmp()
         root = temp / "selected"
         (root / "interop").mkdir(parents=True)

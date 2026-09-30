@@ -120,8 +120,8 @@ WRAITH = "/Game/Characters/Wraith/Wraith_PC.Wraith_PC_C"
 class ReconnectedCarrierTests(TempDirTestCase):
     """39c2bb2c (13.05): PlayerState 256's SpawnedCharacter goes 1510 -> 0 ->
     45530 and the manifest keeps 45530. Pawn 1510 carried and planted the
-    spike in round 5; the join on the manifest alone called that custody
-    `unknown` and the plant `NO CARRIER`."""
+    spike in round 5; a join on the manifest's last pawn alone reads that
+    custody as `unknown` and the plant as `NO CARRIER`."""
 
     def build(self):
         root = self.tmp()
