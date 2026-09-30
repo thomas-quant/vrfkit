@@ -2,7 +2,7 @@
 //!
 //! Only a content block's payload is transformed; block headers and their
 //! declared bit lengths are plaintext, so a replay is framed sequentially and
-//! the per-block decode can run in parallel. The key comes from the stream:
+//! each block's transform is independent of the others. The key comes from the stream:
 //! `seed = (bit_count as u32) ^ actor_net_guid` ([`seed_for`]).
 //!
 //! The skeleton is shared from release-11.06 to release-13.06; a build is one

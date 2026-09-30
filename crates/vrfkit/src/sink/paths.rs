@@ -14,7 +14,7 @@
 //! channel -> (actor, archetype) map (`ChannelState::resolution_generation`,
 //! moved only by `on_actor_open`/`on_actor_close`). Any stamp moving discards
 //! the whole memo, so a hit is indistinguishable from a recomputation; some
-//! stamp moves every ~330 blocks, so the unbounded table never grows far. The
+//! stamp moves every ~92 blocks, so the unbounded table never grows far. The
 //! value carries the function count because `resolve_function_count` can
 //! replace the path. Hit rate: docs/PERFORMANCE_NOTES.md#group-path-resolution-memo.
 
