@@ -29,14 +29,14 @@ class ScopedTypeGenerationTests(TempDirTestCase):
         path = temp / "evidence.json"
         for entries in cases:
             with self.subTest(entries=entries):
-                path.write_text(json.dumps({"schema_version": 1, "entries": entries}))
+                path.write_text(json.dumps({"schema_version": 1, "entries": entries}), encoding="utf-8")
                 with self.assertRaises(ValueError):
                     gen.load(path)
 
     def test_check_fails_for_a_changed_type(self):
         temp = self.tmp()
         path = temp / "scoped.rs"
-        path.write_text(gen.render(gen.load(gen.EVIDENCE)).replace("FieldType::Byte", "FieldType::Float", 1))
+        path.write_text(gen.render(gen.load(gen.EVIDENCE)).replace("FieldType::Byte", "FieldType::Float", 1), encoding="utf-8")
         self.assertEqual(gen.main(["--output", str(path), "--check"]), 1)
 
     def test_the_fixture_keeps_its_own_layout(self):
@@ -97,7 +97,7 @@ class ScopedTypeGenerationTests(TempDirTestCase):
         temp = self.tmp()
         path = temp / "evidence.json"
         path.write_text(json.dumps({"schema_version": 1, "entries": [
-            {**base, "type": "RepMovementByte"}, {**base, "type": "RepMovementShort"}]}))
+            {**base, "type": "RepMovementByte"}, {**base, "type": "RepMovementShort"}]}), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "duplicate"):
             gen.load(path)
 
@@ -117,10 +117,10 @@ class ScopedTypeGenerationTests(TempDirTestCase):
             ({**scalar, "location_quantization": "RoundWholeNumber"}, "only to RepMovement"),
         ):
             with self.subTest(entry=entry):
-                path.write_text(json.dumps({"schema_version": 1, "entries": [entry]}))
+                path.write_text(json.dumps({"schema_version": 1, "entries": [entry]}), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, message):
                     gen.load(path)
         path.write_text(json.dumps({"schema_version": 1, "entries": [
-            {**base, "location_quantization": "RoundOneDecimal"}]}))
+            {**base, "location_quantization": "RoundOneDecimal"}]}), encoding="utf-8")
         self.assertIn("location: VectorQuantization::RoundOneDecimal }",
                       gen.render(gen.load(path)))

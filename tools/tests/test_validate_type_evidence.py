@@ -324,8 +324,8 @@ class SpecificationFileTests(TempDirTestCase):
         write_int_export(root / "a")
         spec, absent = root / "spec.json", root / "absent.json"
         spec.write_text(json.dumps([{"group": "g", "field": "f", "type": "Int32"},
-                                    {"group": "g", "field": "absent", "type": "Int32"}]))
-        absent.write_text(json.dumps([{"group": "other", "field": "x", "type": "Int32"}]))
+                                    {"group": "g", "field": "absent", "type": "Int32"}]), encoding="utf-8")
+        absent.write_text(json.dumps([{"group": "other", "field": "x", "type": "Int32"}]), encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             codes = (main([str(root), str(spec)]), main([str(root), str(spec), "--allow-missing"]),

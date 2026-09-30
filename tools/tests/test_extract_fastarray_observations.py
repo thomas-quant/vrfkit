@@ -60,7 +60,7 @@ def field_row(identity, raw, count, handle=1):
 def write_export(root, build, fields=(), checkpoint=()):
     source = root / "export"
     source.mkdir()
-    (source / "manifest.json").write_text(json.dumps({"replay_build": build}))
+    (source / "manifest.json").write_text(json.dumps({"replay_build": build}), encoding="utf-8")
     pq.write_table(pa.Table.from_pylist(list(fields), schema=FIELD_SCHEMA), source / "fields.parquet")
     rows = [dict(row, checkpoint_index=0, checkpoint_id="cp0") for row in checkpoint]
     pq.write_table(pa.Table.from_pylist(rows, schema=CHECKPOINT_SCHEMA), source / "checkpoint_fields.parquet")
@@ -68,7 +68,7 @@ def write_export(root, build, fields=(), checkpoint=()):
 
 
 def records(out):
-    return [json.loads(line) for line in (out / "observations.ndjson").read_text().splitlines()]
+    return [json.loads(line) for line in (out / "observations.ndjson").read_text(encoding="utf-8").splitlines()]
 
 
 def run(source, out):
@@ -241,7 +241,7 @@ class FastArrayTests(TempDirTestCase):
         source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
         code, printed = run(source, out)
         self.assertEqual(code, 0)
-        receipt = json.loads((out / "receipt.json").read_text())
+        receipt = json.loads((out / "receipt.json").read_text(encoding="utf-8"))
         counts = receipt["counts"]
         self.assertEqual(json.loads(printed), counts)
         self.assertEqual(set(counts), {
@@ -279,7 +279,7 @@ class FastArrayTests(TempDirTestCase):
                 source = write_export(root, build, **{"fields" if stream == "fields" else "checkpoint": rows})
                 code, printed = run(source, out)
                 self.assertEqual(code, 1 if reason else 0)
-                receipt = json.loads((out / "receipt.json").read_text())
+                receipt = json.loads((out / "receipt.json").read_text(encoding="utf-8"))
                 self.assertEqual(json.loads(printed), receipt["counts"])
                 self.assertEqual(receipt["replay_build"], build)
                 self.assertEqual((receipt["counts"]["rows"], receipt["counts"][f"{stream}_rows"]), (1, 1))
@@ -298,7 +298,7 @@ class FastArrayTests(TempDirTestCase):
         self.assertEqual(receipt["input_sha256_before"], receipt["input_sha256_after"])
         self.assertEqual(receipt["observations_sha256"], fast.sha(out / "observations.ndjson"))
         self.assertEqual(receipt["wire_bits_sha256"], fast.sha(Path(fast.__file__).with_name("wire_bits.py")))
-        record = json.loads((out / "observations.ndjson").read_text())
+        record = json.loads((out / "observations.ndjson").read_text(encoding="utf-8"))
         self.assertEqual(record["physical_row_ordinal"], 1)
         self.assertEqual((record["route"], record["population"]), ("cnc_h1", "fields"))
         self.assertEqual(record["structure"]["deleted_item_ids"], [1, 3])
@@ -325,10 +325,10 @@ class FastArrayTests(TempDirTestCase):
         source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count + 1)])
         code, _ = run(source, out)
         self.assertEqual(code, 1)
-        receipt = json.loads((out / "receipt.json").read_text())
+        receipt = json.loads((out / "receipt.json").read_text(encoding="utf-8"))
         self.assertEqual(receipt["counts"]["rejected"], 1)
         self.assertEqual(receipt["counts"]["cnc_h1.fields.rejected"], 1)
-        record = json.loads((out / "observations.ndjson").read_text())
+        record = json.loads((out / "observations.ndjson").read_text(encoding="utf-8"))
         self.assertEqual(record["status"], "unconsumed_suffix")
         self.assertIsNotNone(record["raw_bits_hex"])
 
@@ -341,7 +341,7 @@ class FastArrayTests(TempDirTestCase):
         def alter(path, checkpoint):
             yield from original(path, checkpoint)
             if checkpoint:
-                with (source / "manifest.json").open("a") as handle:
+                with (source / "manifest.json").open("a", encoding="utf-8") as handle:
                     handle.write(" ")
         with patch.object(fast, "selected_rows", alter), self.assertRaisesRegex(ValueError, "changed during read"):
             fast.extract(source, out)

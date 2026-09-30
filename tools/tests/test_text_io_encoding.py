@@ -1,17 +1,12 @@
-"""Every text-mode file read or write in tools/*.py names its encoding.
+"""Every text-mode file read or write in tools/ and tools/tests names its encoding.
 
-Without `encoding=`, Python decodes with the locale's code page. On a cp949
-Windows host that made extract_healing_observations.py exit 1 on a
-manifest.json whose source_file held Hangul, while every sibling tool read the
-same file. Running the tools cannot catch this in CI: every job sets
-PYTHONUTF8=1, which hides the locale. So this reads the source instead.
+Without `encoding=`, Python decodes with the locale's code page (cp949 on a Korean
+Windows host), and CI cannot see it: every job sets PYTHONUTF8=1. So this reads the source.
 
-Checked: Path.read_text/write_text, builtin/io open, os.fdopen and Path.open,
-unless the mode is binary. `<module>.open` (tarfile.open, ...) has another
-signature and is skipped. Text-mode subprocess calls are checked apart: they
-decode a child's output with the locale's code page too (a cp949
-UnicodeDecodeError was reproduced), so each must name `encoding=` and an
-explicit `errors=` policy.
+Checked: Path.read_text/write_text, builtin/io open, os.fdopen and Path.open, unless the
+mode is binary; `<module>.open` (tarfile.open, ...) has another signature and is skipped.
+Text-mode subprocess calls decode a child's output with the locale too, so each must name
+`encoding=` and an explicit `errors=`.
 """
 import ast
 import unittest
@@ -98,50 +93,32 @@ def undecided_subprocess_text(source: str, filename: str = "<source>") -> tuple[
     return flagged, checked
 
 
+#: (folder, scanner, a file its glob must find, floor on the calls it checks). The tests
+#: run the tools as children and read their output, so they are held to the same rule.
+SCANS = [
+    (TOOLS, unencoded_text_io, "extract_healing_observations.py", 50),
+    (TOOLS, undecided_subprocess_text, "verify_build_corpus.py", 5),
+    (TOOLS / "tests", unencoded_text_io, "test_check_ascii.py", 100),
+    (TOOLS / "tests", undecided_subprocess_text, "test_check_ascii.py", 10),
+]
+
+
 class TextIoEncodingTests(unittest.TestCase):
-    def test_every_text_file_call_in_tools_names_its_encoding(self):
-        scripts = sorted(TOOLS.glob("*.py"))
-        # A glob that found nothing would pass vacuously.
-        self.assertIn(TOOLS / "extract_healing_observations.py", scripts)
-        flagged, checked = [], 0
-        for script in scripts:
-            lines, count = unencoded_text_io(script.read_text(encoding="utf-8"), str(script))
-            flagged += [f"{script.name}:{line}" for line in lines]
-            checked += count
-        self.assertGreater(checked, 50)
-        self.assertEqual(flagged, [], "text I/O without encoding= decodes with the locale")
-
-    def test_every_text_mode_subprocess_call_in_tools_names_encoding_and_errors(self):
-        scripts = sorted(TOOLS.glob("*.py"))
-        self.assertIn(TOOLS / "verify_build_corpus.py", scripts)
-        flagged, checked = [], 0
-        for script in scripts:
-            lines, count = undecided_subprocess_text(
-                script.read_text(encoding="utf-8"), str(script))
-            flagged += [f"{script.name}:{line}" for line in lines]
-            checked += count
-        # Non-vacuous: tools/*.py holds 9 text-mode calls.
-        self.assertGreater(checked, 5)
-        self.assertEqual(flagged, [],
-                         "text-mode subprocess output without encoding= and errors= "
-                         "decodes with the locale")
-
-    def test_every_text_mode_subprocess_call_in_the_tests_names_encoding_and_errors(self):
-        # The tests run the tools as children and read what they print, so a
-        # locale decode fails them on a cp949 host just as it fails the tools.
-        scripts = sorted((TOOLS / "tests").glob("*.py"))
-        self.assertIn(TOOLS / "tests" / "test_check_ascii.py", scripts)
-        flagged, checked = [], 0
-        for script in scripts:
-            lines, count = undecided_subprocess_text(
-                script.read_text(encoding="utf-8"), str(script))
-            flagged += [f"{script.name}:{line}" for line in lines]
-            checked += count
-        # Non-vacuous: tools/tests holds 13 text-mode calls.
-        self.assertGreater(checked, 10)
-        self.assertEqual(flagged, [],
-                         "text-mode subprocess output without encoding= and errors= "
-                         "decodes with the locale")
+    def test_every_text_mode_call_names_its_encoding(self):
+        sources = {folder: {path.name: path.read_text(encoding="utf-8") for path in sorted(folder.glob("*.py"))}
+                   for folder in (TOOLS, TOOLS / "tests")}
+        for folder, scanner, sentinel, floor in SCANS:
+            with self.subTest(folder=folder.name, scanner=scanner.__name__):
+                # A glob that found nothing would pass vacuously.
+                self.assertIn(sentinel, sources[folder])
+                flagged, checked = [], 0
+                for name, source in sources[folder].items():
+                    lines, count = scanner(source, name)
+                    flagged += [f"{name}:{line}" for line in lines]
+                    checked += count
+                self.assertGreater(checked, floor)
+                self.assertEqual(flagged, [], "text-mode I/O without encoding= (and, for a "
+                                 "subprocess, errors=) decodes with the locale")
 
     def test_the_subprocess_scanner_flags_each_undecided_shape(self):
         cases = {

@@ -231,7 +231,7 @@ class AuditExecutionTests(TempDirTestCase):
             output = Path(args[args.index("--out") + 1])
             output.mkdir()
             if self.write_manifest:
-                (output / "manifest.json").write_text(json.dumps(self.data))
+                (output / "manifest.json").write_text(json.dumps(self.data), encoding="utf-8")
         return subprocess.CompletedProcess(args, self.codes[command == "export"],
                                            stdout=ValidationTests.TEXT if command == "validate" else "export", stderr="")
 
@@ -248,7 +248,7 @@ class AuditExecutionTests(TempDirTestCase):
                                                           self.guid_counts)))
             stack.enter_context(patch.object(audit.evidence, "validate", side_effect=evidence_result))
             result = audit.audit_one((self.digest, self.replay), Path("vrfkit.exe"), self.work, [])
-        saved = json.loads((self.work / self.digest / "result.json").read_text())
+        saved = json.loads((self.work / self.digest / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(result, saved)
         return result, run
 
@@ -316,7 +316,7 @@ class AuditExecutionTests(TempDirTestCase):
         result, _ = self.run_audit(error=error)
         self.assertTrue(result["failures"])
         self.assertNotIn(str(self.root), json.dumps(result))
-        self.assertIn(repr(str(self.replay)), (self.work / self.digest / "error.txt").read_text())
+        self.assertIn(repr(str(self.replay)), (self.work / self.digest / "error.txt").read_text(encoding="utf-8"))
 
     def test_guid_crosscheck_counts_reach_the_result_zeros_included(self):
         result, _ = self.run_audit()
@@ -386,7 +386,7 @@ class AuditCommandTests(TempDirTestCase):
                                "checkpoint_overlay_decoded_ok": int(checkpoint)}}
         with patch.object(audit, "audit_one", side_effect=inspect), redirect_stdout(StringIO()):
             code = audit.main(self.args)
-        return code, json.loads(self.output.read_text())
+        return code, json.loads(self.output.read_text(encoding="utf-8"))
 
     def test_content_duplicates_are_checked_once_including_nested_uppercase_vrf(self):
         nested = self.corpus / "nested"
@@ -415,11 +415,11 @@ class AuditCommandTests(TempDirTestCase):
         self.assertTrue(report["executable_changed"])
 
     def test_existing_output_is_never_overwritten(self):
-        self.output.write_text("keep me")
+        self.output.write_text("keep me", encoding="utf-8")
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
             audit.main(self.args)
         self.assertEqual(raised.exception.code, 2)
-        self.assertEqual(self.output.read_text(), "keep me")
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "keep me")
 
     def test_empty_corpus_is_an_error(self):
         empty = self.root / "empty"

@@ -411,7 +411,7 @@ def make_export(root, window_rows, build="13.02", slots=(2,), cp_fields=(), acto
     source.mkdir()
     (source / "manifest.json").write_text(json.dumps({
         "replay_build": f"++Ares-Core+release-{build}",
-        "net_field_export_groups": manifest_groups() if groups is None else groups}))
+        "net_field_export_groups": manifest_groups() if groups is None else groups}), encoding="utf-8")
     base = {"time_ms": 500, "packet_id": 9, "channel_index": 3, "actor_net_guid": 100,
             "object_net_guid": 104, "handle": 0xFFFFFFFF, "field_name": gv.UNRESOLVED_CNC,
             "compatible_checksum": None, "group_path": "PatchVolume"}
@@ -467,7 +467,7 @@ class SchemaTests(TempDirTestCase):
                                       "handle": pa.uint32(), "compatible_checksum": pa.uint32(),
                                       "rendered_name": pa.string()}),
                        source / "checkpoint_export_fields.parquet")
-        manifest = json.loads((source / "manifest.json").read_text())
+        manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
         loaded = gv.load_schema(source, manifest)
         self.assertIsNone(loaded.error)
         self.assertEqual(loaded.members[43], ("Floor", 3454040167))
@@ -478,14 +478,14 @@ class SchemaTests(TempDirTestCase):
         source = make_export(tmp, [], cp_fields=[
             {"checkpoint_index": 0, "path_name_index": 8, "handle": 0,
              "compatible_checksum": 99, "rendered_name": "SomethingElse"}])
-        manifest = json.loads((source / "manifest.json").read_text())
+        manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(gv.load_schema(source, manifest).error, "declaration_conflict")
 
     def test_cnc_slot_count_must_be_declared_and_agree(self):
         for slots, error in (((), "cnc_slots_undeclared"), ((2, 3), "cnc_slots_conflict"), ((2, 2), None)):
             with self.subTest(slots=slots), tempfile.TemporaryDirectory() as tmp:
                 source = make_export(Path(tmp), [], slots=slots)
-                manifest = json.loads((source / "manifest.json").read_text())
+                manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
                 self.assertEqual(gv.load_schema(source, manifest).error, error)
 
 
@@ -541,7 +541,7 @@ class CliTests(TempDirTestCase):
         self.assertEqual(receipt["items_sha256"], gv.sha(out / "items.ndjson"))
         self.assertEqual(receipt["wire_bits_sha256"], gv.sha(Path(gv.__file__).with_name("wire_bits.py")))
         self.assertEqual(receipt["declarations"]["cnc_declared_slots"], 2)
-        item = json.loads((out / "items.ndjson").read_text())
+        item = json.loads((out / "items.ndjson").read_text(encoding="utf-8"))
         self.assertEqual(item["physical_row_ordinal"], 1)
         self.assertEqual(item["fields"], CELL)
         self.assertEqual(item["owner_class_path"], "/Game/X/Patch_Test.Patch_Test_C")
@@ -550,7 +550,7 @@ class CliTests(TempDirTestCase):
                           counts["object_guid_unresolved"]), (1, 0, 0))
         self.assertEqual(item["hull"], {"points_xy": [p[:2] for p in POINTS],
                                         "floor": CELL["Floor"], "ceiling": CELL["Ceiling"]})
-        window_record = json.loads((out / "windows.ndjson").read_text())
+        window_record = json.loads((out / "windows.ndjson").read_text(encoding="utf-8"))
         self.assertEqual(window_record["status"], "decoded_exact")
         with self.assertRaisesRegex(ValueError, "already exists"):
             gv.extract(source, out)
@@ -575,7 +575,7 @@ class CliTests(TempDirTestCase):
                 root = Path(tmp)
                 source = make_export(root, [window_row([(1, item_bits(values, drop=drop))])], build=build)
                 receipt = gv.extract(source, root / "result")
-                item = json.loads((root / "result" / "items.ndjson").read_text())
+                item = json.loads((root / "result" / "items.ndjson").read_text(encoding="utf-8"))
                 self.assertEqual(item["status_name"], name)
                 self.assertEqual(item["fields"].get("Status"), None if drop else values.get("Status", CELL["Status"]))
                 self.assertEqual({k: receipt["counts"][k] for k in STATUS_COUNTERS},
@@ -598,7 +598,7 @@ class CliTests(TempDirTestCase):
         counts = gv.extract(source, root / "result")["counts"]
         self.assertEqual((counts["items_partial"], counts["items_complete"]), (1, 0))
         self.assertEqual((counts["owner_class_ambiguous"], counts["owner_class_resolved"]), (1, 0))
-        item = json.loads((root / "result" / "items.ndjson").read_text())
+        item = json.loads((root / "result" / "items.ndjson").read_text(encoding="utf-8"))
         self.assertEqual((item["complete"], item["owner_class_path"], item["hull"]["floor"]),
                          (False, None, None))
 
@@ -611,7 +611,7 @@ class CliTests(TempDirTestCase):
                 counts = gv.extract(make_export(root, [window_row()], net_guids=guids), root / "result")["counts"]
                 self.assertEqual((counts["object_outer_is_actor"], counts["object_outer_not_actor"],
                                   counts["object_guid_unresolved"]), expected)
-                item = json.loads((root / "result" / "items.ndjson").read_text())
+                item = json.loads((root / "result" / "items.ndjson").read_text(encoding="utf-8"))
                 self.assertEqual((item["object_path"], item["object_outer_net_guid"]), identity)
 
     def test_rejections_are_retained_and_exit_nonzero(self):
@@ -624,12 +624,12 @@ class CliTests(TempDirTestCase):
             self.assertEqual(gv.main(), 1)
         self.assertEqual(json.loads(printed.getvalue())["rejected"], 1)
         self.assertEqual(json.loads(errors.getvalue()), {"unconsumed_entry": 1})
-        receipt = json.loads((out / "receipt.json").read_text())
+        receipt = json.loads((out / "receipt.json").read_text(encoding="utf-8"))
         self.assertEqual((receipt["counts"]["rejected"], receipt["rejection_reasons"]),
                          (1, {"unconsumed_entry": 1}))
-        record = json.loads((out / "windows.ndjson").read_text())
+        record = json.loads((out / "windows.ndjson").read_text(encoding="utf-8"))
         self.assertEqual((record["status"], record["raw_bits_hex"]), ("unconsumed_entry", raw.hex()))
-        self.assertEqual((out / "items.ndjson").read_text(), "")
+        self.assertEqual((out / "items.ndjson").read_text(encoding="utf-8"), "")
 
     def test_changed_input_does_not_publish(self):
         root = self.tmp()
@@ -640,7 +640,7 @@ class CliTests(TempDirTestCase):
         def alter(path, checkpoint):
             yield from original(path, checkpoint)
             if checkpoint:
-                with (source / "manifest.json").open("a") as handle:
+                with (source / "manifest.json").open("a", encoding="utf-8") as handle:
                     handle.write(" ")
         with patch.object(gv, "selected_rows", alter), self.assertRaisesRegex(ValueError, "changed during read"):
             gv.extract(source, out)
