@@ -22,7 +22,7 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 or approved by Riot Games.
 
 **Verified state (2026-09-30):** Rust has **707 passing** tests; Python has
-**1037 passing** tests. All 24 supported builds received the same verification
+**1045 passing** tests. All 24 supported builds received the same verification
 on **1,018 unique replays**; all **1,018** meet every strict criterion. See
 [build verification](docs/BUILD_VERIFICATION.md) for the measured scope, common
 checks and remaining limits.
@@ -179,7 +179,7 @@ timestamp) are in [`docs/USAGE.md` section 3](docs/USAGE.md#3-output).
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**707 passing**; the full Python suite also has **1037 passing** tests. The
+**707 passing**; the full Python suite also has **1045 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export and independent value checks for
 each supported build.
