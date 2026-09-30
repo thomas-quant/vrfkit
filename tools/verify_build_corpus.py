@@ -38,6 +38,8 @@ NET_ZERO = (
     "actor_opens_missing_spawn", "channel_state_limit_failures",
     "partial_resource_limit_failures", "failed_reopens_while_open",
     "bunches_on_unopened_channel", "unopened_channel_bits",
+    # Nothing after the exports is read: 0 in both passes of all 1,018 replays.
+    "package_map_exports", "rep_layout_export_bunches",
 )
 SINK_ZERO = (
     "overlay_decoded_err", "struct_blobs_failed", "movement_rpc_errors",
