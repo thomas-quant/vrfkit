@@ -78,6 +78,17 @@ class ExtractRoundsTests(TempDirTestCase):
         self.assertIn("phase 4", stderr)
         self.assertFalse(out.exists())
 
+    def test_an_overtime_switch_resets_twice_in_one_frame(self):
+        rows, counts, problems = rounds.build(self.two_rounds([(2000, "ClientResetRound", None, None)]))
+        self.assertEqual((len(rows), problems), (2, []))
+        self.assertEqual(counts["named RPC repeated in its frame"], 1)
+
+    def test_a_reset_that_never_starts_a_round_is_dropped_and_counted(self):
+        extra = [(3000, rounds.SET_PHASE, 2, None), (3000, "ClientResetRound", None, None)]
+        rows, counts, problems = rounds.build(self.two_rounds(extra))
+        self.assertEqual((len(rows), problems), (2, []))
+        self.assertEqual(counts["unstarted final round (dropped)"], 1)
+
     def test_surrender_padding_is_counted_never_a_row(self):
         padding = [row for i in range(2, 13) for row in result_rows(2600, i, "Red", "attacker", "surrendered")]
         rows, counts, problems = rounds.build(self.two_rounds(padding))
