@@ -5,25 +5,20 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import tempfile
-import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import minimap
 
 MAP = "/Game/Maps/Test/Test"
 CONSTANTS = {"xMultiplier": 2.0, "yMultiplier": 3.0, "xScalarToAdd": 10.0, "yScalarToAdd": 20.0}
 
 
-class MinimapTests(unittest.TestCase):
+class MinimapTests(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = self.tmp()
 
     def export(self, positions, constants):
         export = self.root / "export"

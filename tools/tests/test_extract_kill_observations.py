@@ -2,7 +2,7 @@ import copy, json, tempfile, unittest
 from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import extract_kill_observations as tool
 from wire_fixtures import FIELD_SCHEMA as SCHEMA, array
 
@@ -150,16 +150,15 @@ class BuildScopeTests(unittest.TestCase):
                     tool.extract(export)
 
 
-class ExtractionTests(unittest.TestCase):
+class ExtractionTests(TempDirTestCase):
     def run_rows(self, rows, decl=DECL, refs=None):
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            pq.write_table(
-                pa.Table.from_pylist(rows, schema=SCHEMA), root / "fields.parquet"
-            )
-            return tool.extract_table(
-                root, "fields", decl, refs or {None: ({4}, set())}
-            )
+        root = self.tmp()
+        pq.write_table(
+            pa.Table.from_pylist(rows, schema=SCHEMA), root / "fields.parquet"
+        )
+        return tool.extract_table(
+            root, "fields", decl, refs or {None: ({4}, set())}
+        )
 
     def test_partial_stays_null_and_repeated_parents_keep_ordinals(self):
         got, counts = self.run_rows(fixture(True))
@@ -285,11 +284,10 @@ class ExtractionTests(unittest.TestCase):
                 *list(SCHEMA),
             ]
         )
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            pq.write_table(
-                pa.Table.from_pylist(cp, schema=schema),
-                root / "checkpoint_fields.parquet",
-            )
-            with self.assertRaisesRegex(tool.InputError, "declaration"):
-                tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})
+        root = self.tmp()
+        pq.write_table(
+            pa.Table.from_pylist(cp, schema=schema),
+            root / "checkpoint_fields.parquet",
+        )
+        with self.assertRaisesRegex(tool.InputError, "declaration"):
+            tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})

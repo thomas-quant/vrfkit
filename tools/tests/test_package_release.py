@@ -7,12 +7,11 @@ import os
 from pathlib import Path
 import struct
 import subprocess
-import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import package_release as release
 
 
@@ -57,15 +56,13 @@ class ReleaseIdentityTests(unittest.TestCase):
                 release.require_windows_x64(image)
 
 
-class ReleasePackageTests(unittest.TestCase):
+class ReleasePackageTests(TempDirTestCase):
     TAG = "v1.2.3-rc.1"
     COMMIT = "a" * 40
     HELP = "\n".join("vrfkit " + command for command in ("inspect", "validate", "diag", "export"))
 
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = self.tmp()
         self.exe = self.root / "source.exe"
         self.exe.write_bytes(pe_image())
         for name in ("LICENSE", "NOTICE.md"):

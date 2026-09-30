@@ -2,22 +2,17 @@
 import contextlib
 import io
 import json
-from pathlib import Path
-import tempfile
-import unittest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import summarize_value_coverage as coverage
 
 
-class PhysicalCoverageTests(unittest.TestCase):
+class PhysicalCoverageTests(TempDirTestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = self.tmp()
 
     def write(self, directory, filename="fields.parquet"):
         directory.mkdir(exist_ok=True)

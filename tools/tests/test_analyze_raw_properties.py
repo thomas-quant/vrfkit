@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import tempfile
 import unittest
 from collections import Counter
 from contextlib import redirect_stderr, redirect_stdout
@@ -13,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import analyze_raw_properties as raw_inventory
 
 
@@ -65,7 +64,7 @@ def row(
     }
 
 
-class AnalyzeExportTests(unittest.TestCase):
+class AnalyzeExportTests(TempDirTestCase):
     def _write_export(self, root: Path, rows: list[dict]) -> None:
         (root / "manifest.json").write_text(
             json.dumps({"replay_build": "++Ares-Core+release-13.04"}),
@@ -87,11 +86,10 @@ class AnalyzeExportTests(unittest.TestCase):
             row(packet=5, group="/private/Rpc_ClassNetCache", handle=4, name=None,
                 bits=8, raw=b"\xff"),
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            build = raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        build = raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         self.assertEqual(build, "13.04")
         self.assertEqual(inventory.field_rows[build], 5)
@@ -115,11 +113,10 @@ class AnalyzeExportTests(unittest.TestCase):
         rows = [
             row(packet=1, group="/private/group", handle=1, name=None, bits=0, raw=None)
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         self.assertEqual(inventory.integrity_failures, 1)
         self.assertEqual(inventory.unnamed_raw_rows["13.04"], 0)
@@ -129,11 +126,10 @@ class AnalyzeExportTests(unittest.TestCase):
             row(packet=1, group="/private/group", handle=1, name=None,
                 bits=9, raw=b"\x01")
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         self.assertEqual(inventory.integrity_failures, 1)
         self.assertEqual(inventory.unnamed_wrong_length_rows["13.04"], 1)
@@ -144,11 +140,10 @@ class AnalyzeExportTests(unittest.TestCase):
             row(packet=991, group=private_group, handle=987654, name=None,
                 bits=24, raw=b"\x01\x02\x03")
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         report = raw_inventory.render_report(
             inventory,
@@ -194,17 +189,17 @@ class AnalyzeExportTests(unittest.TestCase):
             ]),
         ]
         inventory = raw_inventory.Inventory()
-        with tempfile.TemporaryDirectory() as td:
-            for ordinal, (build, rows) in enumerate(exports, 1):
-                root = Path(td) / str(ordinal)
-                root.mkdir()
-                (root / "manifest.json").write_text(
-                    json.dumps({"replay_build": f"++Ares-Core+release-{build}"}),
-                    encoding="utf-8",
-                )
-                pq.write_table(pa.Table.from_pylist(rows, schema=SCHEMA),
-                               root / "fields.parquet")
-                raw_inventory.analyze_export(root, inventory, replay_ordinal=ordinal)
+        td = self.tmp()
+        for ordinal, (build, rows) in enumerate(exports, 1):
+            root = td / str(ordinal)
+            root.mkdir()
+            (root / "manifest.json").write_text(
+                json.dumps({"replay_build": f"++Ares-Core+release-{build}"}),
+                encoding="utf-8",
+            )
+            pq.write_table(pa.Table.from_pylist(rows, schema=SCHEMA),
+                           root / "fields.parquet")
+            raw_inventory.analyze_export(root, inventory, replay_ordinal=ordinal)
 
         report = raw_inventory.render_report(
             inventory,
@@ -310,11 +305,10 @@ class AnalyzeExportTests(unittest.TestCase):
             row(packet=991, group=private_group, handle=987654, name=None,
                 bits=24, raw=b"\x01\x02\x03")
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         document = raw_inventory.summary_document(
             inventory,

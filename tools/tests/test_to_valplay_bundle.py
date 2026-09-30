@@ -17,7 +17,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import to_valplay_bundle as bundle
 
 
@@ -363,18 +363,17 @@ def oracle_rows() -> list[dict]:
     return rows
 
 
-class MovementLineAssemblyTests(unittest.TestCase):
+class MovementLineAssemblyTests(TempDirTestCase):
     """movement.ndjson, assembled in Arrow, is the per-row oracle's bytes."""
 
     def write(self, rows: list[dict], block_rows: int) -> bytes:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_table(root / "movement.parquet", rows, SPECS["movement"])
-            out = root / "out"
-            out.mkdir()
-            with mock.patch.object(bundle, "_MOVEMENT_BLOCK_ROWS", block_rows):
-                bundle._write_movement(root / "movement.parquet", out, False)
-            return (out / "movement.ndjson").read_bytes()
+        root = self.tmp()
+        write_table(root / "movement.parquet", rows, SPECS["movement"])
+        out = root / "out"
+        out.mkdir()
+        with mock.patch.object(bundle, "_MOVEMENT_BLOCK_ROWS", block_rows):
+            bundle._write_movement(root / "movement.parquet", out, False)
+        return (out / "movement.ndjson").read_bytes()
 
     def test_bytes_equal_the_per_row_writer(self):
         rows = oracle_rows()
@@ -402,21 +401,20 @@ class MovementLineAssemblyTests(unittest.TestCase):
         """A null would reach `to_numpy` as float64 NaN: float-spelled times."""
         for column in ("time_ms", "pos_x"):
             with self.subTest(column=column):
-                with tempfile.TemporaryDirectory() as tmp:
-                    root = Path(tmp)
-                    path = root / "movement.parquet"
-                    write_table(path, oracle_rows()[:3], SPECS["movement"])
-                    table = pq.read_table(path)
-                    index = table.schema.get_field_index(column)
-                    values = table.column(column).to_pylist()
-                    values[1] = None
-                    table = table.set_column(index, column, pa.array(
-                        values, type=table.schema.field(column).type))
-                    pq.write_table(table, path)
-                    out = root / "out"
-                    out.mkdir()
-                    with self.assertRaisesRegex(ValueError, column):
-                        bundle._write_movement(path, out, False)
+                root = self.tmp()
+                path = root / "movement.parquet"
+                write_table(path, oracle_rows()[:3], SPECS["movement"])
+                table = pq.read_table(path)
+                index = table.schema.get_field_index(column)
+                values = table.column(column).to_pylist()
+                values[1] = None
+                table = table.set_column(index, column, pa.array(
+                    values, type=table.schema.field(column).type))
+                pq.write_table(table, path)
+                out = root / "out"
+                out.mkdir()
+                with self.assertRaisesRegex(ValueError, column):
+                    bundle._write_movement(path, out, False)
 
     def test_only_the_arrays_own_bytes_are_written(self):
         """A slice shares its parent's data buffer, so the buffer holds bytes
@@ -425,7 +423,7 @@ class MovementLineAssemblyTests(unittest.TestCase):
         self.assertEqual(bytes(bundle._string_bytes(sliced)), b"bbccc")
 
 
-class TransactionalConversionTests(unittest.TestCase):
+class TransactionalConversionTests(TempDirTestCase):
     @staticmethod
     def snapshot(path: Path) -> dict[str, bytes]:
         return {
@@ -454,109 +452,104 @@ class TransactionalConversionTests(unittest.TestCase):
                 self.assertEqual((sorted(root.rglob("*")), self.snapshot(root)), before)
 
     def test_conversion_failure_preserves_an_existing_complete_bundle(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            export = write_export(root / "export")
-            (export / "fields.parquet").write_bytes(b"not parquet")
-            output = root / "bundle"
-            output.mkdir()
-            for name, content in {
-                "manifest.json": "{\"replay_version\":\"old\"}",
-                "events.ndjson": "{\"type\":\"old\"}\n",
-                "movement.ndjson": "",
-                ".complete": "old marker",
-            }.items():
-                (output / name).write_text(content, encoding="utf-8")
-            before = self.snapshot(output)
+        root = self.tmp()
+        export = write_export(root / "export")
+        (export / "fields.parquet").write_bytes(b"not parquet")
+        output = root / "bundle"
+        output.mkdir()
+        for name, content in {
+            "manifest.json": "{\"replay_version\":\"old\"}",
+            "events.ndjson": "{\"type\":\"old\"}\n",
+            "movement.ndjson": "",
+            ".complete": "old marker",
+        }.items():
+            (output / name).write_text(content, encoding="utf-8")
+        before = self.snapshot(output)
 
-            with self.assertRaises(Exception):
-                bundle.convert(export, output)
+        with self.assertRaises(Exception):
+            bundle.convert(export, output)
 
-            self.assertEqual(self.snapshot(output), before)
-            self.assertEqual(
-                [p for p in root.iterdir() if p.name.startswith(".bundle.")], []
-            )
+        self.assertEqual(self.snapshot(output), before)
+        self.assertEqual(
+            [p for p in root.iterdir() if p.name.startswith(".bundle.")], []
+        )
 
     def test_success_never_modifies_the_source_manifest(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            export = root / "export"
-            original = self.make_export(export)
+        root = self.tmp()
+        export = root / "export"
+        original = self.make_export(export)
 
-            bundle.convert(export, root / "bundle")
+        bundle.convert(export, root / "bundle")
 
-            self.assertEqual((export / "manifest.json").read_bytes(), original)
+        self.assertEqual((export / "manifest.json").read_bytes(), original)
 
     def test_the_summary_names_the_published_bundle(self):
         """Not the `.bundle.*` staging directory the publish renames away."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            self.make_export(root / "export")
-            output = root / "bundle"
-            printed = io.StringIO()
-            with contextlib.redirect_stdout(printed):
-                bundle.convert(root / "export", output)
-            summary = [ln for ln in printed.getvalue().splitlines()
-                       if ln.startswith("Conversion ")]
-            self.assertEqual(len(summary), 1, printed.getvalue())
-            self.assertTrue(summary[0].endswith(": " + str(output.resolve())), summary)
-            self.assertTrue(output.is_dir())
+        root = self.tmp()
+        self.make_export(root / "export")
+        output = root / "bundle"
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            bundle.convert(root / "export", output)
+        summary = [ln for ln in printed.getvalue().splitlines()
+                   if ln.startswith("Conversion ")]
+        self.assertEqual(len(summary), 1, printed.getvalue())
+        self.assertTrue(summary[0].endswith(": " + str(output.resolve())), summary)
+        self.assertTrue(output.is_dir())
 
     def test_a_failed_publish_prints_no_completion_claim(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            self.make_export(root / "export")
-            printed = io.StringIO()
-            with (mock.patch.object(bundle, "_publish_bundle",
-                                    side_effect=OSError("disk full")),
-                  contextlib.redirect_stdout(printed),
-                  self.assertRaises(OSError)):
-                bundle.convert(root / "export", root / "bundle")
-            self.assertNotIn("Conversion ", printed.getvalue())
+        root = self.tmp()
+        self.make_export(root / "export")
+        printed = io.StringIO()
+        with (mock.patch.object(bundle, "_publish_bundle",
+                                side_effect=OSError("disk full")),
+              contextlib.redirect_stdout(printed),
+              self.assertRaises(OSError)):
+            bundle.convert(root / "export", root / "bundle")
+        self.assertNotIn("Conversion ", printed.getvalue())
 
     def test_backup_cleanup_failure_does_not_turn_a_committed_publish_into_failure(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            staging = root / ".bundle.staging"
-            output = root / "bundle"
-            staging.mkdir()
-            output.mkdir()
-            (staging / "manifest.json").write_text("new", encoding="utf-8")
-            (output / "manifest.json").write_text("old", encoding="utf-8")
+        root = self.tmp()
+        staging = root / ".bundle.staging"
+        output = root / "bundle"
+        staging.mkdir()
+        output.mkdir()
+        (staging / "manifest.json").write_text("new", encoding="utf-8")
+        (output / "manifest.json").write_text("old", encoding="utf-8")
 
-            real_remove_tree = bundle.remove_tree
+        real_remove_tree = bundle.remove_tree
 
-            def fail_cleanup(path, parent):
-                raise OSError(f"cannot remove {path} under {parent}")
+        def fail_cleanup(path, parent):
+            raise OSError(f"cannot remove {path} under {parent}")
 
-            bundle.remove_tree = fail_cleanup
-            stderr = io.StringIO()
-            try:
-                with contextlib.redirect_stderr(stderr):
-                    bundle._publish_bundle(staging, output)
-            finally:
-                bundle.remove_tree = real_remove_tree
+        bundle.remove_tree = fail_cleanup
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr):
+                bundle._publish_bundle(staging, output)
+        finally:
+            bundle.remove_tree = real_remove_tree
 
-            self.assertEqual(
-                (output / "manifest.json").read_text(encoding="utf-8"), "new"
-            )
-            backups = list(root.glob(".bundle.backup.*"))
-            self.assertEqual(len(backups), 1, backups)
-            self.assertEqual(
-                (backups[0] / "manifest.json").read_text(encoding="utf-8"), "old"
-            )
-            self.assertIn("backup", stderr.getvalue().lower())
+        self.assertEqual(
+            (output / "manifest.json").read_text(encoding="utf-8"), "new"
+        )
+        backups = list(root.glob(".bundle.backup.*"))
+        self.assertEqual(len(backups), 1, backups)
+        self.assertEqual(
+            (backups[0] / "manifest.json").read_text(encoding="utf-8"), "old"
+        )
+        self.assertIn("backup", stderr.getvalue().lower())
 
 
-class DefaultOutputTests(unittest.TestCase):
+class DefaultOutputTests(TempDirTestCase):
     def test_a_windows_source_file_names_the_bundle_directory_on_any_os(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "manifest.json").write_text(
-                json.dumps({"source_file": "D:\\replays\\match.vrf"}), encoding="utf-8")
-            with (mock.patch.object(sys, "argv", ["to_valplay_bundle.py", tmp]),
-                  mock.patch.object(bundle.gc, "disable"),
-                  mock.patch.object(bundle, "convert") as convert):
-                bundle.main()
+        tmp = self.tmp()
+        (tmp / "manifest.json").write_text(
+            json.dumps({"source_file": "D:\\replays\\match.vrf"}), encoding="utf-8")
+        with (mock.patch.object(sys, "argv", ["to_valplay_bundle.py", str(tmp)]),
+              mock.patch.object(bundle.gc, "disable"),
+              mock.patch.object(bundle, "convert") as convert):
+            bundle.main()
         self.assertEqual(convert.call_args.args[1].name, "match")
 
 

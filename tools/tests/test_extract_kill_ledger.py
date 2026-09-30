@@ -10,7 +10,7 @@ import unittest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import extract_kill_ledger as tool
 from test_extract_kill_observations import SCHEMA, array, row as field_row
 
@@ -193,51 +193,51 @@ def make_export(root, build='++Ares-Core+release-13.05'):
     return root
 
 
-class IntegrationTests(unittest.TestCase):
+class IntegrationTests(TempDirTestCase):
     def test_real_cli_retains_physical_sources(self):
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export'); out=root/'ledger.json'
-            command=[sys.executable,'-W','error',str(Path(tool.__file__)),
-                     '--export',str(export),'--out',str(out)]
-            run=subprocess.run(command,capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
-            self.assertEqual(run.returncode,0,run.stderr)
-            result=json.loads(out.read_text(encoding='utf-8'))
-            self.assertEqual(result['counts']['matched_pairs'],1)
-            self.assertEqual(result['death_events'][0]['event_row_ordinal'],1)
-            self.assertEqual(result['death_events'][0]['killer_identity']['mapping_field_rows'],[0])
-            self.assertEqual(result['death_events'][0]['victim_identity']['mapping_field_rows'],[1])
-            self.assertEqual(result['death_events'][0]['round_identity']['round_event_row_ordinal'],0)
-            self.assertEqual(result['state_projection']['entities'][0]['base']['source']['physical_parent_row_ordinal'],12)
+        t = self.tmp()
+        root=t; export=make_export(root/'export'); out=root/'ledger.json'
+        command=[sys.executable,'-W','error',str(Path(tool.__file__)),
+                 '--export',str(export),'--out',str(out)]
+        run=subprocess.run(command,capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
+        self.assertEqual(run.returncode,0,run.stderr)
+        result=json.loads(out.read_text(encoding='utf-8'))
+        self.assertEqual(result['counts']['matched_pairs'],1)
+        self.assertEqual(result['death_events'][0]['event_row_ordinal'],1)
+        self.assertEqual(result['death_events'][0]['killer_identity']['mapping_field_rows'],[0])
+        self.assertEqual(result['death_events'][0]['victim_identity']['mapping_field_rows'],[1])
+        self.assertEqual(result['death_events'][0]['round_identity']['round_event_row_ordinal'],0)
+        self.assertEqual(result['state_projection']['entities'][0]['base']['source']['physical_parent_row_ordinal'],12)
 
     def test_measured_13_06_export_is_joined(self):
-        with tempfile.TemporaryDirectory() as t:
-            export=make_export(Path(t)/'export',build='++Ares-Core+release-13.06')
-            got=tool.extract(export)
-            self.assertEqual(got['provenance']['replay_build'],'++Ares-Core+release-13.06')
-            self.assertEqual(got['counts']['matched_pairs'],1)
-            self.assertEqual(got['counts']['state']['entities'],1)
+        t = self.tmp()
+        export=make_export(t/'export',build='++Ares-Core+release-13.06')
+        got=tool.extract(export)
+        self.assertEqual(got['provenance']['replay_build'],'++Ares-Core+release-13.06')
+        self.assertEqual(got['counts']['matched_pairs'],1)
+        self.assertEqual(got['counts']['state']['entities'],1)
 
     def test_unmeasured_build_fails_through_the_cli_without_writing(self):
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export',build='++Ares-Core+release-13.07')
-            out=root/'ledger.json'
-            run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
-                                '--export',str(export),'--out',str(out)],
-                               capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
-            self.assertEqual(run.returncode,1,run.stderr)
-            self.assertIn('outside the measured KillData set',run.stderr)
-            self.assertFalse(out.exists())
+        t = self.tmp()
+        root=t; export=make_export(root/'export',build='++Ares-Core+release-13.07')
+        out=root/'ledger.json'
+        run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
+                            '--export',str(export),'--out',str(out)],
+                           capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
+        self.assertEqual(run.returncode,1,run.stderr)
+        self.assertIn('outside the measured KillData set',run.stderr)
+        self.assertFalse(out.exists())
 
     def test_missing_raw_event_is_retained_unjoined(self):
-        with tempfile.TemporaryDirectory() as t:
-            export=make_export(Path(t)/'export'); path=export/'events.parquet'
-            table=pq.read_table(path); rows=table.to_pylist(); rows[1]['raw_payload']=None
-            pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
-            got=tool.extract(export)
-            self.assertEqual(got['counts']['matched_pairs'],0)
-            self.assertEqual(got['death_events'][0]['payload_issue'],'payload_size')
-            self.assertIsNone(got['death_events'][0]['raw_payload_hex'])
-            self.assertEqual(len(got['unmatched_main_observations']),1)
+        t = self.tmp()
+        export=make_export(t/'export'); path=export/'events.parquet'
+        table=pq.read_table(path); rows=table.to_pylist(); rows[1]['raw_payload']=None
+        pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
+        got=tool.extract(export)
+        self.assertEqual(got['counts']['matched_pairs'],0)
+        self.assertEqual(got['death_events'][0]['payload_issue'],'payload_size')
+        self.assertIsNone(got['death_events'][0]['raw_payload_hex'])
+        self.assertEqual(len(got['unmatched_main_observations']),1)
 
     def test_nullable_event_and_round_times_are_retained_unresolved(self):
         for event_index,issue,round_status in ((1,'payload_time','invalid_event_time'),
@@ -253,25 +253,25 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(got['death_events'][0]['raw_payload_hex'],rows[1]['raw_payload'].hex())
 
     def test_different_killer_context_remains_unjoined(self):
-        with tempfile.TemporaryDirectory() as t:
-            export=make_export(Path(t)/'export'); path=export/'fields.parquet'
-            table=pq.read_table(path); rows=table.to_pylist()
-            rows[0].update(value_i64=21,raw_bits=b'\x2a')
-            pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
-            got=tool.extract(export)
-            self.assertEqual(got['counts']['matched_pairs'],0)
-            self.assertEqual(got['counts']['unmatched_with_different_killer_context'],1)
-            context=got['unmatched_main_observations'][0]['different_killer_same_victim_context']
-            self.assertEqual(context,[{'event_row_ordinal':1,'event_killer_player_state_ref':21,'replication_lag_ms':9}])
+        t = self.tmp()
+        export=make_export(t/'export'); path=export/'fields.parquet'
+        table=pq.read_table(path); rows=table.to_pylist()
+        rows[0].update(value_i64=21,raw_bits=b'\x2a')
+        pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
+        got=tool.extract(export)
+        self.assertEqual(got['counts']['matched_pairs'],0)
+        self.assertEqual(got['counts']['unmatched_with_different_killer_context'],1)
+        context=got['unmatched_main_observations'][0]['different_killer_same_victim_context']
+        self.assertEqual(context,[{'event_row_ordinal':1,'event_killer_player_state_ref':21,'replication_lag_ms':9}])
 
     def test_cli_refuses_source_aliases_without_writing(self):
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export')
-            for output in (export/'events.parquet',Path(tool.__file__),Path(tool.__file__).with_name('kill_state.py')):
-                before=output.read_bytes()
-                run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
-                                    '--export',str(export),'--out',str(output)],
-                                   capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
-                self.assertEqual(run.returncode,1,run.stderr)
-                self.assertIn('FAILED:',run.stderr)
-                self.assertEqual(output.read_bytes(),before)
+        t = self.tmp()
+        root=t; export=make_export(root/'export')
+        for output in (export/'events.parquet',Path(tool.__file__),Path(tool.__file__).with_name('kill_state.py')):
+            before=output.read_bytes()
+            run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
+                                '--export',str(export),'--out',str(output)],
+                               capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
+            self.assertEqual(run.returncode,1,run.stderr)
+            self.assertIn('FAILED:',run.stderr)
+            self.assertEqual(output.read_bytes(),before)

@@ -10,13 +10,12 @@ import io
 import json
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import bench_export as bench
 import check_baseline_schemas as schemas
 
@@ -47,14 +46,12 @@ class CompareTests(unittest.TestCase):
             bench.compare(1.0, 0.0, self.TOL)
 
 
-class MainTests(unittest.TestCase):
+class MainTests(TempDirTestCase):
     """What `--update` writes, checked against the validator that reads it,
     and what a run compares against."""
 
     def setUp(self):
-        self._temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._temp.cleanup)
-        self.root = Path(self._temp.name)
+        self.root = self.tmp()
         self.exe = self.root / "vrfkit"
         self.exe.write_bytes(b"exe")
         self.baseline = self.root / "bench.json"

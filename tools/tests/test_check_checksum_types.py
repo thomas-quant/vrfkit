@@ -15,11 +15,10 @@ import contextlib
 import io
 import json
 import random
-import tempfile
 import unittest
 from pathlib import Path
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import check_checksum_types as cct
 
 
@@ -635,13 +634,9 @@ def write_checkpoint(d: Path, groups=((0, INVENTORY),), **fields):
                    d / "checkpoint_export_fields.parquet")
 
 
-class MainTests(unittest.TestCase):
+class MainTests(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
+        self.root = self.tmp()
 
     def test_a_clean_export_exits_0_and_prints_its_zeros(self):
         d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX),
@@ -904,14 +899,14 @@ class ExpectedShapeTests(unittest.TestCase):
         self.assertEqual(cct.declared_checksums(ids), {5})
 
 
-class ExpectedListLoadTests(unittest.TestCase):
+class ExpectedListLoadTests(TempDirTestCase):
     PARENTS = {label for label, _ in cct.Seeds().named}
 
     def load(self, items):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "expected.json"
-            path.write_text(json.dumps({"expected": items}), encoding="utf-8")
-            return cct.load_expected(path, self.PARENTS)
+        tmp = self.tmp()
+        path = tmp / "expected.json"
+        path.write_text(json.dumps({"expected": items}), encoding="utf-8")
+        return cct.load_expected(path, self.PARENTS)
 
     def test_an_item_loads_with_its_type_canonical(self):
         (item,) = self.load([listed(vrfkit_type="FieldType::VectorDouble")])
@@ -943,15 +938,15 @@ class ExpectedListLoadTests(unittest.TestCase):
             self.load([listed(), listed(reason="the same shape again")])
 
     def test_a_file_that_is_not_a_list_is_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "expected.json"
-            for text in ("not json", json.dumps({"items": []}), json.dumps([listed()])):
-                with self.subTest(text=text[:20]):
-                    path.write_text(text, encoding="utf-8")
-                    with self.assertRaises(cct.ExpectedListError):
-                        cct.load_expected(path, self.PARENTS)
-            with self.assertRaises(cct.ExpectedListError):
-                cct.load_expected(Path(tmp) / "absent.json", self.PARENTS)
+        tmp = self.tmp()
+        path = tmp / "expected.json"
+        for text in ("not json", json.dumps({"items": []}), json.dumps([listed()])):
+            with self.subTest(text=text[:20]):
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(cct.ExpectedListError):
+                    cct.load_expected(path, self.PARENTS)
+        with self.assertRaises(cct.ExpectedListError):
+            cct.load_expected(tmp / "absent.json", self.PARENTS)
 
     def test_every_committed_item_is_a_real_mismatch(self):
         """Each committed item's arithmetic, recomputed with the tool and with
@@ -982,15 +977,11 @@ class ExpectedListLoadTests(unittest.TestCase):
                 self.assertTrue(item.reason.isascii() and item.evidence.isascii())
 
 
-class ExpectedMainTests(unittest.TestCase):
+class ExpectedMainTests(TempDirTestCase):
     """End to end, through `main` and the committed tables."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
+        self.root = self.tmp()
 
     def write_list(self, *items) -> Path:
         path = self.root / "expected.json"

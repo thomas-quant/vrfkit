@@ -4,14 +4,12 @@ only the manifest's last one, and never a pawn merely carrying the player's
 """
 import json
 import re
-import tempfile
 import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import TOOLS
+from support import TOOLS, TempDirTestCase
 import player_identity as identity
 
 BOMB, SWIFT = identity.PLAYER_STATE_GROUPS
@@ -144,21 +142,20 @@ class PlayerBodiesTests(unittest.TestCase):
             self.bodies([spawned(256, -1, 66)])
 
 
-class LoadTests(unittest.TestCase):
+class LoadTests(TempDirTestCase):
     def test_only_spawned_character_proves_a_body(self):
         """A pawn that carries the player's PlayerState, or is possessed by the
         player, is not a body: the Rift_TargetingForm case, 1,236 pawns in the
         audit corpus."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "manifest.json").write_text(json.dumps(MANIFEST), encoding="utf-8")
-            rows = RECONNECT + [
-                spawned(256, 777, 90, name="PossessedCharacter"),
-                spawned(777, 256, 91, group="/Game/Characters/Rift/Rift_TargetingForm_PC.Rift_TargetingForm_PC_C",
-                        name="PlayerState")]
-            pq.write_table(pa.Table.from_pylist(rows, schema=FIELD_SCHEMA),
-                           root / "fields.parquet")
-            bodies = identity.load_player_bodies(root)
+        root = self.tmp()
+        (root / "manifest.json").write_text(json.dumps(MANIFEST), encoding="utf-8")
+        rows = RECONNECT + [
+            spawned(256, 777, 90, name="PossessedCharacter"),
+            spawned(777, 256, 91, group="/Game/Characters/Rift/Rift_TargetingForm_PC.Rift_TargetingForm_PC_C",
+                    name="PlayerState")]
+        pq.write_table(pa.Table.from_pylist(rows, schema=FIELD_SCHEMA),
+                       root / "fields.parquet")
+        bodies = identity.load_player_bodies(root)
         # 990 has no history row here; the manifest alone still admits it.
         self.assertEqual(bodies.subjects,
                          {1510: "reconnected", 45530: "reconnected", 990: "steady"})

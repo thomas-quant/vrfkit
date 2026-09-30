@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import tempfile
-import unittest
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import extract_match_observations as observations
 
 
@@ -80,7 +79,7 @@ def append_field_rows(root: Path, rows: list[tuple]) -> None:
     pq.write_table(pa.concat_tables([table, addition]), path)
 
 
-class MatchObservationTests(unittest.TestCase):
+class MatchObservationTests(TempDirTestCase):
     def _replace_state_rows(self, root: Path, rows: list[tuple]) -> None:
         table = pq.read_table(root / "fields.parquet")
         keep = pa.array([not group.endswith("EquippableStateMachineComponent")
@@ -89,10 +88,9 @@ class MatchObservationTests(unittest.TestCase):
         append_field_rows(root, rows)
 
     def test_build_deduplicates_and_labels_all_v1_evidence(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        result = observations.build(root)
 
         self.assertEqual(len(result["ammo_changes"]), 1)
         self.assertEqual(result["ammo_changes"][0]["delta"], -2)
@@ -153,13 +151,12 @@ class MatchObservationTests(unittest.TestCase):
             self.assertEqual(result["ammo_changes"][0]["weapon_rpc_within_300ms"], count)
             self.assertEqual(result["ammo_decrease_weapon_rpc_within_300ms"],
                              {k: int(k == tally) for k in observations.WEAPON_RPC_TALLY})
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            net = pq.read_table(root / "net_guids.parquet").to_pylist()
-            pq.write_table(pa.Table.from_pylist([dict(r, outer_net_guid=None) if r["net_guid"] == 100
-                                                 else r for r in net]), root / "net_guids.parquet")
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        net = pq.read_table(root / "net_guids.parquet").to_pylist()
+        pq.write_table(pa.Table.from_pylist([dict(r, outer_net_guid=None) if r["net_guid"] == 100
+                                             else r for r in net]), root / "net_guids.parquet")
+        result = observations.build(root)
         self.assertIsNone(result["ammo_changes"][0]["weapon_rpc_within_300ms"])
         self.assertEqual(result["ammo_decrease_weapon_rpc_within_300ms"]["no_weapon"], 1)
 
@@ -173,14 +170,13 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(ambiguous, 1)
 
     def test_reload_conflict_closes_at_an_unknown_boundary(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            append_field_rows(root, [
-                (20, 3, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 400, None),
-                (20, 3, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
-            ])
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        append_field_rows(root, [
+            (20, 3, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 400, None),
+            (20, 3, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
+        ])
+        result = observations.build(root)
 
         self.assertEqual(len(result["reload_intervals"]), 1)
         interval = result["reload_intervals"][0]
@@ -190,18 +186,17 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(interval["end_boundary"], "ambiguous_same_packet")
 
     def test_reload_magazine_evidence_is_same_weapon_and_inside_interval(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            append_field_rows(root, [
-                # 30 -> 35 is a positive magazine observation while the
-                # observed ReloadState interval is still open.
-                (18, 2, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
-                # Different component/object has no proven same-weapon outer
-                # join and must not be attached.
-                (19, 1, 0, 999, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 99, None),
-            ])
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        append_field_rows(root, [
+            # 30 -> 35 is a positive magazine observation while the
+            # observed ReloadState interval is still open.
+            (18, 2, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
+            # Different component/object has no proven same-weapon outer
+            # join and must not be attached.
+            (19, 1, 0, 999, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 99, None),
+        ])
+        result = observations.build(root)
 
         interval = result["reload_intervals"][0]
         self.assertEqual(interval["magazine_increase_count"], 1)
@@ -212,13 +207,12 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(result["reload_magazine_increases"][0]["magazine_component_guid"], 100)
 
     def test_unknown_state_path_breaks_reload_interval(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            append_field_rows(root, [
-                (20, 2, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 999, None),
-            ])
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        append_field_rows(root, [
+            (20, 2, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 999, None),
+        ])
+        result = observations.build(root)
 
         interval = result["reload_intervals"][0]
         self.assertEqual(interval["end_boundary"], "unknown_state_path")
@@ -226,15 +220,14 @@ class MatchObservationTests(unittest.TestCase):
         self.assertTrue(interval["left_censored"])
 
     def test_known_nonreload_then_reload_empty_has_observed_entry(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            self._replace_state_rows(root, [
-                (5, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
-                (12, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 402, None),
-                (25, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
-            ])
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        self._replace_state_rows(root, [
+            (5, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
+            (12, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 402, None),
+            (25, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
+        ])
+        result = observations.build(root)
 
         interval = result["reload_intervals"][0]
         self.assertEqual(interval["state_guid"], 402)
@@ -243,79 +236,78 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(interval["end_boundary"], "state_change")
 
     def test_first_reload_normal_exit_is_left_censored(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); write_export(root)
-            interval = observations.build(root)["reload_intervals"][0]
+        temp = self.tmp()
+        root = temp; write_export(root)
+        interval = observations.build(root)["reload_intervals"][0]
         self.assertTrue(interval["left_censored"])
         self.assertFalse(interval["right_censored"])
 
     def test_known_idle_reload_stream_end_is_not_left_censored(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); write_export(root)
-            self._replace_state_rows(root, [
-                (5, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
-                (12, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 400, None),
-            ])
-            interval = observations.build(root)["reload_intervals"][0]
+        temp = self.tmp()
+        root = temp; write_export(root)
+        self._replace_state_rows(root, [
+            (5, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 401, None),
+            (12, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 400, None),
+        ])
+        interval = observations.build(root)["reload_intervals"][0]
         self.assertFalse(interval["left_censored"])
         self.assertTrue(interval["right_censored"])
 
     def test_same_timestamp_later_packet_is_inside_but_boundary_packet_is_excluded(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); write_export(root)
-            append_field_rows(root, [
-                # Same state-entry packet is unorderable and excluded; packet 2
-                # at the same timestamp is strictly inside the interval.
-                (12, 1, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
-                (12, 2, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 40, None),
-            ])
-            rows = observations.build(root)["reload_magazine_increases"]
+        temp = self.tmp()
+        root = temp; write_export(root)
+        append_field_rows(root, [
+            # Same state-entry packet is unorderable and excluded; packet 2
+            # at the same timestamp is strictly inside the interval.
+            (12, 1, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
+            (12, 2, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 40, None),
+        ])
+        rows = observations.build(root)["reload_magazine_increases"]
         self.assertEqual([(row["time_ms"], row["packet_id"]) for row in rows], [(12, 2)])
 
     def test_unknown_then_reload_is_left_censored(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); write_export(root)
-            append_field_rows(root, [
-                (13, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 999, None),
-                (14, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 400, None),
-            ])
-            rows = observations.build(root)["reload_intervals"]
+        temp = self.tmp()
+        root = temp; write_export(root)
+        append_field_rows(root, [
+            (13, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 999, None),
+            (14, 1, 0, 300, "/Script/ShooterGame.EquippableStateMachineComponent", "CurrentState", 400, None),
+        ])
+        rows = observations.build(root)["reload_intervals"]
         self.assertTrue(rows[-1]["left_censored"])
 
     def test_a_repeated_net_guid_fails_loudly(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); write_export(root)
-            net = pq.read_table(root / "net_guids.parquet")
-            pq.write_table(pa.concat_tables([net, net.slice(0, 1)]), root / "net_guids.parquet")
-            with self.assertRaisesRegex(ValueError, "repeats"):
-                observations.build(root)
+        temp = self.tmp()
+        root = temp; write_export(root)
+        net = pq.read_table(root / "net_guids.parquet")
+        pq.write_table(pa.concat_tables([net, net.slice(0, 1)]), root / "net_guids.parquet")
+        with self.assertRaisesRegex(ValueError, "repeats"):
+            observations.build(root)
 
     def test_a_second_weapons_magazine_does_not_join(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); write_export(root)
-            net = pq.read_table(root / "net_guids.parquet")
-            pq.write_table(pa.concat_tables([net, pa.table({
-                "net_guid": [101], "path": ["MagazineAmmo"], "outer_net_guid": [201],
-            })]), root / "net_guids.parquet")
-            append_field_rows(root, [
-                (10, 1, 0, 101, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 30, None),
-                (18, 1, 0, 101, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
-            ])
-            rows = observations.build(root)["reload_magazine_increases"]
+        temp = self.tmp()
+        root = temp; write_export(root)
+        net = pq.read_table(root / "net_guids.parquet")
+        pq.write_table(pa.concat_tables([net, pa.table({
+            "net_guid": [101], "path": ["MagazineAmmo"], "outer_net_guid": [201],
+        })]), root / "net_guids.parquet")
+        append_field_rows(root, [
+            (10, 1, 0, 101, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 30, None),
+            (18, 1, 0, 101, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
+        ])
+        rows = observations.build(root)["reload_magazine_increases"]
         self.assertEqual(rows, [])
 
     def test_round_reset_breaks_reload_magazine_join(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            append_field_rows(root, [
-                (18, 2, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
-            ])
-            events = pq.read_table(root / "events.parquet")
-            pq.write_table(pa.concat_tables([events, pa.table({
-                "group": ["roundStarted"], "time1": [20],
-            })]), root / "events.parquet")
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        append_field_rows(root, [
+            (18, 2, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
+        ])
+        events = pq.read_table(root / "events.parquet")
+        pq.write_table(pa.concat_tables([events, pa.table({
+            "group": ["roundStarted"], "time1": [20],
+        })]), root / "events.parquet")
+        result = observations.build(root)
 
         interval = result["reload_intervals"][0]
         self.assertTrue(interval["reset_boundary_crossed"])
@@ -327,23 +319,23 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(result["reload_magazine_increases"], [])
 
     def test_team_conflicts_are_null_and_row_order_independent(self):
-        with tempfile.TemporaryDirectory() as temp:
-            original = Path(temp) / "original"
-            shuffled = Path(temp) / "shuffled"
-            original.mkdir()
-            shuffled.mkdir()
-            write_export(original)
-            write_export(shuffled)
-            conflict = [
-                (80, 1, 900, 0, "/Script/ShooterGame.BaseTeamState", "LoadoutValue", 5100, None),
-            ]
-            append_field_rows(original, conflict)
-            append_field_rows(shuffled, conflict)
-            table = pq.read_table(shuffled / "fields.parquet")
-            reverse = pa.array(range(table.num_rows - 1, -1, -1))
-            pq.write_table(table.take(reverse), shuffled / "fields.parquet")
-            result = observations.build(original)
-            self.assertEqual(result, observations.build(shuffled))
+        temp = self.tmp()
+        original = temp / "original"
+        shuffled = temp / "shuffled"
+        original.mkdir()
+        shuffled.mkdir()
+        write_export(original)
+        write_export(shuffled)
+        conflict = [
+            (80, 1, 900, 0, "/Script/ShooterGame.BaseTeamState", "LoadoutValue", 5100, None),
+        ]
+        append_field_rows(original, conflict)
+        append_field_rows(shuffled, conflict)
+        table = pq.read_table(shuffled / "fields.parquet")
+        reverse = pa.array(range(table.num_rows - 1, -1, -1))
+        pq.write_table(table.take(reverse), shuffled / "fields.parquet")
+        result = observations.build(original)
+        self.assertEqual(result, observations.build(shuffled))
 
         base = next(row for row in result["team_loadouts"] if row["source"] == "BaseTeamState")
         self.assertIsNone(base["loadout_value"])
@@ -352,13 +344,12 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(result["ambiguous_same_packet_counts"]["team_loadout"], 1)
 
     def test_owner_join_does_not_look_ahead_to_a_later_same_time_packet(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            append_field_rows(root, [
-                (82, 1, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "RoundInfos[5].EndOfRoundMoney", 1200, None),
-            ])
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        append_field_rows(root, [
+            (82, 1, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "RoundInfos[5].EndOfRoundMoney", 1200, None),
+        ])
+        result = observations.build(root)
 
         balance = next(row for row in result["round_balances"]
                        if row["round_info_slot"] == 5)
@@ -369,15 +360,14 @@ class MatchObservationTests(unittest.TestCase):
     def test_a_cleared_owner_ends_the_round_balance_join(self):
         """Owner 43 is cleared to 0 on both links (a disconnect), then a
         balance is written: no controller holds it, so no player joins."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            append_field_rows(root, [
-                (95, 1, 602, 0, "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C", "Owner", 0, None),
-                (95, 2, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "Owner", 0, None),
-                (100, 1, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "RoundInfos[6].EndOfRoundMoney", 1300, None),
-            ])
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        append_field_rows(root, [
+            (95, 1, 602, 0, "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C", "Owner", 0, None),
+            (95, 2, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "Owner", 0, None),
+            (100, 1, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "RoundInfos[6].EndOfRoundMoney", 1300, None),
+        ])
+        result = observations.build(root)
 
         balance = next(row for row in result["round_balances"] if row["round_info_slot"] == 6)
         self.assertEqual((balance["owner_controller_guid"], balance["player_state_guid"],
@@ -394,17 +384,16 @@ class MatchObservationTests(unittest.TestCase):
                          observations._changes(list(reversed(samples))))
 
     def test_round_balance_player_stays_null_without_the_owner_chain(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            table = pq.read_table(root / "fields.parquet")
-            keep = pa.array([
-                not (group.endswith("BombPlayerState_C") and name == "Owner")
-                for group, name in zip(table.column("group_path").to_pylist(),
-                                       table.column("field_name").to_pylist())
-            ])
-            pq.write_table(table.filter(keep), root / "fields.parquet")
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        table = pq.read_table(root / "fields.parquet")
+        keep = pa.array([
+            not (group.endswith("BombPlayerState_C") and name == "Owner")
+            for group, name in zip(table.column("group_path").to_pylist(),
+                                   table.column("field_name").to_pylist())
+        ])
+        pq.write_table(table.filter(keep), root / "fields.parquet")
+        result = observations.build(root)
 
         self.assertTrue(all(row["player_state_guid"] is None
                             for row in result["round_balances"]))
@@ -435,15 +424,14 @@ class MatchObservationTests(unittest.TestCase):
     def test_team_switch_credit_reset_is_not_a_money_decrease(self):
         """Shaped like 0002c486 (13.02): the resets 8 ms after switchTeams,
         before the round start, are no snapshot's nearest decrease."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            self._team_switch(
-                root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
-                [(100, 1, 510, 5200), (208, 2, 510, 800),
-                 (100, 1, 511, 2300), (209, 2, 511, 0)],
-                buyer_snapshot_ms=300)
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        self._team_switch(
+            root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
+            [(100, 1, 510, 5200), (208, 2, 510, 800),
+             (100, 1, 511, 2300), (209, 2, 511, 0)],
+            buyer_snapshot_ms=300)
+        result = observations.build(root)
 
         self.assertEqual([row["money_component_guid"] for row in result["money_decreases"]],
                          [500])
@@ -463,14 +451,13 @@ class MatchObservationTests(unittest.TestCase):
     def test_a_carried_over_800_then_a_buy_after_the_round_start_is_a_decrease(self):
         """The buy's collapsed interval spans the switch; its own time does not
         (see `_team_switch_windows`)."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            self._team_switch(
-                root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
-                [(100, 1, 510, 800), (208, 2, 510, 800), (300, 3, 510, 300)],
-                buyer_snapshot_ms=300)
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        self._team_switch(
+            root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
+            [(100, 1, 510, 800), (208, 2, 510, 800), (300, 3, 510, 300)],
+            buyer_snapshot_ms=300)
+        result = observations.build(root)
 
         self.assertEqual(result["money_decreases_in_team_switch_window"], [])
         buy = next(row for row in result["money_decreases"]
@@ -483,12 +470,11 @@ class MatchObservationTests(unittest.TestCase):
 
     def test_a_final_switch_with_no_later_round_start_windows_to_the_end(self):
         """As in the overtime replays that end soon after their last switch."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            self._team_switch(root, {"group": ["switchTeams"], "time1": [200]},
-                              [(100, 1, 510, 300), (208, 2, 510, 0)])
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        self._team_switch(root, {"group": ["switchTeams"], "time1": [200]},
+                          [(100, 1, 510, 300), (208, 2, 510, 0)])
+        result = observations.build(root)
 
         window = result["money_decreases_in_team_switch_window"]
         self.assertEqual([(row["after"], row["next_round_start_ms"]) for row in window],
@@ -496,13 +482,12 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(result["team_switch_windows"]["closed_by_end_of_stream"], 1)
 
     def test_a_decrease_before_the_switch_is_untouched(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            self._team_switch(
-                root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
-                [(100, 1, 510, 5200), (199, 2, 510, 800)])
-            result = observations.build(root)
+        root = self.tmp()
+        write_export(root)
+        self._team_switch(
+            root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
+            [(100, 1, 510, 5200), (199, 2, 510, 800)])
+        result = observations.build(root)
 
         self.assertEqual(result["money_decreases_in_team_switch_window"], [])
         self.assertIn(199, [row["time_ms"] for row in result["money_decreases"]])

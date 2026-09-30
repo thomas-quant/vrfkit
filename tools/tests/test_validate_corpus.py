@@ -5,12 +5,11 @@ import contextlib
 import io
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import validate_corpus as guard
 
 
@@ -104,14 +103,12 @@ print("ORACLE PASS RATE: 100.000000%")
 '''
 
 
-class MainWiringTests(unittest.TestCase):
+class MainWiringTests(TempDirTestCase):
     """`ProblemTests` pins what `problems()` returns; these pin that `main()`
     reads it before choosing an exit code."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = self.tmp()
         (self.root / "validate").write_text(FAKE_VALIDATE_SCRIPT, encoding="utf-8")
         self.corpus = self.root / "corpus"
         self.corpus.mkdir()

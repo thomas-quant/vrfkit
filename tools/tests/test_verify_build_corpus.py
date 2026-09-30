@@ -12,7 +12,7 @@ from io import StringIO
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import verify_build_corpus as audit
 
 
@@ -207,12 +207,10 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(build["checkpoint_evidence"], "absent")
 
 
-class AuditExecutionTests(unittest.TestCase):
+class AuditExecutionTests(TempDirTestCase):
     """Exercise the orchestration seam with controlled external process outputs."""
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = self.tmp()
         self.replay = self.root / "private.vrf"
         self.replay.write_bytes(b"replay fixture")
         self.digest = audit.sha256_file(self.replay)
@@ -366,11 +364,9 @@ class CheckExportTests(unittest.TestCase):
             self.assertIn("indexed path differs 2", str(raised.exception))
 
 
-class AuditCommandTests(unittest.TestCase):
+class AuditCommandTests(TempDirTestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = self.tmp()
         self.corpus = self.root / "corpus"
         self.corpus.mkdir()
         (self.corpus / "a.vrf").write_bytes(b"sample")

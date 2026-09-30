@@ -1,14 +1,11 @@
 import copy
 import json
-from pathlib import Path
-import tempfile
-import unittest
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import generate_scoped_types as gen
 
 
-class ScopedTypeGenerationTests(unittest.TestCase):
+class ScopedTypeGenerationTests(TempDirTestCase):
     def test_committed_table_matches_complete_evidence(self):
         self.assertEqual(gen.main(["--check"]), 0)
         entries = gen.load(gen.EVIDENCE)
@@ -28,35 +25,35 @@ class ScopedTypeGenerationTests(unittest.TestCase):
             mutant = copy.deepcopy(entry)
             mutant[key] = value
             cases.append([mutant])
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "evidence.json"
-            for entries in cases:
-                with self.subTest(entries=entries):
-                    path.write_text(json.dumps({"schema_version": 1, "entries": entries}))
-                    with self.assertRaises(ValueError):
-                        gen.load(path)
+        temp = self.tmp()
+        path = temp / "evidence.json"
+        for entries in cases:
+            with self.subTest(entries=entries):
+                path.write_text(json.dumps({"schema_version": 1, "entries": entries}))
+                with self.assertRaises(ValueError):
+                    gen.load(path)
 
     def test_check_fails_for_a_changed_type(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "scoped.rs"
-            path.write_text(gen.render(gen.load(gen.EVIDENCE)).replace("FieldType::Byte", "FieldType::Float", 1))
-            self.assertEqual(gen.main(["--output", str(path), "--check"]), 1)
+        temp = self.tmp()
+        path = temp / "scoped.rs"
+        path.write_text(gen.render(gen.load(gen.EVIDENCE)).replace("FieldType::Byte", "FieldType::Float", 1))
+        self.assertEqual(gen.main(["--output", str(path), "--check"]), 1)
 
     def test_the_fixture_keeps_its_own_layout(self):
         """A plain re-dump (one build per line) fails --check; a write restores
         the committed layout without changing the parsed document."""
         document = json.loads(gen.EVIDENCE.read_text(encoding="utf-8"))
         self.assertEqual(json.loads(gen.dump_evidence(document)), document)
-        with tempfile.TemporaryDirectory() as temp:
-            evidence, output = Path(temp) / "evidence.json", Path(temp) / "scoped.rs"
-            evidence.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-            output.write_text(gen.render(gen.load(gen.EVIDENCE)), encoding="utf-8")
-            args = ["--evidence", str(evidence), "--output", str(output)]
-            self.assertEqual(gen.main([*args, "--check"]), 1)
-            self.assertEqual(gen.main(args), 0)
-            self.assertEqual(evidence.read_text(encoding="utf-8"),
-                             gen.EVIDENCE.read_text(encoding="utf-8"))
-            self.assertEqual(gen.main([*args, "--check"]), 0)
+        temp = self.tmp()
+        evidence, output = temp / "evidence.json", temp / "scoped.rs"
+        evidence.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        output.write_text(gen.render(gen.load(gen.EVIDENCE)), encoding="utf-8")
+        args = ["--evidence", str(evidence), "--output", str(output)]
+        self.assertEqual(gen.main([*args, "--check"]), 1)
+        self.assertEqual(gen.main(args), 0)
+        self.assertEqual(evidence.read_text(encoding="utf-8"),
+                         gen.EVIDENCE.read_text(encoding="utf-8"))
+        self.assertEqual(gen.main([*args, "--check"]), 0)
 
     def test_every_type_name_is_a_live_field_type_variant(self):
         from check_checksum_types import DECODE_RS, parse_field_type_variants
@@ -97,12 +94,12 @@ class ScopedTypeGenerationTests(unittest.TestCase):
         base = {"group": "/G.G_C", "field": "ReplicatedMovement", "checksum": 2749104612,
                 "observed_builds": ["b"], "evidence": "e",
                 "location_quantization": "RoundWholeNumber"}
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "evidence.json"
-            path.write_text(json.dumps({"schema_version": 1, "entries": [
-                {**base, "type": "RepMovementByte"}, {**base, "type": "RepMovementShort"}]}))
-            with self.assertRaisesRegex(ValueError, "duplicate"):
-                gen.load(path)
+        temp = self.tmp()
+        path = temp / "evidence.json"
+        path.write_text(json.dumps({"schema_version": 1, "entries": [
+            {**base, "type": "RepMovementByte"}, {**base, "type": "RepMovementShort"}]}))
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            gen.load(path)
 
     def test_a_rep_movement_entry_must_state_a_measured_location_level(self):
         # The level is not on the wire and changes no width, so nothing
@@ -112,18 +109,18 @@ class ScopedTypeGenerationTests(unittest.TestCase):
                 "observed_builds": ["b"], "evidence": "e", "type": "RepMovementShort"}
         scalar = {"group": "/G.G_C", "field": "Seed", "checksum": 1,
                   "observed_builds": ["b"], "evidence": "e", "type": "Int32"}
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "evidence.json"
-            for entry, message in (
-                (base, "needs a measured location_quantization"),
-                ({**base, "location_quantization": "RoundHalves"}, "needs a measured"),
-                ({**scalar, "location_quantization": "RoundWholeNumber"}, "only to RepMovement"),
-            ):
-                with self.subTest(entry=entry):
-                    path.write_text(json.dumps({"schema_version": 1, "entries": [entry]}))
-                    with self.assertRaisesRegex(ValueError, message):
-                        gen.load(path)
-            path.write_text(json.dumps({"schema_version": 1, "entries": [
-                {**base, "location_quantization": "RoundOneDecimal"}]}))
-            self.assertIn("location: VectorQuantization::RoundOneDecimal }",
-                          gen.render(gen.load(path)))
+        temp = self.tmp()
+        path = temp / "evidence.json"
+        for entry, message in (
+            (base, "needs a measured location_quantization"),
+            ({**base, "location_quantization": "RoundHalves"}, "needs a measured"),
+            ({**scalar, "location_quantization": "RoundWholeNumber"}, "only to RepMovement"),
+        ):
+            with self.subTest(entry=entry):
+                path.write_text(json.dumps({"schema_version": 1, "entries": [entry]}))
+                with self.assertRaisesRegex(ValueError, message):
+                    gen.load(path)
+        path.write_text(json.dumps({"schema_version": 1, "entries": [
+            {**base, "location_quantization": "RoundOneDecimal"}]}))
+        self.assertIn("location: VectorQuantization::RoundOneDecimal }",
+                      gen.render(gen.load(path)))

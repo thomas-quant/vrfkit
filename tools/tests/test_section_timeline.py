@@ -1,11 +1,8 @@
-from pathlib import Path
-import tempfile
-import unittest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import section_timeline as tool
 
 
@@ -35,7 +32,7 @@ def token(value, role="VictimRespawnNumber", ordinal=1):
                    "raw_bits_hex": value.to_bytes(4, "little").hex()}]}
 
 
-class TimelineTests(unittest.TestCase):
+class TimelineTests(TempDirTestCase):
     def test_positive_adjacency_retains_source_and_unproved_life(self):
         node = run([observation(1, 1, 75.0), observation(2, 2)])["nodes"][-1]
         self.assertTrue(node["continuity"]["eligible"])
@@ -213,10 +210,10 @@ class TimelineTests(unittest.TestCase):
                 self.assertEqual(tool.active_at_packet(rows, coordinate)[1], status)
 
     def test_actor_filter_preserves_ordinals_across_batches(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "actors.parquet"
-            rows = [{**event(i, i, "dormant")[1], "class_path": "x"} for i in range(65538)]
-            rows[1]["event"] = "open"; rows[-1]["event"] = "close"
-            pq.write_table(pa.Table.from_pylist(rows), path)
-            actual = list(tool.actor_rows(path))
-            self.assertEqual([i for i, _ in actual], [1, 65537])
+        folder = self.tmp()
+        path = folder / "actors.parquet"
+        rows = [{**event(i, i, "dormant")[1], "class_path": "x"} for i in range(65538)]
+        rows[1]["event"] = "open"; rows[-1]["event"] = "close"
+        pq.write_table(pa.Table.from_pylist(rows), path)
+        actual = list(tool.actor_rows(path))
+        self.assertEqual([i for i, _ in actual], [1, 65537])

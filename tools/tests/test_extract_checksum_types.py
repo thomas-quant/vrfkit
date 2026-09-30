@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import TOOLS
+from support import TOOLS, TempDirTestCase
 import extract_checksum_types as gen
 
 #: The one multi-field braced type, in the one-line spelling `render` writes.
@@ -244,39 +244,39 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("crate::types", gen.render({1: "FieldType::Int32"}))
 
 
-class LearnTests(unittest.TestCase):
+class LearnTests(TempDirTestCase):
     def test_only_raw_and_skip_teach_nothing(self):
         """Raw and Skip carry no decode, so they are not donors; a type whose
         name merely contains one of them still is."""
-        with tempfile.TemporaryDirectory() as temp:
-            manifest = Path(temp) / "manifest.json"
-            manifest.write_text(json.dumps({"net_field_export_groups": [
-                {"path": "/g", "fields": [
-                    {"name": name, "compatible_checksum": checksum}
-                    for checksum, name in enumerate(("raw", "skip", "raw_like"), 1)
-                ]},
-            ]}), encoding="utf-8")
-            resolved, conflicts = gen.learn([manifest], {
-                ("/g", "raw"): "FieldType::Raw",
-                ("/g", "skip"): "FieldType::Skip",
-                ("/g", "raw_like"): "FieldType::RawBits",
-            })
+        temp = self.tmp()
+        manifest = temp / "manifest.json"
+        manifest.write_text(json.dumps({"net_field_export_groups": [
+            {"path": "/g", "fields": [
+                {"name": name, "compatible_checksum": checksum}
+                for checksum, name in enumerate(("raw", "skip", "raw_like"), 1)
+            ]},
+        ]}), encoding="utf-8")
+        resolved, conflicts = gen.learn([manifest], {
+            ("/g", "raw"): "FieldType::Raw",
+            ("/g", "skip"): "FieldType::Skip",
+            ("/g", "raw_like"): "FieldType::RawBits",
+        })
         self.assertEqual((resolved, conflicts), ({3: "FieldType::RawBits"}, {}))
 
 
-class CliGuardTests(unittest.TestCase):
+class CliGuardTests(TempDirTestCase):
     def test_missing_manifest_is_a_failure_not_a_successful_skip(self):
-        with tempfile.TemporaryDirectory() as temp:
-            export = Path(temp) / "missing-export"
-            result = subprocess.run(
-                [sys.executable, str(Path(gen.__file__)), "--export", str(export),
-                 "--check"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-            )
+        temp = self.tmp()
+        export = temp / "missing-export"
+        result = subprocess.run(
+            [sys.executable, str(Path(gen.__file__)), "--export", str(export),
+             "--check"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("SKIP:", result.stdout + result.stderr)
 

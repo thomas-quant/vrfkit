@@ -5,14 +5,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import tempfile
-import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import extract_damage_events as damage
 
 POINT = "MulticastNotifyDamage_Point"
@@ -33,11 +30,10 @@ def invocation(t, actor, *, killed=False, sentinel=False, character=None):
         ("RespawnNumber", -1 if sentinel else 0, None, None, None))]
 
 
-class ExtractDamageEventsTests(unittest.TestCase):
+class ExtractDamageEventsTests(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.export = Path(self._tmp.name) / "export"
+        self.root = self.tmp()
+        self.export = self.root / "export"
         self.export.mkdir()
 
     def write(self, rows, deaths, *, shared_pawn=False):
@@ -66,7 +62,7 @@ class ExtractDamageEventsTests(unittest.TestCase):
         return self.export
 
     def run_main(self):
-        out = Path(self._tmp.name) / "damage.parquet"
+        out = self.root / "damage.parquet"
         with contextlib.redirect_stdout(io.StringIO()) as stdout, \
                 contextlib.redirect_stderr(io.StringIO()):
             code = damage.main(["--export", str(self.export), "--out", str(out)])

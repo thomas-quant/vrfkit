@@ -2,13 +2,11 @@
 one-line table.rs, judged by whether applying would change the file."""
 import contextlib
 import io
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import apply_type_corrections as atc
 
 #: The handle table after OVERLAY_TABLE, naming a pinned key: applying must
@@ -61,18 +59,16 @@ class PinTests(unittest.TestCase):
         self.assertEqual(len(atc.ADDITIONS), 142, atc.ADDITIONS)
 
 
-class MainTests(unittest.TestCase):
+class MainTests(TempDirTestCase):
     """`main()` on a temporary table.rs."""
 
     def setUp(self):
         self._real_table = atc.TABLE_RS
-        self._temp = tempfile.TemporaryDirectory()
-        self.path = Path(self._temp.name) / "table.rs"
+        self.path = self.tmp() / "table.rs"
         atc.TABLE_RS = self.path
 
     def tearDown(self):
         atc.TABLE_RS = self._real_table
-        self._temp.cleanup()
 
     def run_main(self, source, *args):
         """`(exit_code, stdout, stderr)` for one main() run over `source`."""

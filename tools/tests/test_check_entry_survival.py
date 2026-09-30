@@ -9,11 +9,10 @@ import contextlib
 import io
 import json
 import re
-import tempfile
 import unittest
 from pathlib import Path
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import check_entry_survival as guard
 
 REFS = ["Owner", "Instigator", "AttachParent", "Controller"]
@@ -231,7 +230,7 @@ class SamplingTests(unittest.TestCase):
         self.assertEqual(guard.p_absent(10, 6, 5), 0.0)
 
 
-class ExpectedListTests(unittest.TestCase):
+class ExpectedListTests(TempDirTestCase):
     ITEM = {"entry": f"table|{STATE}|bArmed", "build": "13.02", "finding": "field-missing",
             "reason": "renamed to bArmedV2 in 13.02", "evidence": "20/20 -> 0/20"}
 
@@ -256,12 +255,12 @@ class ExpectedListTests(unittest.TestCase):
         self.assertIn("STALE", err)
 
     def test_an_item_without_a_reason_is_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "expected.json"
-            item = dict(self.ITEM, reason=" ")
-            path.write_text(json.dumps({"expected": [item]}), encoding="utf-8")
-            with self.assertRaises(ValueError):
-                guard.load_expected(path)
+        tmp = self.tmp()
+        path = tmp / "expected.json"
+        item = dict(self.ITEM, reason=" ")
+        path.write_text(json.dumps({"expected": [item]}), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            guard.load_expected(path)
 
     def test_every_committed_item_names_a_real_entry(self):
         """An item whose entry the tables no longer hold can never match, so
@@ -444,21 +443,21 @@ def write_export(directory: Path, build: str, main: dict, checkpoint=None):
         }), directory / "checkpoint_export_fields.parquet")
 
 
-class LoadTests(unittest.TestCase):
+class LoadTests(TempDirTestCase):
     def test_a_checkpoint_only_declaration_counts_and_joins_on_the_ordinal(self):
         new = "/Game/New.New_C"
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp) / "e"
-            write_export(d, "13.01", {STATE: [("Other", 12, 4)]}, checkpoint=(
-                [(0, 0, 5, STATE), (0, 1, 6, OLD), (0, 2, None, new),
-                 (1, 0, 5, STATE), (1, 0, 5, OLD)],        # (1, 0) twice
-                [(0, 1, 6, 17, 21, "Deployed"),     # joins OLD
-                 (0, 7, 6, 17, 21, "Ghost"),        # no group ordinal 7
-                 (0, 1, 9, 17, 21, "Mismatch"),     # path index disagrees
-                 (0, 2, None, 17, 21, "NoIndex"),   # no path index on either side
-                 (0, 0, None, 17, 21, "HalfIndex")]))
-            stats = guard.LoadStats()
-            r = guard.load_export(d, stats)
+        tmp = self.tmp()
+        d = tmp / "e"
+        write_export(d, "13.01", {STATE: [("Other", 12, 4)]}, checkpoint=(
+            [(0, 0, 5, STATE), (0, 1, 6, OLD), (0, 2, None, new),
+             (1, 0, 5, STATE), (1, 0, 5, OLD)],        # (1, 0) twice
+            [(0, 1, 6, 17, 21, "Deployed"),     # joins OLD
+             (0, 7, 6, 17, 21, "Ghost"),        # no group ordinal 7
+             (0, 1, 9, 17, 21, "Mismatch"),     # path index disagrees
+             (0, 2, None, 17, 21, "NoIndex"),   # no path index on either side
+             (0, 0, None, 17, 21, "HalfIndex")]))
+        stats = guard.LoadStats()
+        r = guard.load_export(d, stats)
         self.assertIn(OLD, r.groups)
         self.assertEqual({f for f in r.fields if f[0] != STATE},
                          {(OLD, "Deployed", 21, 17), (new, "NoIndex", 21, 17)})
@@ -481,24 +480,24 @@ class LoadTests(unittest.TestCase):
     def test_a_field_without_a_name_or_checksum_is_counted_not_declared(self):
         """Kept under None with no tally, a nameless field at a mapped handle
         would resolve through the handle alone: a guess."""
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp) / "e"
-            self.write_incomplete(d, "13.01")
-            stats = guard.LoadStats()
-            r = guard.load_export(d, stats)
+        tmp = self.tmp()
+        d = tmp / "e"
+        self.write_incomplete(d, "13.01")
+        stats = guard.LoadStats()
+        r = guard.load_export(d, stats)
         self.assertEqual(r.fields, frozenset({(STATE, "bArmed", 11, 3)}))
         self.assertEqual((stats.main_fields, stats.fields_without_identity), (5, 4))
 
     def test_a_field_without_a_name_or_checksum_fails_the_run(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "exports"
-            write_export(root / "a", "13.01", {STATE: [("bArmed", 11, 3)]})
-            self.write_incomplete(root / "b", "13.02")
-            empty = Path(tmp) / "empty.json"
-            empty.write_text(json.dumps({"expected": []}), encoding="utf-8")
-            with contextlib.redirect_stdout(io.StringIO()) as out, \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                code = guard.main(["--root", str(root), "--expected", str(empty)])
+        tmp = self.tmp()
+        root = tmp / "exports"
+        write_export(root / "a", "13.01", {STATE: [("bArmed", 11, 3)]})
+        self.write_incomplete(root / "b", "13.02")
+        empty = tmp / "empty.json"
+        empty.write_text(json.dumps({"expected": []}), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = guard.main(["--root", str(root), "--expected", str(empty)])
         self.assertEqual(code, 1, out.getvalue() + err.getvalue())
         self.assertIn("with 6 field(s) (4 without a name or checksum)", out.getvalue())
         self.assertIn("without a name or checksum -- the input is inconsistent", err.getvalue())
@@ -517,13 +516,12 @@ class LoadTests(unittest.TestCase):
                 self.assertIn("join no group", err.getvalue())
 
     def test_discovery_skips_and_lists_interrupted_exports(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_export(root / "a", "13.01", {STATE: []})
-            write_export(root / ".a.vrfkit-staging-12-3", "13.01", {STATE: []})
-            (root / "not-an-export").mkdir()
-            stats = guard.LoadStats()
-            found = guard.discover([root], [], stats)
+        root = self.tmp()
+        write_export(root / "a", "13.01", {STATE: []})
+        write_export(root / ".a.vrfkit-staging-12-3", "13.01", {STATE: []})
+        (root / "not-an-export").mkdir()
+        stats = guard.LoadStats()
+        found = guard.discover([root], [], stats)
         self.assertEqual([p.name for p in found], ["a"])
         self.assertEqual([p.name for p in stats.skipped], [".a.vrfkit-staging-12-3"])
 
@@ -531,19 +529,19 @@ class LoadTests(unittest.TestCase):
         """End to end: every committed item names a finding this input
         reproduces through the real tables, so each reads `expected`; with an
         empty list the run fails."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "exports"
-            write_committed_findings(root)
-            empty = Path(tmp) / "empty.json"
-            empty.write_text(json.dumps({"expected": []}), encoding="utf-8")
-            report = Path(tmp) / "report.json"
-            with contextlib.redirect_stdout(io.StringIO()) as out, \
-                    contextlib.redirect_stderr(io.StringIO()):
-                listed = guard.main(["--root", str(root), "--json", str(report)])
-            with contextlib.redirect_stdout(io.StringIO()), \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                unlisted = guard.main(["--root", str(root), "--expected", str(empty)])
-            data = json.loads(report.read_text(encoding="utf-8"))
+        tmp = self.tmp()
+        root = tmp / "exports"
+        write_committed_findings(root)
+        empty = tmp / "empty.json"
+        empty.write_text(json.dumps({"expected": []}), encoding="utf-8")
+        report = tmp / "report.json"
+        with contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()):
+            listed = guard.main(["--root", str(root), "--json", str(report)])
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            unlisted = guard.main(["--root", str(root), "--expected", str(empty)])
+        data = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(listed, 0, out.getvalue())
         self.assertEqual(unlisted, 1)
         self.assertIn("FAILED: 2 entr(y/ies)", err.getvalue())
@@ -568,14 +566,14 @@ class LoadTests(unittest.TestCase):
         send the reader to the wrong file."""
         stale = {"entry": f"table|{STATE}|bArmed", "build": "13.02",
                  "finding": "field-missing", "reason": "r", "evidence": "e"}
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "exports"
-            write_committed_findings(root)
-            path = Path(tmp) / "other_expected.json"
-            path.write_text(json.dumps({"expected": [stale]}), encoding="utf-8")
-            with contextlib.redirect_stdout(io.StringIO()), \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                code = guard.main(["--root", str(root), "--expected", str(path)])
+        tmp = self.tmp()
+        root = tmp / "exports"
+        write_committed_findings(root)
+        path = tmp / "other_expected.json"
+        path.write_text(json.dumps({"expected": [stale]}), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = guard.main(["--root", str(root), "--expected", str(path)])
         self.assertEqual(code, 1)
         failed = [line for line in err.getvalue().splitlines() if line.startswith("FAILED:")]
         self.assertEqual(len(failed), 2, err.getvalue())
@@ -592,22 +590,22 @@ class LoadTests(unittest.TestCase):
         # to add there, rather than reading STALE in the end-to-end test.
         self.assertEqual(sorted(i["entry"].rsplit("|", 1)[1] for i in items),
                          ["HasStopped", "TeamEconomy"])
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "exports"
-            write_committed_findings(root)
-            for dropped in items:
-                name = dropped["entry"].rsplit("|", 1)[1]
-                with self.subTest(dropped=name):
-                    path = Path(tmp) / "partial.json"
-                    path.write_text(json.dumps({"expected": [i for i in items if i is not dropped]}),
-                                    encoding="utf-8")
-                    with contextlib.redirect_stdout(io.StringIO()) as out, \
-                            contextlib.redirect_stderr(io.StringIO()) as err:
-                        code = guard.main(["--root", str(root), "--expected", str(path)])
-                    self.assertEqual(code, 1)
-                    self.assertIn("FAILED: 1 entr(y/ies)", err.getvalue())
-                    self.assertNotIn("STALE", err.getvalue())
-                    self.assertRegex(out.getvalue(), rf"FAIL\s.*\b{name}\b")
+        tmp = self.tmp()
+        root = tmp / "exports"
+        write_committed_findings(root)
+        for dropped in items:
+            name = dropped["entry"].rsplit("|", 1)[1]
+            with self.subTest(dropped=name):
+                path = tmp / "partial.json"
+                path.write_text(json.dumps({"expected": [i for i in items if i is not dropped]}),
+                                encoding="utf-8")
+                with contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    code = guard.main(["--root", str(root), "--expected", str(path)])
+                self.assertEqual(code, 1)
+                self.assertIn("FAILED: 1 entr(y/ies)", err.getvalue())
+                self.assertNotIn("STALE", err.getvalue())
+                self.assertRegex(out.getvalue(), rf"FAIL\s.*\b{name}\b")
 
 
 #: Cypher's cage-trap projectile before and after the 13.01 move, with the

@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 
-from support import TOOLS
+from support import TOOLS, TempDirTestCase
 import check_component_remaps as guard
 
 SCRIPT = TOOLS / "check_component_remaps.py"
@@ -66,7 +66,7 @@ class StrictRepLayoutTests(unittest.TestCase):
         self.assertEqual(states({NATIVE: 60101, "ZoomStateMachine": 1}), ["broken"])
 
 
-class ClassNetCachePairTests(unittest.TestCase):
+class ClassNetCachePairTests(TempDirTestCase):
     """A ClassNetCache pair is judged on the rows it routes, strictly."""
 
     ENTRY = [("DamageHandlerComponent", "/Script/ShooterGame.DamageableComponent",
@@ -115,13 +115,13 @@ class ClassNetCachePairTests(unittest.TestCase):
 
     def test_the_two_bare_counts_split_every_row_of_a_bare_group(self):
         """A native group counts every row, ClassNetCache ones included."""
-        with tempfile.TemporaryDirectory() as directory:
-            rep_layout, cnc = guard.row_counts(write_fields(
-                directory, [("DamageHandlerComponent", CNC_PAYLOAD)] * 4563
-                + [("DamageHandlerComponent", None)]
-                + [("AbilitiesAndBuffsComponent", "_cnc_h1")] * 4683
-                + [("AbilitiesAndBuffsComponent", "Status")] * 3
-                + [(self.ROUTED, "_cnc_h2")] * 2))
+        directory = self.tmp()
+        rep_layout, cnc = guard.row_counts(write_fields(
+            directory, [("DamageHandlerComponent", CNC_PAYLOAD)] * 4563
+            + [("DamageHandlerComponent", None)]
+            + [("AbilitiesAndBuffsComponent", "_cnc_h1")] * 4683
+            + [("AbilitiesAndBuffsComponent", "Status")] * 3
+            + [(self.ROUTED, "_cnc_h2")] * 2))
         self.assertEqual(rep_layout, {"DamageHandlerComponent": 1,
                                       "AbilitiesAndBuffsComponent": 3, self.ROUTED: 2})
         self.assertEqual(cnc, {"DamageHandlerComponent": 4563,
@@ -170,7 +170,7 @@ class RenameSignalTests(unittest.TestCase):
         self.assertEqual([g for g, _ in suspects], ["Large", "Middle", "Small"])
 
 
-class MainTests(unittest.TestCase):
+class MainTests(TempDirTestCase):
     """The exit code and the vacuity live in `main`, so they are exercised
     there, in process."""
 
@@ -186,12 +186,12 @@ class MainTests(unittest.TestCase):
     def test_a_missing_export_fails_with_exit_2(self):
         """`--export` is required, so no fields.parquet is a wrong path, not a
         skip. A child process: the exit code a caller chains on is the point."""
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
-                [sys.executable, "-W", "error", str(SCRIPT), "--export",
-                 str(Path(directory) / "missing")],
-                capture_output=True, text=True, check=False,
-                encoding="utf-8", errors="strict")
+        directory = self.tmp()
+        result = subprocess.run(
+            [sys.executable, "-W", "error", str(SCRIPT), "--export",
+             str(directory / "missing")],
+            capture_output=True, text=True, check=False,
+            encoding="utf-8", errors="strict")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("FAILED: no fields.parquet", result.stderr)
 

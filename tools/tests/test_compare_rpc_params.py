@@ -10,7 +10,6 @@ describes (STALE fails the run).
 import collections
 import io
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import compare_rpc_params as guard
 
 
@@ -173,11 +172,9 @@ def write_ours(path, rows):
     return path
 
 
-class FileTest(unittest.TestCase):
+class FileTest(TempDirTestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.dir = Path(tmp.name)
+        self.dir = self.tmp()
 
     def compare_files(self, reference_rows, our_rows, sha=LISTED.replay_sha256):
         reference = write_reference(self.dir, reference_rows, sha)

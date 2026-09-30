@@ -1,20 +1,15 @@
 import json
-import tempfile
-import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import extract_player_effects as effects
 
 
-class PlayerEffectTests(unittest.TestCase):
+class PlayerEffectTests(TempDirTestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = self.tmp()
 
     def export(self, fields, players=None):
         if players is None:

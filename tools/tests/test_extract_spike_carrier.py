@@ -4,14 +4,12 @@ carrying the spike, nobody, or a proxy walked back through its `Instigator`);
 the plant-time carrier lookup; the failure conditions; and the whole join on a
 synthetic export whose carrier is a reconnected player's earlier pawn."""
 import json
-import tempfile
 import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import extract_spike_carrier as spike
 
 
@@ -119,16 +117,14 @@ PLAYER_STATE = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"
 WRAITH = "/Game/Characters/Wraith/Wraith_PC.Wraith_PC_C"
 
 
-class ReconnectedCarrierTests(unittest.TestCase):
+class ReconnectedCarrierTests(TempDirTestCase):
     """39c2bb2c (13.05): PlayerState 256's SpawnedCharacter goes 1510 -> 0 ->
     45530 and the manifest keeps 45530. Pawn 1510 carried and planted the
     spike in round 5; the join on the manifest alone called that custody
     `unknown` and the plant `NO CARRIER`."""
 
     def build(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name)
+        root = self.tmp()
         # PlayerState 300 has a subject and no character, as some real ones do.
         (root / "manifest.json").write_text(json.dumps({"players": [
             {"actor_net_guid": 256, "subject": "reconnected", "character_net_guid": 45530},

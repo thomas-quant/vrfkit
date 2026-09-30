@@ -6,46 +6,44 @@ import contextlib
 import io
 import json
 import sys
-import tempfile
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
 from unittest import mock
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import validate_metrics_corpus as guard
 
 OK = {"id": "a", "stage": "ok", "elapsed_s": 1.0, "sections": {"combat": "EXACT"}}
 
 
-class FreshDirTests(unittest.TestCase):
+class FreshDirTests(TempDirTestCase):
     def test_a_stale_file_does_not_survive_into_the_next_run(self):
-        with tempfile.TemporaryDirectory() as parent:
-            target = Path(parent) / "xval" / "some-id"
-            target.mkdir(parents=True)
-            stale = target / "metrics.json"
-            stale.write_text('{"combat": "from the previous run"}',
-                             encoding="utf-8")
+        parent = self.tmp()
+        target = parent / "xval" / "some-id"
+        target.mkdir(parents=True)
+        stale = target / "metrics.json"
+        stale.write_text('{"combat": "from the previous run"}',
+                         encoding="utf-8")
 
-            guard.fresh_dir(target)
+        guard.fresh_dir(target)
 
-            self.assertTrue(target.is_dir())
-            self.assertFalse(stale.exists())
+        self.assertTrue(target.is_dir())
+        self.assertFalse(stale.exists())
 
     def test_a_directory_that_does_not_exist_yet_is_created(self):
-        with tempfile.TemporaryDirectory() as parent:
-            target = Path(parent) / "never" / "existed"
-            guard.fresh_dir(target)
-            self.assertTrue(target.is_dir())
+        parent = self.tmp()
+        target = parent / "never" / "existed"
+        guard.fresh_dir(target)
+        self.assertTrue(target.is_dir())
 
 
-class UnsafeReplayIdTests(unittest.TestCase):
+class UnsafeReplayIdTests(TempDirTestCase):
     """An untrusted --only value must never become an rmtree target."""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = self.tmp()
         self.saved = {name: getattr(guard, name)
                       for name in ("REPO", "EXPORTS", "VRF_DIR", "VRFKIT")}
         guard.REPO = self.root / "repo"
@@ -58,7 +56,6 @@ class UnsafeReplayIdTests(unittest.TestCase):
     def tearDown(self):
         for name, value in self.saved.items():
             setattr(guard, name, value)
-        self.temp.cleanup()
 
     def _assert_rejected_without_deleting(self, replay_id: str, victim: Path):
         victim.mkdir(parents=True)
@@ -132,14 +129,12 @@ class _SyncPool:
         return fut
 
 
-class MainWiringTests(unittest.TestCase):
+class MainWiringTests(TempDirTestCase):
     """`failures()` is pinned on synthetic results above; these pin that
     `main()` calls it and acts on what it returns."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        root = Path(self._tmp.name)
+        root = self.tmp()
         self.root = root
 
         vrf_dir = root / "vrf"

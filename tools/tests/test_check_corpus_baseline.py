@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import check_corpus_baseline as guard
 
 
@@ -65,7 +65,7 @@ class DiffTests(unittest.TestCase):
         self.assertTrue(any("missing replay: b.vrf" in d for d in guard.diff(before, after)))
 
 
-class CorpusMeasurementTests(unittest.TestCase):
+class CorpusMeasurementTests(TempDirTestCase):
     SUMMARY = """
 Branch: ++Ares-Core+release-13.02
 Total content blocks: 10
@@ -77,21 +77,20 @@ ORACLE PASS RATE: 100.000000%
 """
 
     def run_measure(self, script: str, relative_files: list[str]):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            corpus = root / "corpus"
-            corpus.mkdir()
-            for relative in relative_files:
-                path = corpus / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"replay")
-            (root / "validate").write_text(script, encoding="utf-8")
-            previous = Path.cwd()
-            os.chdir(root)
-            try:
-                return guard.measure(Path(sys.executable), corpus)
-            finally:
-                os.chdir(previous)
+        root = self.tmp()
+        corpus = root / "corpus"
+        corpus.mkdir()
+        for relative in relative_files:
+            path = corpus / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"replay")
+        (root / "validate").write_text(script, encoding="utf-8")
+        previous = Path.cwd()
+        os.chdir(root)
+        try:
+            return guard.measure(Path(sys.executable), corpus)
+        finally:
+            os.chdir(previous)
 
     def test_duplicate_basenames_are_keyed_by_relative_path(self):
         script = (
@@ -127,7 +126,7 @@ ORACLE PASS RATE: 100.000000%
         self.assertNotIn("error", result["per_file"]["MATCH.VRF"])
 
 
-class UpdateCorpusNameTests(unittest.TestCase):
+class UpdateCorpusNameTests(TempDirTestCase):
     """--update must not pin a resolved corpus path (an absolute --corpus, or
     VRFKIT_CORPUS_DIR joined to a relative one) into a new baseline: it would
     put one machine's directory into a committed file. check_export_baseline.py
@@ -149,26 +148,24 @@ class UpdateCorpusNameTests(unittest.TestCase):
         return code, output.getvalue(), measured
 
     def test_an_absolute_corpus_is_refused_before_the_oracle_runs(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "build_9999").mkdir()
-            code, output, measured = self.run_update(root, str(root / "build_9999"), None)
-            self.assertEqual(code, 2, output)
-            self.assertIn("VRFKIT_CORPUS_DIR", output)
-            self.assertIn("--corpus build_9999", output)
-            measured.assert_not_called()
-            self.assertFalse((root / "baseline.json").exists())
+        root = self.tmp()
+        (root / "build_9999").mkdir()
+        code, output, measured = self.run_update(root, str(root / "build_9999"), None)
+        self.assertEqual(code, 2, output)
+        self.assertIn("VRFKIT_CORPUS_DIR", output)
+        self.assertIn("--corpus build_9999", output)
+        measured.assert_not_called()
+        self.assertFalse((root / "baseline.json").exists())
 
     def test_a_relative_corpus_is_pinned_as_given_not_as_resolved(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "build_9999").mkdir()
-            code, output, measured = self.run_update(root, "build_9999", str(root))
-            self.assertEqual(code, 0, output)
-            measured.assert_called_once()
-            self.assertEqual(measured.call_args.args[1], root / "build_9999")
-            stored = json.loads((root / "baseline.json").read_text(encoding="utf-8"))
-            self.assertEqual(stored["corpus"], "build_9999")
+        root = self.tmp()
+        (root / "build_9999").mkdir()
+        code, output, measured = self.run_update(root, "build_9999", str(root))
+        self.assertEqual(code, 0, output)
+        measured.assert_called_once()
+        self.assertEqual(measured.call_args.args[1], root / "build_9999")
+        stored = json.loads((root / "baseline.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["corpus"], "build_9999")
 
 
 class NoCorpusNamedTests(unittest.TestCase):

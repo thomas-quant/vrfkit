@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import re
-import tempfile
 import unittest
 from pathlib import Path
 
-from support import REPO
+from support import REPO, TempDirTestCase
 import export_scan
 
 PUBLISH_RS = REPO / "crates" / "vrfkit" / "src" / "driver" / "publish.rs"
@@ -39,7 +38,7 @@ class RustContractTests(unittest.TestCase):
             self.assertTrue(export_scan.is_generated_sibling(f".pub2{infix}{kind}-55396-0"), kind)
 
 
-class GeneratedSiblingTests(unittest.TestCase):
+class GeneratedSiblingTests(TempDirTestCase):
     def test_every_name_rust_can_write_is_recognised(self):
         for name in (
             ".pub2.vrfkit-staging-55396-0",                     # the measured leftover
@@ -63,18 +62,17 @@ class GeneratedSiblingTests(unittest.TestCase):
             self.assertFalse(export_scan.is_generated_sibling(name), repr(name))
 
     def test_child_exports_splits_candidates_from_every_leftover(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            for name in ("b", "a"):
-                (root / name).mkdir()
-                (root / name / "fields.parquet").write_bytes(b"table")
-            (root / "no-table").mkdir()
-            (root / "fields.parquet").write_bytes(b"a file, not a child export")
-            (root / ".b.vrfkit-staging-9-0").mkdir()            # killed before its first table
-            backup = root / ".b.vrfkit-previous-9-1"
-            backup.mkdir()
-            (backup / "fields.parquet").write_bytes(b"table")
-            candidates, skipped = export_scan.child_exports(root)
+        root = self.tmp()
+        for name in ("b", "a"):
+            (root / name).mkdir()
+            (root / name / "fields.parquet").write_bytes(b"table")
+        (root / "no-table").mkdir()
+        (root / "fields.parquet").write_bytes(b"a file, not a child export")
+        (root / ".b.vrfkit-staging-9-0").mkdir()            # killed before its first table
+        backup = root / ".b.vrfkit-previous-9-1"
+        backup.mkdir()
+        (backup / "fields.parquet").write_bytes(b"table")
+        candidates, skipped = export_scan.child_exports(root)
         self.assertEqual([path.name for path in candidates], ["a", "b"])
         self.assertEqual([path.name for path in skipped],
                          [".b.vrfkit-previous-9-1", ".b.vrfkit-staging-9-0"])

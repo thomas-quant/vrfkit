@@ -1,15 +1,12 @@
 """Native cipher oracle and archive integrity checks; no game files required."""
 import hashlib
 import json
-from pathlib import Path
-import tempfile
-import unittest
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import recover_native_binaries as recovery
 
 
-class RecoveryTests(unittest.TestCase):
+class RecoveryTests(TempDirTestCase):
     def test_bulk_blocks_match_native_code(self):
         fixture = json.loads(recovery.CATALOG.with_name("native_bulk_vectors.json").read_text())
         for case in fixture["blocks"]:
@@ -35,15 +32,15 @@ class RecoveryTests(unittest.TestCase):
             recovery.bulk_decode(bytes(64), source[:-1])
 
     def test_hash_guard_rejects_changed_input(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "archive.bin"
-            path.write_bytes(b"original")
-            digest = hashlib.sha256(b"original").hexdigest()
-            self.assertEqual(recovery.checked_input(path, digest), b"original")
-            path.write_bytes(b"changed")
-            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
-                recovery.checked_input(path, digest)
-            self.assertEqual(path.read_bytes(), b"changed")
+        directory = self.tmp()
+        path = directory / "archive.bin"
+        path.write_bytes(b"original")
+        digest = hashlib.sha256(b"original").hexdigest()
+        self.assertEqual(recovery.checked_input(path, digest), b"original")
+        path.write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+            recovery.checked_input(path, digest)
+        self.assertEqual(path.read_bytes(), b"changed")
 
     def test_recovered_hashes_pin_the_captured_readers(self):
         catalog = json.loads(recovery.CATALOG.read_text())

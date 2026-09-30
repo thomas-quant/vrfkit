@@ -1,24 +1,17 @@
 import json
-import tempfile
-import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import extract_ability_lifecycle as lifecycle
 
 
-class AbilityLifecycleTests(unittest.TestCase):
+class AbilityLifecycleTests(TempDirTestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = self.tmp()
         (self.root / "manifest.json").write_text(json.dumps({"players": [
             {"character_net_guid": 50, "subject": "player-50"}]}), encoding="utf-8")
-
-    def tearDown(self):
-        self.temp.cleanup()
 
     def write(self, actors, fields):
         actor_schema = pa.schema([

@@ -10,13 +10,12 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import check_metrics_baseline as guard
 
 
@@ -304,14 +303,12 @@ print("metrics ok")
 '''
 
 
-class MainWiringTests(unittest.TestCase):
+class MainWiringTests(TempDirTestCase):
     """`main()` must call the pure functions above and act on them before
     deciding an exit code."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = self.tmp()
         (self.root / "export").write_text(FAKE_EXPORT_SCRIPT, encoding="utf-8")
         self.bundle_tool = self.root / "fake_bundle.py"
         self.bundle_tool.write_text(FAKE_BUNDLE_SCRIPT, encoding="utf-8")

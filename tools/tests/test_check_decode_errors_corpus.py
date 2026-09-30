@@ -8,12 +8,11 @@ import io
 import os
 import re
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 
-import support  # puts tools/ on sys.path
+from support import TempDirTestCase
 import check_decode_errors_corpus as guard
 
 #: The main-pass sink lines, failure counters at zero. Values from a real 13.02
@@ -313,11 +312,9 @@ emit()
 '''.replace("import sys\n", "import re\nimport sys\n", 1)
 
 
-class MainWiringTests(unittest.TestCase):
+class MainWiringTests(TempDirTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = self.tmp()
         (self.root / "export").write_text(FAKE_EXPORT_SCRIPT, encoding="utf-8")
         self.corpus = self.root / "corpus"
         self.corpus.mkdir()
