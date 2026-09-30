@@ -7,13 +7,12 @@ import os
 from pathlib import Path
 import struct
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import support  # puts tools/ on sys.path
 import package_release as release
 
 
@@ -194,7 +193,3 @@ class ReleasePackageTests(unittest.TestCase):
             release.main(["verify", "--tag", self.TAG, "--commit", self.COMMIT,
                           "--directory", str(self.output)])
         self.assertEqual(raised.exception.code, 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

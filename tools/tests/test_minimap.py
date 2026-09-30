@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,8 +12,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import minimap  # noqa: E402
+import support  # puts tools/ on sys.path
+import minimap
 
 MAP = "/Game/Maps/Test/Test"
 CONSTANTS = {"xMultiplier": 2.0, "yMultiplier": 3.0, "xScalarToAdd": 10.0, "yScalarToAdd": 20.0}
@@ -62,7 +61,3 @@ class MinimapTests(unittest.TestCase):
         positions = [(4000, 400, 0), (-300, -450, 50), (-50000, 0, -49900)]
         self.assertEqual(self.export(positions, fitting), 0)
         self.assertEqual(self.export(positions + [(100, 5000, 0)], fitting), 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

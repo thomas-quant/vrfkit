@@ -15,8 +15,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import compare_with_csharp as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import compare_with_csharp as guard
 
 
 PAIR_A = ("/Script/ShooterGame.Thing", "Health")
@@ -203,7 +203,3 @@ class MovementMultiplicityTests(unittest.TestCase):
                                        "pos_x": 1, "yaw": 170.0}])
         self.assertIn("Yaw: no data", report)
         self.assertIn("Pitch (1 rows)", report)
-
-
-if __name__ == "__main__":
-    unittest.main()

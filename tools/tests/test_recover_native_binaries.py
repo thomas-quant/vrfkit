@@ -2,11 +2,10 @@
 import hashlib
 import json
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import support  # puts tools/ on sys.path
 import recover_native_binaries as recovery
 
 
@@ -55,7 +54,3 @@ class RecoveryTests(unittest.TestCase):
             with self.subTest(build=entry["build"]):
                 self.assertEqual(entry["recovered_sha256"], hashes[entry["build"]])
                 self.assertNotEqual(entry["exe_sha256"], entry["recovered_sha256"])
-
-
-if __name__ == "__main__":
-    unittest.main()

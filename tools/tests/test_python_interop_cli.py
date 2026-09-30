@@ -4,15 +4,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from support import REPO
 
 
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "crates"
-    / "vrf-export"
-    / "tests"
-    / "python_interop.py"
-)
+SCRIPT = REPO / "crates" / "vrf-export" / "tests" / "python_interop.py"
 
 
 class ExactFixtureSelectionTests(unittest.TestCase):
@@ -82,7 +77,3 @@ class ExactFixtureSelectionTests(unittest.TestCase):
         self.assertIn(f"interop dir: {expected}".lower(), output)
         self.assertNotIn("ignored", output)
         self.assertIn("interop parquet files not found", output)
-
-
-if __name__ == "__main__":
-    unittest.main()

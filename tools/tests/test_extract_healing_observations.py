@@ -1,11 +1,10 @@
-import contextlib, copy, io, json, struct, sys, tempfile, unittest
+import contextlib, copy, io, json, struct, tempfile, unittest
 from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import support  # puts tools/ on sys.path
 import extract_healing_observations as tool
-from tools.tests.wire_fixtures import (
+from wire_fixtures import (
     CHECKPOINT_FIELD_SCHEMA as CHECKPOINT_SCHEMA,
     FIELD_SCHEMA as SCHEMA,
     array,
@@ -490,7 +489,3 @@ class EarlierPawnTests(unittest.TestCase):
         self.assertEqual(recipient["subject"], "recipient")
         self.assertEqual(d["player_identity"]["non_final_spawned_character_pawns"], 1)
         self.assertEqual(d["counts"]["amount_validated"], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

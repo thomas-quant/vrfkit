@@ -1,11 +1,10 @@
 import copy
 import json
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import support  # puts tools/ on sys.path
 import generate_scoped_types as gen
 
 
@@ -128,7 +127,3 @@ class ScopedTypeGenerationTests(unittest.TestCase):
                 {**base, "location_quantization": "RoundOneDecimal"}]}))
             self.assertIn("location: VectorQuantization::RoundOneDecimal }",
                           gen.render(gen.load(path)))
-
-
-if __name__ == "__main__":
-    unittest.main()

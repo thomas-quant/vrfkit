@@ -14,8 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_checksum_types as gen  # noqa: E402
+from support import TOOLS
+import extract_checksum_types as gen
 
 #: The one multi-field braced type, in the one-line spelling `render` writes.
 BYTE_WHOLE = ("FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
@@ -117,7 +117,7 @@ class RetypeTests(unittest.TestCase):
             self.assertEqual(len(gen.retype_problems(verdict, {checksum})), 1, checksum)
 
     def test_retype_is_refused_in_check_mode(self):
-        export = Path(__file__).resolve().parents[1] / "fixtures" / "checksum_export"
+        export = TOOLS / "fixtures" / "checksum_export"
         result = subprocess.run(
             [sys.executable, str(Path(gen.__file__)), "--export", str(export),
              "--check", "--retype", "24357661"],
@@ -281,7 +281,7 @@ class CliGuardTests(unittest.TestCase):
         self.assertNotIn("SKIP:", result.stdout + result.stderr)
 
     def test_committed_ci_fixture_exercises_the_generator_guard(self):
-        export = Path(__file__).resolve().parents[1] / "fixtures" / "checksum_export"
+        export = TOOLS / "fixtures" / "checksum_export"
         result = subprocess.run(
             [sys.executable, str(Path(gen.__file__)), "--export", str(export),
              "--check"],
@@ -305,7 +305,3 @@ class CliGuardTests(unittest.TestCase):
             len(overlap), 0,
             "fixture and committed table share no checksums -- the CI gate "
             "is comparing nothing")
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,11 +1,10 @@
-import copy, json, sys, tempfile, unittest
+import copy, json, tempfile, unittest
 from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import support  # puts tools/ on sys.path
 import extract_kill_observations as tool
-from tools.tests.wire_fixtures import FIELD_SCHEMA as SCHEMA, array
+from wire_fixtures import FIELD_SCHEMA as SCHEMA, array
 
 
 def row(**kw):
@@ -294,7 +293,3 @@ class ExtractionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(tool.InputError, "declaration"):
                 tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})
-
-
-if __name__ == "__main__":
-    unittest.main()

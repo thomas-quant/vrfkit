@@ -7,15 +7,14 @@ exactly one printed line, and a line that is not printed must read as missing.
 import contextlib
 import io
 import re
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import summary_counters as sc  # noqa: E402
+from support import REPO
+import summary_counters as sc
 
-DRIVER = Path(__file__).resolve().parents[2] / "crates" / "vrfkit" / "src"
+DRIVER = REPO / "crates" / "vrfkit" / "src"
 SUMMARY_RS = DRIVER / "driver" / "summary.rs"
 REPORT_RS = DRIVER / "report.rs"
 
@@ -142,7 +141,3 @@ class PinOrDiffTests(unittest.TestCase):
             stored = sc.load_baseline(path)
             self.assertIsNone(sc.pin_or_diff(path, stored, {"n": 1}, False, [], diff))
             self.assertEqual(sc.pin_or_diff(path, stored, {"n": 2}, False, [], diff), 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

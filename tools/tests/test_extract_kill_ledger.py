@@ -10,10 +10,11 @@ import unittest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from tools import extract_kill_ledger as tool
-from tools.tests.test_extract_kill_observations import SCHEMA, array, row as field_row
+import support  # puts tools/ on sys.path
+import extract_kill_ledger as tool
+from test_extract_kill_observations import SCHEMA, array, row as field_row
 
-from tools.extract_kill_ledger import (
+from extract_kill_ledger import (
     ActorIdentityIndex, DEATH_NAME, InputError, match_deaths, validate_death_payload,
 )
 
@@ -274,7 +275,3 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(run.returncode,1,run.stderr)
                 self.assertIn('FAILED:',run.stderr)
                 self.assertEqual(output.read_bytes(),before)
-
-
-if __name__=='__main__':
-    unittest.main()

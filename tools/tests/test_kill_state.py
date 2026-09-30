@@ -1,11 +1,9 @@
 import copy
 import math
-import pathlib
 import struct
-import sys
 import unittest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import support  # puts tools/ on sys.path
 import kill_state
 
 
@@ -236,7 +234,3 @@ class KillStateTests(unittest.TestCase):
             with self.subTest(complete=item["members_complete"]):
                 with self.assertRaisesRegex(kill_state.KillStateError, "victim_ref_resolution"):
                     kill_state.project_kill_state(document(item))
-
-
-if __name__ == "__main__":
-    unittest.main()

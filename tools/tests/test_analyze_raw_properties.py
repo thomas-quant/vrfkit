@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import sys
 import tempfile
 import unittest
 from collections import Counter
@@ -14,8 +13,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import analyze_raw_properties as raw_inventory  # noqa: E402
+import support  # puts tools/ on sys.path
+import analyze_raw_properties as raw_inventory
 
 
 SCHEMA = pa.schema(
@@ -385,7 +384,3 @@ class BuildTests(unittest.TestCase):
         labels = ["13.06", "9.10", "12.10", "13.05", "11.06", "13.06", "10.01"]
         self.assertEqual(raw_inventory.newest_builds(labels), ("12.10", "13.05", "13.06"))
         self.assertEqual(raw_inventory.newest_builds(["13.10", "13.2", "13.06"], 2), ("13.06", "13.10"))
-
-
-if __name__ == "__main__":
-    unittest.main()

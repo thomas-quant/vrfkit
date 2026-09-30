@@ -3,14 +3,13 @@ lists: its verdict must reach the exit code, and comparing nothing is no
 match."""
 import collections
 import io
-import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import support  # puts tools/ on sys.path
 
-import compare_combat_report as guard  # noqa: E402
+import compare_combat_report as guard
 
 SHAPE = "Rounds[].Reports[].Interactions[].DamageDealt"
 
@@ -98,7 +97,3 @@ class InputTests(unittest.TestCase):
     def test_the_default_reference_is_not_the_valplay_bundle(self):
         self.assertNotIn("valplay", guard.DEFAULT_REFERENCE.lower())
         self.assertIn("csharp-reference", guard.DEFAULT_REFERENCE)
-
-
-if __name__ == "__main__":
-    unittest.main()

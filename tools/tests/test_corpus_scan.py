@@ -1,13 +1,12 @@
 """Guards for the shared `.vrf` corpus discovery: top level by default, the
 subdirectory files it leaves out always counted, case-insensitive suffixes."""
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import corpus_scan  # noqa: E402
+import support  # puts tools/ on sys.path
+import corpus_scan
 
 
 class DiscoverTests(unittest.TestCase):
@@ -106,7 +105,3 @@ class DiagnosticTests(unittest.TestCase):
     def test_unredacted_diagnostic_preserves_existing_output(self):
         detail = "exit 1: useful diagnostic"
         self.assertEqual(corpus_scan.diagnostic(detail, False), detail)
-
-
-if __name__ == "__main__":
-    unittest.main()

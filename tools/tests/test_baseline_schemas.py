@@ -1,12 +1,11 @@
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_baseline_schemas as schemas  # noqa: E402
+import support  # puts tools/ on sys.path
+import check_baseline_schemas as schemas
 
 
 class BaselineSchemaTests(unittest.TestCase):
@@ -91,7 +90,3 @@ class BaselineSchemaTests(unittest.TestCase):
         for expected in ("replays.12.10", "kills", "players", "damage_dealt",
                          "team_score.Red"):
             self.assertIn(expected, joined)
-
-
-if __name__ == "__main__":
-    unittest.main()

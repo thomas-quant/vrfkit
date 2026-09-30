@@ -3,7 +3,6 @@ import contextlib
 import io
 import json
 import struct
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,9 +11,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-TOOLS = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(TOOLS))
-from validate_type_evidence import (  # noqa: E402
+from support import TOOLS
+from validate_type_evidence import (
     check_specifications, decode_exact, exported_matches, exported_value,
     load_specifications, main, spec_rows, validate, values_match)
 
@@ -636,7 +634,3 @@ class ShapedTypeTests(unittest.TestCase):
             field = report["fields"]["g::RelativeScale3D::checksum=1992268157"]
             self.assertEqual(field["min"], (-0.5, 1.0, 1.0))
             self.assertEqual(field["max"], (1.0, 1.0, 1.2))
-
-
-if __name__ == "__main__":
-    unittest.main()

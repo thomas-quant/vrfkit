@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import validate_metrics_corpus as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import validate_metrics_corpus as guard
 
 OK = {"id": "a", "stage": "ok", "elapsed_s": 1.0, "sections": {"combat": "EXACT"}}
 
@@ -239,7 +239,3 @@ class MainWiringTests(unittest.TestCase):
                 [sys.executable, str(guard.cmb.COMPUTE_METRICS), str(bundle_dir)],
             ],
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

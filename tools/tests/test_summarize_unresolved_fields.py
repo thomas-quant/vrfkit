@@ -4,7 +4,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,8 +12,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import summarize_unresolved_fields as priority  # noqa: E402
+import support  # puts tools/ on sys.path
+import summarize_unresolved_fields as priority
 
 
 SCHEMA = pa.schema([
@@ -183,7 +182,3 @@ class RawPriorityTests(unittest.TestCase):
         self.assertEqual(report["top_preserved_raw"][0]["field_name"], "preserved")
         missing = next(item for item in catalog if item["field_name"] == "missing")
         self.assertEqual((missing["preserved_raw_bit_sum"], missing["missing_declared_bit_sum"]), (0, 8))
-
-
-if __name__ == "__main__":
-    unittest.main()

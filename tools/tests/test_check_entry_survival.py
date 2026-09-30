@@ -9,13 +9,12 @@ import contextlib
 import io
 import json
 import re
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_entry_survival as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import check_entry_survival as guard
 
 REFS = ["Owner", "Instigator", "AttachParent", "Controller"]
 BOOL = guard.normalize_type("FieldType::Bool")
@@ -634,7 +633,3 @@ def write_committed_findings(root: Path):
         write_export(root / f"a{i}", "13.01", {bomb: [("TeamEconomy", 338800366, 52)],
                                                CAGE_NEW: CAGE_FIELDS})
         write_export(root / f"b{i}", "13.02", {bomb: [("TeamStates", 929598027, 52)]})
-
-
-if __name__ == "__main__":
-    unittest.main()

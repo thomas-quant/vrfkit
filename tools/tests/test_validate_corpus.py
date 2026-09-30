@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import validate_corpus as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import validate_corpus as guard
 
 
 class ProblemTests(unittest.TestCase):
@@ -168,7 +168,3 @@ class MainWiringTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 guard.main(["validate_corpus.py", sys.executable, str(self.corpus)])
         self.assertIn("no .vrf under", str(caught.exception))
-
-
-if __name__ == "__main__":
-    unittest.main()

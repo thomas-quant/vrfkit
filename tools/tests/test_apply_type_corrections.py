@@ -2,15 +2,14 @@
 one-line table.rs, judged by whether applying would change the file."""
 import contextlib
 import io
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import apply_type_corrections as atc  # noqa: E402
+import support  # puts tools/ on sys.path
+import apply_type_corrections as atc
 
 #: The handle table after OVERLAY_TABLE, naming a pinned key: applying must
 #: leave it byte for byte.
@@ -218,7 +217,3 @@ class MainTests(unittest.TestCase):
                 atc.main(["--chekc"])
         self.assertEqual(raised.exception.code, 2)
         self.assert_unchanged(source)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -13,8 +13,8 @@ import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_decode_errors_corpus as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import check_decode_errors_corpus as guard
 
 #: The main-pass sink lines, failure counters at zero. Values from a real 13.02
 #: `--checkpoints` export log, except the CNC, tail, trailer, route and walk lines.
@@ -434,7 +434,3 @@ class MainWiringTests(unittest.TestCase):
     def test_no_vrf_files_is_a_controlled_failure(self):
         code, output = self.run_main()
         self.assertEqual(code, 2, output)
-
-
-if __name__ == "__main__":
-    unittest.main()

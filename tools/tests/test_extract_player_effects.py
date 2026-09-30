@@ -1,5 +1,4 @@
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +6,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
+import support  # puts tools/ on sys.path
 import extract_player_effects as effects
 
 
@@ -150,7 +149,3 @@ class PlayerEffectTests(unittest.TestCase):
         self.assertIsNone(doc["records"][0]["values"]["InitialDuration"])
         self.assertNotIn("EffectID", doc["records"][0]["values"])
         self.assertEqual(doc["totals"]["untyped_members"], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

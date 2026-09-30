@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,8 +10,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_rounds as rounds  # noqa: E402
+import support  # puts tools/ on sys.path
+import extract_rounds as rounds
 
 
 def phase_rows(reset, *, buy_end=True, post=True):
@@ -144,7 +143,3 @@ class ExtractRoundsTests(unittest.TestCase):
             self.assertIn(f"  {key}: ", stdout)
         self.assertIn("  non-null: round_ordinal 2, round_number 2, reset_ms 2", stdout)
         self.assertEqual(self.run_main(self.export / "fields.parquet")[0], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

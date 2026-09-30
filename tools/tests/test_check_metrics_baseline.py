@@ -16,8 +16,8 @@ from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_metrics_baseline as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import check_metrics_baseline as guard
 
 
 # A healthy 13.02 fixture run, as pinned.
@@ -440,7 +440,3 @@ class MainWiringTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("did not complete the pipeline", output)
         self.assertIn("replay not found", output)
-
-
-if __name__ == "__main__":
-    unittest.main()

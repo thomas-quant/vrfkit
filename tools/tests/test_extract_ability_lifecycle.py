@@ -1,5 +1,4 @@
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,9 +6,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-TOOLS = Path(__file__).parents[1]
-sys.path.insert(0, str(TOOLS))
-import extract_ability_lifecycle as lifecycle  # noqa: E402
+import support  # puts tools/ on sys.path
+import extract_ability_lifecycle as lifecycle
 
 
 class AbilityLifecycleTests(unittest.TestCase):
@@ -196,7 +194,3 @@ class AbilityLifecycleTests(unittest.TestCase):
         self.assertEqual(row["replicated_instigator"]["net_guid"], 50)
         self.assertEqual(row["replicated_owner"]["status"], "conflicting_updates")
         self.assertIsNone(row["linked_player_net_guid"])
-
-
-if __name__ == "__main__":
-    unittest.main()

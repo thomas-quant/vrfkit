@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,8 +12,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_damage_events as damage  # noqa: E402
+import support  # puts tools/ on sys.path
+import extract_damage_events as damage
 
 POINT = "MulticastNotifyDamage_Point"
 STATE_GROUP = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"
@@ -142,7 +141,3 @@ class ExtractDamageEventsTests(unittest.TestCase):
         self.assertEqual(pq.read_table(out).schema, damage.SCHEMA)
         for key in damage.COUNT_KEYS:
             self.assertIn(f"  {key}: ", stdout)
-
-
-if __name__ == "__main__":
-    unittest.main()

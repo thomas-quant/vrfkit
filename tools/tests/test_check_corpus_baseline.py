@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_corpus_baseline as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import check_corpus_baseline as guard
 
 
 def measurement(per_file, totals=None):
@@ -223,7 +223,3 @@ class NoCorpusNamedTests(unittest.TestCase):
                     self.assertIn("no corpus named", output)
                     self.assertEqual(baseline.read_bytes() if baseline.exists() else None,
                                      before, "the baseline must not be written")
-
-
-if __name__ == "__main__":
-    unittest.main()

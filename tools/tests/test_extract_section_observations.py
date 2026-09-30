@@ -1,13 +1,10 @@
 import struct
-import sys
 import unittest
 import copy
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import support  # puts tools/ on sys.path
 import extract_section_observations as tool
-from tools.tests.wire_fixtures import BitWriter, packed
+from wire_fixtures import BitWriter, packed
 
 
 def row(name, raw, width, **typed):
@@ -196,7 +193,3 @@ class SectionObservationTests(unittest.TestCase):
         payload = packed(60)
         with self.assertRaises(tool.IntegrityError):
             tool.reference(row("x", payload, 8, value_i64=61))
-
-
-if __name__ == "__main__":
-    unittest.main()

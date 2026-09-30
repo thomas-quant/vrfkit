@@ -4,7 +4,6 @@ carrying the spike, nobody, or a proxy walked back through its `Instigator`);
 the plant-time carrier lookup; the failure conditions; and the whole join on a
 synthetic export whose carrier is a reconnected player's earlier pawn."""
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,8 +11,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_spike_carrier as spike  # noqa: E402
+import support  # puts tools/ on sys.path
+import extract_spike_carrier as spike
 
 
 PAWNS = {576: "gekko-uuid", 870: "other-uuid"}
@@ -194,7 +193,3 @@ class LeafTests(unittest.TestCase):
 
     def test_an_absent_class_is_the_empty_string(self):
         self.assertEqual(spike.leaf(None), "")
-
-
-if __name__ == "__main__":
-    unittest.main()

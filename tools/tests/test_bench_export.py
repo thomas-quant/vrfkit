@@ -16,9 +16,9 @@ from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import bench_export as bench  # noqa: E402
-import check_baseline_schemas as schemas  # noqa: E402
+import support  # puts tools/ on sys.path
+import bench_export as bench
+import check_baseline_schemas as schemas
 
 
 class CompareTests(unittest.TestCase):
@@ -136,7 +136,3 @@ class MainTests(unittest.TestCase):
         code, output = self.run_bench(self.replay("m.vrf"))
         self.assertEqual(code, 2)
         self.assertIn("build the release binary first", output)
-
-
-if __name__ == "__main__":
-    unittest.main()

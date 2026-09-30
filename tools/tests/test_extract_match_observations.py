@@ -10,9 +10,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_match_observations as observations  # noqa: E402
+import support  # puts tools/ on sys.path
+import extract_match_observations as observations
 
 
 def write_export(root: Path) -> None:
@@ -507,7 +506,3 @@ class MatchObservationTests(unittest.TestCase):
 
         self.assertEqual(result["money_decreases_in_team_switch_window"], [])
         self.assertIn(199, [row["time_ms"] for row in result["money_decreases"]])
-
-
-if __name__ == "__main__":
-    unittest.main()

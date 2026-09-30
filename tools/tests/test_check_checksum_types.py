@@ -15,13 +15,12 @@ import contextlib
 import io
 import json
 import random
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_checksum_types as cct  # noqa: E402
+import support  # puts tools/ on sys.path
+import check_checksum_types as cct
 
 
 # A second implementation of the formula, written from UE 5.3 FCrc rather than
@@ -1088,7 +1087,3 @@ class ExpectedMainTests(unittest.TestCase):
                 code, _, err = run_main("--export", str(d), "--expected", str(path))
                 self.assertEqual(code, 2)
                 self.assertIn("FAILED: expected list", err)
-
-
-if __name__ == "__main__":
-    unittest.main()

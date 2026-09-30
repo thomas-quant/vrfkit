@@ -16,8 +16,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_export_baseline as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import check_export_baseline as guard
 
 
 def measurement(**overrides):
@@ -720,7 +720,3 @@ ActiveBlinds trailers: 0 empty deltas
         self.assertFalse(sentinel.exists())
         self.assertTrue((output / "fields.parquet").is_file())
         self.assertEqual(result["parquet"]["fields"]["rows"], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

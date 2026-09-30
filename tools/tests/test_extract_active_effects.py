@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,8 +12,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_active_effects as effects  # noqa: E402
+import support  # puts tools/ on sys.path
+import extract_active_effects as effects
 
 CLASS = "/Game/Characters/Pandemic/S0/Ability_Q/GameObject_Pandemic_Q_Smoke.GameObject_X_C"
 
@@ -191,7 +190,3 @@ class TracksTests(unittest.TestCase):
                                      "--tracks", str(Path(self._tmp.name, tracks))])
             self.assertEqual(code, 1)
         self.assertEqual({path: path.read_bytes() for path in self.export.iterdir()}, inputs)
-
-
-if __name__ == "__main__":
-    unittest.main()

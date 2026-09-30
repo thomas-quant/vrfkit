@@ -1,7 +1,6 @@
 """Ensure a uniform audit cannot turn missing work or preserved loss into a pass."""
 from copy import deepcopy
 from pathlib import Path
-import sys
 import unittest
 from unittest.mock import patch
 import json
@@ -13,7 +12,7 @@ from io import StringIO
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import support  # puts tools/ on sys.path
 import verify_build_corpus as audit
 
 
@@ -434,7 +433,3 @@ class AuditCommandTests(unittest.TestCase):
             audit.main(self.args)
         self.assertEqual(raised.exception.code, 2)
         self.assertFalse(self.output.exists())
-
-
-if __name__ == "__main__":
-    unittest.main()

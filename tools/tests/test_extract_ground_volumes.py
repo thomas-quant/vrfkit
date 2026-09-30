@@ -16,9 +16,10 @@ from unittest.mock import patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from tools import extract_ground_volumes as gv
-from tools.check_checksum_types import chain_checksum
-from tools.tests.wire_fixtures import BitWriter
+import support  # puts tools/ on sys.path
+import extract_ground_volumes as gv
+from check_checksum_types import chain_checksum
+from wire_fixtures import BitWriter
 
 CNC_IDENTITY = ("FragmentInfo", 2225407835)
 #: 13.02-shaped declaration: handle -> (name, compatible_checksum).
@@ -651,7 +652,3 @@ class CliTests(unittest.TestCase):
                 gv.extract(source, out)
             self.assertFalse(out.exists())
             self.assertEqual(list(root.glob(".ground-volumes-*")), [])
-
-
-if __name__ == "__main__":
-    unittest.main()

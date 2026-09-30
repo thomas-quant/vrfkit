@@ -11,8 +11,9 @@ from unittest.mock import patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from tools import extract_fastarray_observations as fast
-from tools.tests.wire_fixtures import packed
+import support  # puts tools/ on sys.path
+import extract_fastarray_observations as fast
+from wire_fixtures import packed
 
 #: Route identities exactly as the parser exports them, literal rather than
 #: read from the extractor: a misspelled group selects nothing and passes
@@ -356,7 +357,3 @@ class FastArrayTests(unittest.TestCase):
                 fast.extract(source, out)
             self.assertFalse(out.exists())
             self.assertEqual(list(root.glob(".fastarray-*")), [])
-
-
-if __name__ == "__main__":
-    unittest.main()

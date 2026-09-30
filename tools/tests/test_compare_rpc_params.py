@@ -10,7 +10,6 @@ describes (STALE fails the run).
 import collections
 import io
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,8 +19,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import compare_rpc_params as guard  # noqa: E402
+import support  # puts tools/ on sys.path
+import compare_rpc_params as guard
 
 
 ONE_RPC = {"MulticastEndRound": [("NewRoundNumber", "int")]}
@@ -296,7 +295,3 @@ class RecordTests(FileTest):
                          guard.load_rust_records(ours))
         self.assertEqual(guard.load_cs_records(reference)[0][0],
                          (1000, 576, 576, 10, "MulticastNotifyKilledEnemy"))
-
-
-if __name__ == "__main__":
-    unittest.main()

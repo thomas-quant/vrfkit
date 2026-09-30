@@ -2,15 +2,13 @@
 from __future__ import annotations
 
 import re
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import export_scan  # noqa: E402
+from support import REPO
+import export_scan
 
-REPO = Path(__file__).resolve().parents[2]
 PUBLISH_RS = REPO / "crates" / "vrfkit" / "src" / "driver" / "publish.rs"
 
 
@@ -94,7 +92,3 @@ class GeneratedSiblingTests(unittest.TestCase):
         note = export_scan.leftover_note([Path("p") / ".a.vrfkit-staging-1-0"] * 2)
         self.assertIn("skipped 1 vrfkit export staging/backup directory,", note)
         self.assertIn(".a.vrfkit-staging-1-0", note)
-
-
-if __name__ == "__main__":
-    unittest.main()

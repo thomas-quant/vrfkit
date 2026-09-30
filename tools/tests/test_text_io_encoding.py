@@ -15,10 +15,7 @@ explicit `errors=` policy.
 """
 import ast
 import unittest
-from pathlib import Path
-
-
-TOOLS = Path(__file__).resolve().parents[1]
+from support import TOOLS
 
 
 def _mode(node: ast.Call, position: int) -> ast.expr | None:
@@ -186,7 +183,3 @@ class TextIoEncodingTests(unittest.TestCase):
             with self.subTest(source=source):
                 flagged, _ = unencoded_text_io(source)
                 self.assertEqual(len(flagged), expected)
-
-
-if __name__ == "__main__":
-    unittest.main()

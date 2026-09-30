@@ -11,7 +11,8 @@ import unittest
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from tools import validate_ability_array_evidence as evidence
+import support  # puts tools/ on sys.path
+import validate_ability_array_evidence as evidence
 
 
 def packed(value):
@@ -196,7 +197,3 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("child path", out)
         self.assertIn("typed_children={'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 0}", out)
-
-
-if __name__ == "__main__":
-    unittest.main()

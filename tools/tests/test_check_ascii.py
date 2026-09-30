@@ -5,11 +5,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from support import REPO
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPOSITORY_ROOT / "tools" / "check_ascii.py"
-NESTED_WORKING_DIRECTORY = REPOSITORY_ROOT / "crates" / "vrfkit"
+SCRIPT = REPO / "tools" / "check_ascii.py"
+NESTED_WORKING_DIRECTORY = REPO / "crates" / "vrfkit"
 
 
 class CheckAsciiTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class CheckAsciiTests(unittest.TestCase):
         The count is derived from `git ls-files`, not a literal: a test edited
         whenever the codebase grows is edited without being read."""
         tracked = subprocess.run(
-            ["git", "-C", str(REPOSITORY_ROOT), "ls-files", "*.rs"],
+            ["git", "-C", str(REPO), "ls-files", "*.rs"],
             capture_output=True, text=True, encoding="utf-8", errors="strict", check=True,
         ).stdout.split()
         self.assertGreater(len(tracked), 0, "no tracked Rust files found")
@@ -127,7 +127,3 @@ class CheckAsciiTests(unittest.TestCase):
             "planted.rs:1:14: non-ASCII byte 0xA9\n"
             "FAILED: 1 line(s), 2 byte(s)\n",
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

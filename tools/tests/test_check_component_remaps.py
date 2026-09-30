@@ -11,10 +11,10 @@ from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_component_remaps as guard  # noqa: E402
+from support import TOOLS
+import check_component_remaps as guard
 
-SCRIPT = Path(__file__).resolve().parents[1] / "check_component_remaps.py"
+SCRIPT = TOOLS / "check_component_remaps.py"
 
 NATIVE = "/Script/ShooterGame.EquippableStateMachineComponent"
 ENTRIES = [("ZoomStateMachine", NATIVE, "RepLayout")]
@@ -301,7 +301,3 @@ class PairParsingTests(unittest.TestCase):
         entries = guard.remap_entries(table)
         self.assertEqual(len(entries), 1)
         self.assertEqual(guard.unparsed_entries(table, entries), 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

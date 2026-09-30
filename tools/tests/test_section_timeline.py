@@ -1,12 +1,11 @@
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import support  # puts tools/ on sys.path
 import section_timeline as tool
 
 
@@ -221,8 +220,3 @@ class TimelineTests(unittest.TestCase):
             pq.write_table(pa.Table.from_pylist(rows), path)
             actual = list(tool.actor_rows(path))
             self.assertEqual([i for i, _ in actual], [1, 65537])
-
-
-
-if __name__ == "__main__":
-    unittest.main()

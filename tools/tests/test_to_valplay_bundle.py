@@ -17,8 +17,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import to_valplay_bundle as bundle  # noqa: E402
+import support  # puts tools/ on sys.path
+import to_valplay_bundle as bundle
 
 
 OLD_GUARDIAN = "/Game/Equippables/Guns/SniperRifles/Dmr/DMR.DMR_C"
@@ -2141,7 +2141,3 @@ class EventOrderingContractTests(unittest.TestCase):
             [e["time_ms"] for e in result.events("export_group_received")],
             [10, 0],
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

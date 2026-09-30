@@ -12,13 +12,13 @@ from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import atomic_io  # noqa: E402
-import bench_export  # noqa: E402
-import check_metrics_baseline  # noqa: E402
-import compare_with_csharp  # noqa: E402
-import extract_active_effects  # noqa: E402
-import extract_spike_carrier  # noqa: E402
+import support  # puts tools/ on sys.path
+import atomic_io
+import bench_export
+import check_metrics_baseline
+import compare_with_csharp
+import extract_active_effects
+import extract_spike_carrier
 
 
 class AtomicOutputTests(unittest.TestCase):
@@ -209,7 +209,3 @@ class AtomicOutputTests(unittest.TestCase):
                     ([], {"went_dormant": 0}), output
                 ),
             )
-
-
-if __name__ == "__main__":
-    unittest.main()

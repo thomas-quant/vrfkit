@@ -4,7 +4,6 @@ only the manifest's last one, and never a pawn merely carrying the player's
 """
 import json
 import re
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,9 +11,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-TOOLS = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(TOOLS))
-import player_identity as identity  # noqa: E402
+from support import TOOLS
+import player_identity as identity
 
 BOMB, SWIFT = identity.PLAYER_STATE_GROUPS
 FIELD_SCHEMA = pa.schema([
@@ -181,7 +179,3 @@ class AliasTableTests(unittest.TestCase):
         aliases = {alias for alias, target in pairs if target == BOMB}
         self.assertEqual(aliases, {SWIFT})
         self.assertEqual(set(identity.PLAYER_STATE_GROUPS), aliases | {BOMB})
-
-
-if __name__ == "__main__":
-    unittest.main()
