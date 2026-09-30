@@ -48,6 +48,12 @@ reference export lacks.
   `process_complete_payload` returns after the exports, so what follows is
   never read. No replay carries such a bunch to check reading on or a bit
   counter against, so the bunch fails `validate` and `verify_build_corpus.py`.
+- **A team roster.** `Rounds[].Reports[].Interactions[].{ParticipantSubject,ParticipantTeamName}`
+  gives one: in the 1,015 corpus replays that carry it (Bomb and Swiftplay; the
+  public fixtures carry none), 364,312 pairs name `Red` or `Blue`, 0 subjects
+  under both and 5 manifest players under neither, and the spike carrier's team
+  is `rounds.parquet`'s `attacker_team` on all 36,277 held custody intervals.
+  valplay derives teams itself, and a second file would repeat account UUIDs.
 - **Committing raw bits cut from private replays** so CI's real-bytes type
   check covers more fields: it would put private replay content in this
   public repository. The machine-local corpus sweeps cover them.
