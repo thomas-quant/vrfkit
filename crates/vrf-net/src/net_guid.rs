@@ -73,16 +73,20 @@ mod tests {
         }
     }
 
+    /// Any GUID in an export, and the default GUID (1) outside one, reads flags.
     #[test]
-    fn exporting_guid_with_path() {
-        let mut bits = Vec::new();
-        // Flags HasPath, then outer GUID 0 (no object) and the path.
-        bits.int_packed(18)
-            .u8(0x01)
-            .int_packed(0)
-            .fstring("/Game/Test.Test_C");
-        let registered = (18, "/Game/Test.Test_C".to_owned(), NetworkGuid(0));
-        assert_eq!(load(&bits, true), (Ok(NetworkGuid(18)), vec![registered]));
+    fn an_exporting_or_default_guid_reads_its_path() {
+        for (guid, is_exporting) in [(18, true), (1, false)] {
+            let mut bits = Vec::new();
+            // Flags HasPath, then outer GUID 0 (no object) and the path.
+            bits.int_packed(guid)
+                .u8(0x01)
+                .int_packed(0)
+                .fstring("/Game/Test.Test_C");
+            let registered = (guid, "/Game/Test.Test_C".to_owned(), NetworkGuid(0));
+            let expected = (Ok(NetworkGuid(guid)), vec![registered]);
+            assert_eq!(load(&bits, is_exporting), expected, "{guid}");
+        }
     }
 
     /// Sixteen nested HasPath GUIDs reach the limit before a 17th is read.

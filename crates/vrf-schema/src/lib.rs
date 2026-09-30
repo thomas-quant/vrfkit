@@ -47,7 +47,7 @@ pub use guid::{ExportFlags, NetGuidEntry, NetworkGuid};
 pub use hash::{FxHashMap, FxHashSet};
 pub use path::{
     CLASS_NET_CACHE_SUFFIX, find_class_net_cache_key, find_replay_path_key,
-    for_each_replay_path_key,
+    for_each_replay_path_key, has_path_separator,
 };
 pub use reader::{load_object, read_export_guids, read_net_field_exports};
 

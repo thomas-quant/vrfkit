@@ -446,7 +446,7 @@ fn is_class_net_cache(group: &NetFieldExportGroup) -> bool {
 /// A path with no separators and no `<unknown:` marker -- the shape the
 /// instance-name resolver is allowed to see.
 fn is_bare_instance_name(path: &str) -> bool {
-    !path.contains('/') && !path.contains('.') && !path.contains(':') && !path.starts_with('<')
+    !vrf_schema::has_path_separator(path) && !path.starts_with('<')
 }
 
 /// The path's last component, after its final `/`, `.` or `:`.

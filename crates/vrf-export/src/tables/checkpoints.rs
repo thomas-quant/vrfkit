@@ -1,7 +1,8 @@
 //! The seven checkpoint-scoped tables: fields, actors, NetGUIDs and blocks as
 //! decoded from each checkpoint, plus its GUID entries and export declarations.
-//! The three declaration tables' numeric dictionary choices were measured at
-//! ten row groups a file, not the one written now: re-measure before relying
+//! The three declaration tables' numeric dictionary choices were measured
+//! while every 8,192-row batch closed its own row group (ten for the reference
+//! replay's GUID entries), not the one written now: re-measure before relying
 //! on them.
 
 use std::sync::Arc;

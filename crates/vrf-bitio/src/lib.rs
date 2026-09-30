@@ -4,11 +4,11 @@
 //! and lets values straddle bytes, so a payload is one bit stream: bit `i` is
 //! `data[i >> 3] >> (i & 7) & 1`, and a multi-bit read shifts right and masks.
 //!
-//! [`BitReader::read_int_packed`], [`BitReader::read_serialized_int`] and
-//! [`BitReader::read_fstring`] consume a width that depends on the value, so a
-//! wrong count desynchronises the rest of the stream instead of failing; each
-//! is pinned by tests. Every read is bounds-checked: truncation is a
-//! [`BitError`], never a zero.
+//! [`BitReader::read_int_packed`], [`BitReader::read_serialized_int`],
+//! [`BitReader::read_quantized_vector`] and [`BitReader::read_fstring`] consume
+//! a width that depends on the value, so a wrong count desynchronises the rest
+//! of the stream instead of failing; each is pinned by tests. Every read is
+//! bounds-checked: truncation is a [`BitError`], never a zero.
 //!
 //! # Features
 //!
@@ -387,15 +387,11 @@ impl<'a> BitReader<'a> {
     }
 
     /// Three two's-complement components of `bits` bits each: one read when
-    /// all three fit in 64 bits, one read each otherwise.
-    ///
-    /// # Panics
-    ///
-    /// When `bits` is outside `1..=63`, the widths a `QuantizedVector` header
-    /// can declare: a call-site bug, so a real assert (above 64 the shift is
-    /// out of range, and release has no debug assertions).
+    /// all three fit in 64 bits, one read each otherwise. Panics outside
+    /// `1..=63`, the widths a header can declare: a real assert, since above
+    /// 64 the shift is out of range and release has no debug assertions.
     #[inline]
-    pub fn read_quantized_components(&mut self, bits: u32) -> Result<[i64; 3]> {
+    fn read_quantized_components(&mut self, bits: u32) -> Result<[i64; 3]> {
         assert!(
             (1..=63).contains(&bits),
             "component_bits must be 1..=63, got {bits}"
@@ -852,6 +848,45 @@ mod tests {
         assert_eq!(
             r.read_serialized_int(0).unwrap_err(),
             BitError::InvalidSerializedIntMax { max: 0 }
+        );
+    }
+
+    #[test]
+    fn component_bits_of_63_reads_all_189_declared_bits() {
+        // Header 63 (the widest width), then 1, -1 and -2^62 from bits 7, 70
+        // and 133, each 63 bits.
+        let mut data = [0u8; 25];
+        data[0] = 0xBF; // 0b011_1111, then bit 0 of the 1
+        data[8] = 0xC0; // the -1 from bit 70 ...
+        data[9..16].fill(0xFF);
+        data[16] = 0x1F; // ... to bit 132
+        data[24] = 0x08; // bit 195, the sign bit of -2^62
+        let mut r = BitReader::with_bit_len(&data, 196).unwrap();
+        let vector = r.read_quantized_vector(100).unwrap();
+        assert_eq!(vector, [1.0, -1.0, -(2f64.powi(62))]);
+        assert_eq!(r.position(), 7 + 189, "all three components must be read");
+    }
+
+    #[test]
+    #[should_panic(expected = "component_bits must be 1..=63")]
+    fn a_width_the_header_cannot_express_is_refused_even_without_debug_assertions() {
+        let data = [0xFFu8; 32];
+        let _ = BitReader::new(&data).read_quantized_components(64);
+    }
+
+    #[test]
+    fn a_truncated_63_bit_vector_reports_eof_rather_than_a_zero_vector() {
+        // Header 63, then 100 of the 189 component bits: the second one fails.
+        let mut data = [0u8; 14];
+        data[0] = 0x3F;
+        let mut r = BitReader::with_bit_len(&data, 107).unwrap();
+        assert_eq!(
+            r.read_quantized_vector(100).unwrap_err(),
+            BitError::Eof {
+                position: 70,
+                length: 107,
+                requested: 63
+            }
         );
     }
 

@@ -517,6 +517,8 @@ fn replay_data_exact_payload_reports_no_trailing_bytes() {
     let (plain, trailing) = decompress_replay_data_with_trailing(&payload, false, false).unwrap();
     assert_eq!(plain, [1, 2, 3, 4]);
     assert_eq!(trailing, 0);
+    let wrapped = decompress_replay_data(&payload, false, false).unwrap();
+    assert_eq!(wrapped, plain, "the public wrapper returns the same bytes");
 }
 
 /// A `SizeInBytes` larger than the payload is truncation, not a negative

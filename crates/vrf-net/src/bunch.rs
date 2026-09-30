@@ -604,6 +604,21 @@ mod tests {
     }
 
     #[test]
+    fn a_reliable_continuation_may_not_repeat_its_sequence() {
+        let mut acc = PartialBunchAccumulator::new();
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 5, true), &[0xAA], 8);
+        let mut repeat = continuation(1, 5, true);
+        repeat.b_reliable = true;
+        let last = c.add(&mut acc, repeat, &[0xBB], 8);
+        assert_eq!(
+            last.error_kind,
+            Some(PartialSequenceKind::MismatchedContinuation)
+        );
+        assert_eq!(c.errs, 1);
+    }
+
+    #[test]
     fn partial_reassembly_refuses_more_active_states_than_its_budget() {
         let mut acc = PartialBunchAccumulator::with_limits(1, 64);
         let mut c = Counters::default();

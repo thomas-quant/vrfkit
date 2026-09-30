@@ -3,9 +3,7 @@
 use vrf_bitio::BitReader;
 use vrf_testkit::{BitWrite, BitWriter, pack};
 
-use crate::error::MovementError;
 use crate::moves::MOVEMENT_MAGIC;
-use crate::primitives::{read_quantized_vector, read_signed_quantized_components};
 use crate::rpc::{
     COMPONENT_DATA_STREAM_HANDLE, REMOTE_CHARACTER_UPDATES_HANDLE,
     SHOOTER_CHARACTER_NET_GUID_HANDLE, decode_movement_rpc,
@@ -391,56 +389,4 @@ fn every_envelope_and_the_bits_after_it_are_tallied_per_stream() {
         assert_eq!(result.error_count, errors, "{name}");
         assert_eq!(trailers(&result), expected, "{name}");
     }
-}
-
-/// A QuantizedVector: the `SerializedInt(128)` header, then three components.
-fn quantized(component_bits: u32, extra_info: u64, comps: [u64; 3]) -> BitWriter {
-    let mut w = BitWriter::new();
-    // `read_serialized_int(128)` spends `128.ilog2() == 7` bits and never
-    // the extra one, because `value + 128 >= 128` holds for every value.
-    w.bits((extra_info << 6) | u64::from(component_bits), 7);
-    for c in comps {
-        w.bits(c, component_bits);
-    }
-    w
-}
-
-#[test]
-fn component_bits_of_63_reads_all_189_declared_bits() {
-    // The widest width the header can express.
-    let most_negative = 1u64 << 62; // -2^62 in 63-bit two's complement
-    let minus_one = (1u64 << 63) - 1; // all 63 bits set
-    let (bytes, bit_len) = quantized(63, 0, [1, minus_one, most_negative]).finish();
-    let mut r = BitReader::with_bit_len(&bytes, u64::from(bit_len)).unwrap();
-
-    let vector = read_quantized_vector(&mut r, 100).unwrap();
-
-    assert_eq!(vector, (1.0, -1.0, -(2f64.powi(62))));
-    assert_eq!(r.position(), 7 + 189, "all three components must be read");
-    assert!(r.at_end());
-}
-
-#[test]
-#[should_panic(expected = "component_bits must be 1..=63")]
-fn a_width_the_header_cannot_express_is_refused_even_without_debug_assertions() {
-    // A real assert, so it holds in release, which has no debug assertions
-    // (run with `-C debug-assertions=off` to see it).
-    let data = [0xFFu8; 32];
-    let mut r = BitReader::with_bit_len(&data, 256).unwrap();
-    let _ = read_signed_quantized_components(&mut r, 64);
-}
-
-#[test]
-fn a_truncated_63_bit_vector_reports_eof_rather_than_a_zero_vector() {
-    // Refusing to fabricate: a short payload fails instead of returning the
-    // origin.
-    let mut w = quantized(63, 0, [1, 1, 1]);
-    w.truncate(7 + 100);
-    let (bytes, bit_len) = w.finish();
-    let mut r = BitReader::with_bit_len(&bytes, u64::from(bit_len)).unwrap();
-
-    assert!(matches!(
-        read_quantized_vector(&mut r, 100),
-        Err(MovementError::Bit(_))
-    ));
 }

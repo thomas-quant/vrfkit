@@ -1774,6 +1774,7 @@ mod tests {
         assert_eq!(sink.stream_failures.len(), 1);
         assert_eq!(sink.stream_failures[0].kind, StreamKind::Rpc);
         assert_eq!(sink.stream_failures[0].remaining_bits, 7);
+        assert_eq!(sink.stream_failures[0].function_count, 2);
     }
 
     /// A zero handle closes only the RepLayout prefix. Bits after it belong to
@@ -2036,6 +2037,8 @@ mod tests {
         assert_eq!(sink.content_blocks.len(), 1);
         assert_eq!(stats.content_block_framing_failures, 1);
         assert_eq!(stats.skipped_bits, 12, "22 bits, of which 10 framed");
+        #[cfg(feature = "diagnostics")]
+        assert_eq!(stats.diagnostics[0].block_index_in_bunch, 1);
     }
 
     /// A content-block overrun is a `DiagnosticEvent` with full context,
@@ -2064,6 +2067,7 @@ mod tests {
         assert_eq!(ev.block_index_in_bunch, 0);
         assert_eq!(ev.content_bits, Some(999));
         assert_eq!((ev.remaining_bits, ev.bits_skipped), (8, 26));
+        assert_eq!(ev.consumed_bits, 18);
         assert!(
             ev.bunch_flags.b_open && ev.bunch_flags.b_reliable && !ev.bunch_flags.b_partial,
             "flags are snapshotted from the bunch header on the failure path"
@@ -2087,24 +2091,22 @@ mod tests {
         write_minimal_spawn_data(&mut open, 9); // archetype 9, not a controller
         let mut overrun = vec![false, true]; // ClassNetCache, isActor
         overrun.int_packed(999).repeat(false, 8); // declares far more than follows
-        let spec = BunchSpec {
+        // One packet, so the overrun is its second bunch.
+        let mut spec = BunchSpec {
             ch_index: 2,
+            b_open: true,
             ..Default::default()
         };
+        let mut both = Vec::new();
+        write_bunch(&mut both, &spec, &open);
+        spec.b_open = false;
+        write_bunch(&mut both, &spec, &overrun);
 
         let (mut reader, mut sink) = (reader(), TestSink::default());
         sink.guid_paths.insert(2, "/Game/Actor".into());
         sink.guid_paths
             .insert(9, "/Game/Default__Archetype_C".into());
-        for (id, packet) in [
-            build_open_bunch_packet(2, &open),
-            build_bunch_packet(&spec, &overrun),
-        ]
-        .iter()
-        .enumerate()
-        {
-            reader.process_packet(packet, id as i32, &mut sink);
-        }
+        reader.process_packet(&build_packet(&both), 0, &mut sink);
 
         let state = reader.channels[&2]
             .state
@@ -2128,8 +2130,11 @@ mod tests {
         ));
         assert_eq!(
             (ev.packet_id, ev.channel_index, ev.actor_net_guid),
-            (1, 2, 2)
+            (0, 2, 2)
         );
+        assert_eq!(ev.global_bunch_index, 1);
+        assert_eq!(ev.bunch_index_in_packet, 1);
+        assert_eq!(ev.channel_bunch_index, 2);
         assert_eq!(ev.archetype_net_guid, 9);
         assert_eq!(ev.actor_path.as_deref(), Some("/Game/Actor"));
         assert_eq!(ev.class_path.as_deref(), Some("/Game/Default__Archetype_C"));
@@ -2334,6 +2339,7 @@ mod tests {
             0,
             "no complete-but-untaken state may linger"
         );
+        assert_eq!(sink.rejected_partials[0].rejection_packet_id, Some(1));
         assert_eq!(
             rejected_rows(&sink),
             vec![(

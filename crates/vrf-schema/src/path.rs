@@ -56,7 +56,7 @@ pub fn find_class_net_cache_key<T>(
 /// (`unique_leaf_match` alone makes 174,485 calls on the reference replay), safe
 /// because UTF-8 never encodes an ASCII byte inside a multi-byte sequence.
 #[inline]
-pub(crate) fn has_path_separator(name: &str) -> bool {
+pub fn has_path_separator(name: &str) -> bool {
     name.bytes().any(|b| matches!(b, b'/' | b'.' | b':'))
 }
 

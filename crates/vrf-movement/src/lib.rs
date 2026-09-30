@@ -69,17 +69,9 @@
 //!       [1..33]  variant0PackedAngles (u32)
 //!     (if hasExternalCharacterRef -> error, not decoded)
 //!   errorSentinel     : 1 bit  (must be false)
-//!
-//! QuantizedVector:
-//!   componentBitCountAndExtraInfo : SerializedInt(128)  [7 bits]
-//!     componentBits = value & 63
-//!     extraInfo = value >> 6
-//!   IF componentBits > 0:
-//!     3 signed components of `componentBits` each
-//!     IF extraInfo > 0: divide by scaleFactor
-//!   ELIF extraInfo == 0: 3 x f32 (never seen)
-//!   ELSE: 3 x f64 (never seen)
 //! ```
+//!
+//! [`vrf_bitio::BitReader::read_quantized_vector`] reads each QuantizedVector.
 //!
 //! # Measured on real replays
 //!
@@ -103,7 +95,6 @@
 
 mod error;
 mod moves;
-mod primitives;
 mod rpc;
 mod types;
 
