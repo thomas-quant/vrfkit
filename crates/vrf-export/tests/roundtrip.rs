@@ -28,8 +28,8 @@ use vrf_export::{
 };
 
 /// Test output directory: `VRFKIT_INTEROP_DIR` when set, used as the exact
-/// root (CI's interop step reads `<root>/interop`), else this checkout's own
-/// target directory, so two checkouts never read each other's files.
+/// root (CI's interop step reads `<root>/interop`), else `<target>/tmp/vrf-export`,
+/// separate per checkout unless the target directory is shared.
 fn test_dir() -> PathBuf {
     let dir = std::env::var_os("VRFKIT_INTEROP_DIR")
         .map(PathBuf::from)

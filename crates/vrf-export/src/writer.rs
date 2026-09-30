@@ -51,9 +51,10 @@ pub trait Table {
 
     /// The only columns written with a Parquet dictionary, the rest PLAIN:
     /// every string column, as the docs promise, and any other only where a
-    /// dictionary measured smaller over a 45-replay sample. Each table's
-    /// comment gives dictionary/plain byte ratios, below 1 when the dictionary
-    /// is smaller: docs/PERFORMANCE_NOTES.md#dictionary-encoding-is-chosen-per-column.
+    /// dictionary measured smaller over a 45-replay sample. Most tables give
+    /// their listed/unlisted dictionary/plain byte ratio ranges (below 1 when
+    /// the dictionary is smaller); the declaration tables and partials say why
+    /// they have none: docs/PERFORMANCE_NOTES.md#dictionary-encoding-is-chosen-per-column.
     /// parquet-rs ignores a name matching no column and never gives BOOLEAN a
     /// dictionary; the roundtrip tests reject both and check every file's pages.
     const DICTIONARY_COLUMNS: &'static [&'static str];
@@ -246,7 +247,8 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
 
     fn flush_buffer(&mut self) -> Result<(), ExportError> {
         let batch = T::build_batch(&self.buffer)?;
-        // Cleared, not taken: one allocation for the whole run.
+        // Cleared (one allocation for the run) before `write`, so the rows are
+        // freed before the encoder runs.
         self.buffer.clear();
         self.writer.write(&batch)?;
         // A group closed at its row limit is on the sink; 131,072 is 16 whole

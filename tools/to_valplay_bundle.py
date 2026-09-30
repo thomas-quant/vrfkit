@@ -724,8 +724,9 @@ class _EffectBlobs(NamedTuple):
 
 
 class _ShotContext(NamedTuple):
-    """Per-replay lookups every shot event needs; empty GUID tables give a
-    null equippable and fire_mode "unknown", as for a server-world effect."""
+    """Per-replay lookups every shot event needs; with empty GUID tables the
+    equippable is null and fire_mode is "unknown" unless SourceID names
+    alternate fire (a server-world effect's does not)."""
 
     tag_table: dict
     guid_outer: dict = {}

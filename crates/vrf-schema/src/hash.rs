@@ -123,8 +123,8 @@ mod tests {
         assert_ne!(hash_of(&"AresAttribute"), hash_of(&"AresAttributeS"));
     }
 
-    /// Unlike every other map in these tests, this one spans many probe groups,
-    /// so it is the one a hash that depends on anything but the key fails.
+    /// The crate's only FxHasher-backed test map spanning many probe groups, so
+    /// the only test a hash that depends on anything but the key fails.
     #[test]
     fn works_as_a_hashmap_hasher() {
         let map: FxHashMap<u32, u32> = (0..1000).map(|i| (i, i)).collect();
