@@ -21,8 +21,7 @@ cargo +1.86.0 build --release -p vrfkit --no-default-features --locked # inspect
 Edition 2024. `#![forbid(unsafe_code)]` is in every crate — do not add `unsafe`.
 
 Python tooling under `tools/` needs `pip install -r requirements.txt`
-(pyarrow, numpy) -- without it several checks below fail to import instead of
-running.
+(pyarrow, numpy) -- without it most tools test modules fail to import.
 
 **MSRV is 1.86, and the main Rust CI job pins exactly that.** A newer local
 toolchain accepts syntax 1.86 rejects — `let` chains are the one that has already broken a build —
@@ -36,19 +35,14 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 
 ## Before you open a PR
 
-Run the full sweep. Every one of these must be green:
+Run the full sweep. Every one of these must exit 0:
 
 ```bash
 cargo +1.86.0 fmt --check
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo +1.86.0 test --workspace --locked
 cargo +1.86.0 test -p vrfkit --no-default-features --locked
 cargo +1.86.0 test -p vrf-container --no-default-features --locked
-cargo +1.86.0 check --workspace --all-targets --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo +1.86.0 doc --workspace --all-features --no-deps --locked
-cargo +1.86.0 fmt --manifest-path tools/extract_component_classes/Cargo.toml --check
-cargo +1.86.0 clippy --manifest-path tools/extract_component_classes/Cargo.toml --all-targets --locked -- -D warnings
-cargo +1.86.0 test --manifest-path tools/extract_component_classes/Cargo.toml --locked
 VRFKIT_INTEROP_DIR="<private-root>" cargo +1.86.0 test -p vrf-export --test roundtrip write_interop_files --locked -- --exact
 python -W error crates/vrf-export/tests/python_interop.py "<private-root>/interop"
 python -W error tools/check_ascii.py --check
@@ -56,47 +50,33 @@ python -W error tools/apply_type_corrections.py --check
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
 python -W error tools/generate_scoped_types.py --check
 python -W error tools/check_baseline_schemas.py
-python -W error tools/check_docs.py   # not --fast: runs both suites again to check the counts
-python -W error -m unittest discover -s tools/tests -p "test_*.py"
+python -W error tools/check_docs.py   # runs cargo test --workspace and the tools suite (-b), and checks their counts
 ```
+
+`check_docs.py` runs both test suites and fails on either, showing the last
+4,000 characters of a failing run; rerun that suite alone
+(`cargo +1.86.0 test --workspace --locked`, or
+`python -W error -m unittest -b discover -s tools/tests -p "test_*.py"`) for
+its full output.
 
 For the interop lines, point `VRFKIT_INTEROP_DIR` at a private root; the Rust
 test writes its files to that root's `interop` child, which is passed exactly
 to Python. The script refuses to search the system temp directory, because
-“newest” can be a stale fixture from another checkout.
+"newest" can be a stale fixture from another checkout.
 
-Run every advertised core-only and singleton feature, not just the default
-workspace. These are the commands CI executes; each singleton intentionally
-starts from `--no-default-features`:
+Also check every crate with no default features and with each feature alone.
+The cases come from `cargo metadata`, so a new feature is covered without
+editing a list; CI runs the same derivation and fails if it yields no case:
 
 ```bash
-cargo +1.86.0 check -p vrfkit --no-default-features --locked
-cargo +1.86.0 check -p vrfkit --no-default-features --features export --locked
-cargo +1.86.0 check -p vrf-bitio --no-default-features --locked
-cargo +1.86.0 check -p vrf-bitio --no-default-features --features alloc --locked
-cargo +1.86.0 check -p vrf-container --no-default-features --locked
-cargo +1.86.0 check -p vrf-container --no-default-features --features oodle --locked
-cargo +1.86.0 check -p vrf-container --no-default-features --features event --locked
-cargo +1.86.0 check -p vrf-container --no-default-features --features checkpoint --locked
-cargo +1.86.0 check -p vrf-decode --no-default-features --locked
-cargo +1.86.0 check -p vrf-decode --no-default-features --features array --locked
-cargo +1.86.0 check -p vrf-decode --no-default-features --features effect --locked
-cargo +1.86.0 check -p vrf-decode --no-default-features --features overlay --locked
-cargo +1.86.0 check -p vrf-decode --no-default-features --features structs --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features parquet --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features fields --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features movement --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features actors --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features net-guids --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features events --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features partials --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features checkpoint-context --locked
-cargo +1.86.0 check -p vrf-export --no-default-features --features snappy --locked
-cargo +1.86.0 check -p vrf-net --no-default-features --locked
-cargo +1.86.0 check -p vrf-net --no-default-features --features diagnostics --locked
-cargo +1.86.0 check -p vrf-schema --no-default-features --locked
-cargo +1.86.0 check -p vrf-schema --no-default-features --features checkpoint --locked
+cargo +1.86.0 metadata --no-deps --format-version 1 --locked | python -c "
+import json, subprocess, sys
+cases = [(p['name'], f) for p in json.load(sys.stdin)['packages'] if p['features']
+         for f in ['', *sorted(set(p['features']) - {'default'})]]
+for crate, feature in cases:
+    subprocess.run(['cargo', '+1.86.0', 'check', '-p', crate, '--no-default-features', '--locked',
+                    *(['--features', feature] if feature else [])], check=True)
+print(len(cases), 'cases'); sys.exit(not cases)"
 ```
 
 If your change affects exported output, also run the regression guards in
@@ -107,10 +87,9 @@ need a corpus — see [Environment](#environment) below.
 
 ### What CI runs
 
-- **`rust`** (Windows, Rust 1.86): fmt, clippy, the all-features check, the
-  feature matrix, the standalone component tool, strict rustdoc, the core-only
-  `vrfkit` and `vrf-container` tests, the interop test, and `check_docs.py`
-  in full -- both suites with Python
+- **`rust`** (Windows, Rust 1.86): fmt, clippy, the derived feature matrix,
+  strict rustdoc, the core-only `vrfkit` and `vrf-container` tests, the
+  interop test, and `check_docs.py` in full -- both suites with Python
   warnings as errors; a failed process, a missing or zero count, or a skipped
   Python test fails it. It then runs `check_corpus_baseline.py`,
   `verify_build_corpus.py` (validation, checkpoint export, reconciled
@@ -123,8 +102,8 @@ need a corpus — see [Environment](#environment) below.
   cover only the fields they contain. The report and logs are kept 14 days as
   an artifact, failures included; replays and Parquet are not uploaded.
 - **`python-checks`** (Python 3.12 and 3.13, Windows and Ubuntu): the ASCII,
-  generator and baseline-schema checks, the tools suite, the effect decoder
-  and `check_docs.py --fast`.
+  generator and baseline-schema checks, the tools suite and
+  `check_docs.py --fast`.
 - **`rust-stable`** (Windows): all-feature workspace tests and core-only CLI
   tests.
 - **`workflow-lint`**: checksum-pinned actionlint. Actions are pinned to
@@ -176,7 +155,9 @@ API is internal and may change in any release. Every crate carries the
 workspace version.
 
 The Windows package job is also required on every PR and manual CI run. It
-builds and tests the optimized CLI for `x86_64-pc-windows-msvc`, creates a ZIP
+builds and tests the optimized CLI for `x86_64-pc-windows-msvc` (and
+`vrf-movement`, whose width assertion must hold without debug assertions),
+creates a ZIP
 with `tools/package_release.py`, runs the extracted executable, and audits the
 pinned public 12.10 replay with the packaged binary, including checkpoints and
 independent typed/raw comparisons. The ZIP includes `vrfkit.exe`, `LICENSE`,
@@ -206,23 +187,19 @@ them are needed for the sweep above; all of them are needed for §6.
 | `VRFKIT_CORPUS_DIR` | Directory of `.vrf` replays; a bare filename in a baseline resolves against it | `check_export_baseline.py`, `check_corpus_baseline.py`, `check_metrics_baseline.py` |
 | `VRFKIT_VALPLAY_DIR` | valplay checkout root | `check_metrics_baseline.py`, `validate_metrics_corpus.py` |
 | `VRFKIT_JOBS` | Worker count for the corpus sweeps; default is cores - 2, capped at 16 | `validate_corpus.py` |
-| `VRFKIT_REQUIRE_CORPUS` | Set to anything to turn "corpus absent, skipping" into a failure | `crates/vrf-container/tests/corpus.rs`, `check_export_baseline.py`, `check_corpus_baseline.py` |
+| `VRFKIT_REQUIRE_CORPUS` | Set to anything to turn "corpus absent, skipping" into a failure | `crates/vrf-container/tests/corpus.rs`, `check_export_baseline.py`, `check_corpus_baseline.py`, `bench_export.py` |
 
-`compare_combat_report.py` and
-`compare_rpc_params.py` take `--reference` and `--ours`, defaulting to a
-machine-local C# export produced as described in
-[docs/USAGE.md](docs/USAGE.md#regression-guards----after-non-trivial-changes);
-`compare_with_csharp.py` takes both directories as positional arguments. None
-of the three reads an environment variable. Nothing checks this table, so
-verify a row by grepping for the variable rather than by reading the name:
-
-```bash
-grep -rn "VRFKIT_" tools/*.py | grep environ
-```
+`compare_combat_report.py` and `compare_rpc_params.py` take `--reference` and
+`--ours` (a machine-local C# export, produced as
+[docs/USAGE.md](docs/USAGE.md#regression-guards----after-non-trivial-changes)
+describes), and `compare_with_csharp.py` takes both directories as positional
+arguments; none reads an environment variable. Nothing checks this table:
+verify a row with `grep -rn "VRFKIT_" tools/*.py | grep environ`.
 
 **`tests/corpus.rs` is a container-level smoke test, not a decode sweep.** It
-parses each replay's header and decompresses its Oodle chunks; it never reaches
-a field. A green `cargo test` with the corpus present therefore says nothing
+parses each replay's preamble, walks every chunk, checks Event payloads against
+the measured layouts and decompresses the first ReplayData chunk; it never
+reaches a field. A green `cargo test` with the corpus present therefore says nothing
 about decoding. The sweeps that do are `validate_corpus.py` (RepLayout framing
 on every content block), `check_decode_errors_corpus.py` (the overlay), and
 `verify_build_corpus.py` (the common main/checkpoint audit). These are separate
@@ -268,29 +245,21 @@ These corrupt downstream consumers silently — no test fails when they break.
 
 The overlay table `crates/vrf-decode/src/table.rs` and
 `tools/equippable_table.py` are not generated. A type change to the table goes
-into `tools/apply_type_corrections.py` with its evidence; run it, then
-`extract_checksum_types.py` against a **fresh** export:
-
-```bash
-python tools/apply_type_corrections.py
-```
-
-The checksum step is last because it learns from what the overlay table
-declares. Run it before the additions land and the new entries are not donors
-yet -- the symptom is a field typed on the group you declared and still raw on
-its siblings, which is easy to read as the propagation not working. Re-export
-after rebuilding, then regenerate.
+into `tools/apply_type_corrections.py` with its evidence; run it
+(`python tools/apply_type_corrections.py`), rebuild, re-export, and only then
+run `extract_checksum_types.py` against that **fresh** export: it learns from
+what the table declares, so an earlier run leaves the new entries' siblings
+raw. `generate_scoped_types.py` also owns
+`tools/fixtures/scoped_type_evidence.json`'s layout: write mode rewrites the
+fixture into it, and `--check` fails on any other layout.
 
 ## Type corrections are conservative
 
-`tools/apply_type_corrections.py` carries two kinds of entry:
-
-- **Corrections** — the declared type and the wire disagree.
-  Each has cited wire evidence.
-- **ADDITIONS** — no type is declared. These rest on unusually complete
-  wire evidence (e.g. `Money` = 800 at pistol-round start across all actors). Do
-  not widen the ADDITIONS list "by eye" — that undoes the reason it is allowed.
-  Read the bar stated above `ADDITIONS` in the script first.
+`tools/apply_type_corrections.py` pins a type only on complete wire evidence
+-- one width on every row plus a value distribution a wrong type cannot
+produce (e.g. `Money` = 800 at pistol-round start across all actors) -- or on
+a checksum or sibling that fixes the type. Do not widen the `ADDITIONS` list
+"by eye"; read the bar stated above it in the script first.
 
 ## Commit style
 
