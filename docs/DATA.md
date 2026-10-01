@@ -212,6 +212,7 @@ with 100.
 | Raze satchel, Paint Shells and rocket position | `ReplicatedMovement` on `Projectile_Clay_Q_Satchel_Arming_C`, `Projectile_Clay_4_*` (renamed at 13.01) and `Projectile_Clay_X_Rocket_C` | ✅ typed, whole units, main stream only ([per-class level](#replicatedmovementlocation-is-world-units-at-a-per-class-level)) |
 | Guide (Gekko) E projectile flight | `Projectile_Guide_E_HawkFlash_C`: `ReplicatedMovement` (ByteComponents), `Banking` (Double), `PostControlVelocity` | ✅ typed, main stream only (11.06-13.06). `location` is world units (whole units, measured against spawn -- [per-class level](#replicatedmovementlocation-is-world-units-at-a-per-class-level)). Velocity is in world units; roll is never replicated and reads 0. `Banking` is an angle in degrees, -180..180; what it banks is not established |
 | Interaction progress (plant/defuse/orb pickup) | `UsableComponent.HighestProgress` (Float 0..1) / `bIsActive` | ✅ |
+| Ult orb pickup (who, which orb) | `BaseGameState_C:OrbPickedUpRPC.{Orb Gatherer, Collectable Orb}` on the Bomb and Swiftplay game states (ObjectNetGuid) | ✅ 1,976 calls on a 76-replay sample (11.06-13.06): `Collectable Orb` is an `UltPointOrb_C` actor on every one; the gatherer's `NumUltimatePoints` rises by one within 1 s on 1,944, the other 32 at 7 or 8 points already |
 
 ### `CastTime` is not measured from `roundStarted`
 
@@ -665,10 +666,10 @@ otherwise reports a 999-round reserve.
 | Plant / defuse / detonation | `events.spikePlanted` / `spikeDefused` / `spikeExploded` | ✅ |
 | Spike carrier (who holds it, over time) | `BombEquippable_C.Owner` on the spike's own channel → `tools/extract_spike_carrier.py` | ✅ resolved to manifest `subject`; covers backpack, not just in-hand |
 | Spike in hand (vs carried) | `AresInventory.CurrentEquippable` / `NewCurrentEquippable` == bomb GUID | ✅ the `in_hand` flag of the same view |
-| Defuser | `TimedBomb.CurrentDefuser` (ObjectNetGuid) | ✅ |
-| Planter | carrier at the `spikePlanted` timestamp (`extract_spike_carrier.py`) | ✅ from the Owner chain; the event payload itself carries no planter |
+| Defuser | `TimedBomb.CurrentDefuser` (ObjectNetGuid); `Comp_BombEvents_C:BombDefusedRPC.DefusingCharacter` (ObjectNetGuid) at the defuse | ✅ the RPC's character equals the latest non-null `CurrentDefuser` on 224/224 defuses (76-replay sample, 11.06-13.06) |
+| Planter | `Comp_BombEvents_C:BombPlantedRPC.BombPlanter` (ObjectNetGuid); also the carrier at the `spikePlanted` timestamp (`extract_spike_carrier.py`) | ✅ the RPC's planter equals the spike's `BombEquippable_C.Owner` at the RPC on 873/873 plants (76-replay sample), Gekko's Wingman (`Pawn_Aggrobot_SeekerNade_C`) when it plants; the event payload itself carries no planter |
 | Spike timer | `TimedBomb.TimeRemainingToExplode` / `DefuseProgress` | ✅ Double |
-| Plant site (A/B) | `TimedBomb.PlantedAtSite` (EnumByte) + position derivation | ✅ absent handle = default site (UE default-value skip); 100% via spawn position |
+| Plant site (A/B) | `TimedBomb.PlantedAtSite` (EnumByte) + position derivation; `BombPlantedRPC.PlantSite` (EnumByte, 2 bits) and `PlantLocation` | ✅ absent handle = default site (UE default-value skip); 100% via spawn position. The RPC's `PlantSite` equals `PlantedAtSite` of the `TimedBomb` opened at the same `time_ms` on 873/873, and both are absent together |
 | Detonation source | `events.spikeExploded` is canonical (always emitted) | ✅ `RoundResults` under-counts: it logs win-reason, not detonation |
 
 The gap between 776 plants, 248 defuses and 59 detonations looks like loss and

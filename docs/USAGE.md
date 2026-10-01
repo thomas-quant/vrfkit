@@ -256,7 +256,7 @@ member and handle by name.
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 822,185 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 822,251 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -275,7 +275,7 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 12,691,843 | |
+| `fields.parquet` | 1,296,660 | 12,692,351 | |
 | `movement.parquet` | 1,844,147 | 19,984,802 | |
 | `actors.parquet` | 3,827 | 76,830 | |
 | `net_guids.parquet` | 16,167 | 114,423 | |
@@ -698,7 +698,7 @@ needs it.
 ### Generators
 
 **Never hand-edit the output.** The overlay table
-`crates/vrf-decode/src/table.rs` (1,118 + 96 handles) and `equippable_table.py`
+`crates/vrf-decode/src/table.rs` (1,123 + 96 handles) and `equippable_table.py`
 are not generated: they are maintained in the repository.
 
 | Script | Produces |
@@ -712,15 +712,15 @@ applying would change `table.rs` at all -- a type, a missing entry, the order or
 the declared length -- and prints the difference.
 
 ```bash
-python tools/apply_type_corrections.py           # apply (219 corrections)
+python tools/apply_type_corrections.py           # apply (224 corrections)
 python tools/apply_type_corrections.py --check   # fail unless applying changes nothing
 ```
 
 CI runs the `--check` line.
 
-Those 219 corrections are the live expectation set the script re-verifies.
+Those 224 corrections are the live expectation set the script re-verifies.
 `ADDITIONS` pins types nothing else declares:
-currently 142 of them, each on complete wire evidence (one width on every row
+currently 147 of them, each on complete wire evidence (one width on every row
 and a value distribution a wrong type cannot produce) or a checksum or
 sibling that fixes the type, recorded at its entry under the bar stated above
 the list. `check_docs.py` checks both figures.
@@ -997,7 +997,12 @@ per-class level itself is pinned by the Rust test
 The shipped `tools/fixtures/type_evidence.json` covers the `ADDITIONS` and
 the checksum-scoped wire entries of the table, one entry per exported group
 that carries each; they were checked on every row of the 1,018-replay audit
-exports and with `--compare-typed` on fresh exports of all 24 builds.
+exports and with `--compare-typed` on fresh exports of all 24 builds. The last
+seven entries are the bomb-objective and ult-orb RPC parameters
+(`BombPlantedRPC.BombPlanter` / `PlantSite`, `BombDefusedRPC.DefusingCharacter`,
+`OrbPickedUpRPC.Orb Gatherer` / `Collectable Orb` on the Bomb and Swiftplay game
+states), checked with `--compare-typed` on a 76-replay sample of the 21 archived
+builds instead; the Swiftplay pair appears in one of those replays.
 `tools/fixtures/type_evidence_aliases.json` covers the Swiftplay class-alias
 propagation. Run on a sample, the `missing` list names every entry that sample
 lacks and the exit status is 1 for that reason alone; `--allow-missing` lists
@@ -1098,7 +1103,7 @@ schema drift, not meaning.
 
 The pre-PR sweep, and what CI runs, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr); the suites have
-707 Rust tests and 1045 Python tests.
+708 Rust tests and 1045 Python tests.
 
 **The ASCII rule is correctness, not style.** The Windows console is cp949, so a
 single non-ASCII character in a format string truncates output at that point.

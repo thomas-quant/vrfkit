@@ -1238,3 +1238,61 @@ fn heal_and_decay_references_decode_packed_guids_exactly() {
     assert_eq!(residual, None);
     assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 1));
 }
+
+/// The bomb-objective and ult-orb RPC parameters, each decoded from a payload
+/// cut from a 13.06 replay. The references are packed NetGUIDs consumed
+/// exactly; `PlantSite` is read at its 2-bit wire width, the width of every
+/// row that carries it (an absent row is the default site 0).
+#[test]
+fn bomb_objective_and_orb_rpc_parameters_decode_their_wire_payloads() {
+    const PLANTED: &str =
+        "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombPlantedRPC";
+    const DEFUSED: &str =
+        "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombDefusedRPC";
+    const ORB: &str = "/Game/BaseGameState.BaseGameState_C:OrbPickedUpRPC";
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, field: &str, handle: u32, checksum: u32, raw: &[u8], bits| {
+        apply_scoped(&mut stats, group, field, handle, checksum, raw, bits).value_i64
+    };
+    let planter = apply(PLANTED, "BombPlanter", 1, 2_737_763_130, &[0x0d, 0x0e], 16);
+    assert_eq!(planter, Some(902));
+    assert_eq!(
+        apply(PLANTED, "PlantSite", 2, 2_721_616_182, &[0x02], 2),
+        Some(2)
+    );
+    assert_eq!(
+        apply(PLANTED, "PlantSite", 2, 2_721_616_182, &[0x01], 2),
+        Some(1)
+    );
+    let defuser = apply(
+        DEFUSED,
+        "DefusingCharacter",
+        0,
+        2_403_630_779,
+        &[0xf5, 0x14],
+        16,
+    );
+    assert_eq!(defuser, Some(1402));
+    let gatherer = apply(ORB, "Orb Gatherer", 0, 2_930_585_102, &[0x65, 0x12], 16);
+    assert_eq!(gatherer, Some(1202));
+    let orb = apply(
+        ORB,
+        "Collectable Orb",
+        1,
+        2_066_098_074,
+        &[0x85, 0x09, 0x04],
+        24,
+    );
+    assert_eq!(orb, Some(33_346));
+    // A byte the packed value never claims is a residual, not a value.
+    let residual = apply(
+        PLANTED,
+        "BombPlanter",
+        1,
+        2_737_763_130,
+        &[0x0d, 0x0e, 0x00],
+        24,
+    );
+    assert_eq!(residual, None);
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (6, 1));
+}
