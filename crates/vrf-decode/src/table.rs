@@ -6,8 +6,10 @@ use crate::overlay::{OverlayEntry, OverlayHandleEntry};
 use crate::types::{RotatorQuantization, VectorQuantization};
 
 #[rustfmt::skip]
-pub static OVERLAY_TABLE: [OverlayEntry; 1118] = [
+pub static OVERLAY_TABLE: [OverlayEntry; 1123] = [
     OverlayEntry { group_path: "/Game/Abilities/GrenadeExplodeIndicator.GrenadeExplodeIndicator_C:MulticastTriggerExplodeIndicator", field_name: "IndicatorLocation", field_type: FieldType::VectorDouble },
+    OverlayEntry { group_path: "/Game/BaseGameState.BaseGameState_C:OrbPickedUpRPC", field_name: "Collectable Orb", field_type: FieldType::ObjectNetGuid },
+    OverlayEntry { group_path: "/Game/BaseGameState.BaseGameState_C:OrbPickedUpRPC", field_name: "Orb Gatherer", field_type: FieldType::ObjectNetGuid },
     OverlayEntry { group_path: "/Game/Characters/AggroBot/AggroBot_PC.AggroBot_PC_C", field_name: "PlayerState", field_type: FieldType::ObjectNetGuid },
     OverlayEntry { group_path: "/Game/Characters/AggroBot/AggroBot_PC.AggroBot_PC_C", field_name: "RemoteRole", field_type: FieldType::Skip },
     OverlayEntry { group_path: "/Game/Characters/AggroBot/AggroBot_PC.AggroBot_PC_C", field_name: "ReplayLastTransformUpdateTimeStamp", field_type: FieldType::Float },
@@ -801,7 +803,10 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1118] = [
     OverlayEntry { group_path: "/Game/GameModes/Common/BaseReplayPlayerState.BaseReplayPlayerState_C", field_name: "SubjectUniqueId", field_type: FieldType::Raw },
     OverlayEntry { group_path: "/Game/GameModes/Common/BaseReplayPlayerState.BaseReplayPlayerState_C", field_name: "bIsAfk", field_type: FieldType::Bool },
     OverlayEntry { group_path: "/Game/GameModes/Common/BaseReplayPlayerState.BaseReplayPlayerState_C", field_name: "bOnlySpectator", field_type: FieldType::Bool },
+    OverlayEntry { group_path: "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombDefusedRPC", field_name: "DefusingCharacter", field_type: FieldType::ObjectNetGuid },
+    OverlayEntry { group_path: "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombPlantedRPC", field_name: "BombPlanter", field_type: FieldType::ObjectNetGuid },
     OverlayEntry { group_path: "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombPlantedRPC", field_name: "PlantLocation", field_type: FieldType::VectorDouble },
+    OverlayEntry { group_path: "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombPlantedRPC", field_name: "PlantSite", field_type: FieldType::EnumByte },
     OverlayEntry { group_path: "/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C_ClassNetCache", field_name: "MulticastNotifySetLife", field_type: FieldType::Skip },
     OverlayEntry { group_path: "/Game/Gear/HeavyArmorItem.HeavyArmorItem_C", field_name: "AttachedDamageSection", field_type: FieldType::ObjectNetGuid },
     OverlayEntry { group_path: "/Game/Gear/HeavyArmorItem.HeavyArmorItem_C", field_name: "InInventory", field_type: FieldType::EnumByte },

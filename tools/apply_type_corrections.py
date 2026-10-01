@@ -37,6 +37,7 @@ def rep_movement(rotation: str, location: str) -> str:
 
 BYTE_WHOLE = rep_movement("ByteComponents", "RoundWholeNumber")
 TIMED_BOMB = "/Game/GameModes/Bomb/TimedBomb.TimedBomb_C"
+COMP_BOMB_EVENTS = "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C"
 DAMAGE = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_"
 
 #: Gekko's Wingman, the table's one two-decimal ReplicatedMovement (the other
@@ -346,8 +347,21 @@ ADDITIONS = pins([
      "MulticastTriggerExplodeIndicator", "VectorDouble", "IndicatorLocation"),
     ("/Game/GameModes/Bomb/BombDestination.BombDestination_C:MulticastActivateBombSiteEffects",
      "VectorDouble", "BombLocation"),
-    ("/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombPlantedRPC",
-     "VectorDouble", "PlantLocation"),
+    (COMP_BOMB_EVENTS + ":BombPlantedRPC", "VectorDouble", "PlantLocation"),
+    # 873 plants over 76 replays, 11.06-13.06. BombPlanter: 16/24-bit IntPacked,
+    # the spike's BombEquippable_C.Owner at the RPC on 873/873 (Gekko's Wingman
+    # when it plants). PlantSite: 2 bits when sent, equal to PlantedAtSite of the
+    # TimedBomb opened at the same time_ms on 873/873; both absent together is
+    # the default site 0, so it takes PlantedAtSite's type.
+    (COMP_BOMB_EVENTS + ":BombPlantedRPC", "ObjectNetGuid", "BombPlanter"),
+    (COMP_BOMB_EVENTS + ":BombPlantedRPC", "EnumByte", "PlantSite"),
+    # The latest non-null TimedBomb.CurrentDefuser at the RPC on 224/224.
+    (COMP_BOMB_EVENTS + ":BombDefusedRPC", "ObjectNetGuid", "DefusingCharacter"),
+    # 1,976 calls: Collectable Orb is an UltPointOrb_C actor on every one; Orb
+    # Gatherer a player pawn whose PlayerState's NumUltimatePoints rises by one
+    # within 1 s on 1,944, the other 32 already at 7 or 8 points.
+    ("/Game/BaseGameState.BaseGameState_C:OrbPickedUpRPC", "ObjectNetGuid",
+     ("Orb Gatherer", "Collectable Orb")),
     ("/Game/Equippables/Finishers/Rogue/Desturctible/FXC_Rogue_Finisher_Destructible."
      "FXC_Rogue_Finisher_Destructible_C:Set skeletal Collision",
      "VectorDouble", "Collision Static Mesh Scale"),

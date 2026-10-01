@@ -17,11 +17,11 @@ external `oozextract` crate. Edition 2024, MSRV 1.86, Apache-2.0.
 
 Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantReplayParser)
 (MIT), last referenced at
-[`8b7afcb`](https://github.com/michel-giehl/ValorantReplayParser/commit/8b7afcbb98bc4f8d4c342aef8242b142568624ca)
-(2026-09-27); see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed by,
+[`2e4d3ad`](https://github.com/michel-giehl/ValorantReplayParser/commit/2e4d3aded2e892cda21e0a66c4b55c73b3b7a07f)
+(2026-09-30); see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed by,
 or approved by Riot Games.
 
-**Verified state (2026-09-30):** Rust has **707 passing** tests; Python has
+**Verified state (2026-09-30):** Rust has **708 passing** tests; Python has
 **1045 passing** tests. All 24 supported builds received the same verification
 on **1,018 unique replays**; all **1,018** meet every strict criterion. See
 [build verification](docs/BUILD_VERIFICATION.md) for the measured scope, common
@@ -129,7 +129,7 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - **Reproducible** — Parquet output is byte-for-byte identical run to run.
 - **No `unsafe`** — `#![forbid(unsafe_code)]` in every crate; the only FFI is
   Oodle, isolated in an external crate.
-- **707 Rust tests** plus a layered validation suite (framing / bytes / decode
+- **708 Rust tests** plus a layered validation suite (framing / bytes / decode
   errors / semantics).
 
 ## Table of contents
@@ -179,7 +179,7 @@ timestamp) are in [`docs/USAGE.md` section 3](docs/USAGE.md#3-output).
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**707 passing**; the full Python suite also has **1045 passing** tests. The
+**708 passing**; the full Python suite also has **1045 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export and independent value checks for
 each supported build.
@@ -258,7 +258,7 @@ identified: it cannot be expanded into fields, so it emits one preservation
 row (`handle` = `u32::MAX`, full payload in `raw_bits`) and an explicit
 unresolved/raw diagnostic rather than pretending the properties were decoded.
 
-The overlay table (`crates/vrf-decode/src/table.rs`) -- 222 groups, 1,118
+The overlay table (`crates/vrf-decode/src/table.rs`) -- 224 groups, 1,123
 entries, 96 handles -- is maintained in the repository, and
 `tools/apply_type_corrections.py --check` keeps every measured type in it.
 Four names resolve without a table entry: `Owner`, `Instigator`,
@@ -270,13 +270,13 @@ and the scoped types miss -- a claim about Unreal, not about one Blueprint.
 committed export baseline `tools/baselines/export_02d4d478.json`:
 
 ```
-Decoded OK:   822,185      Decode errors:      0
-Raw/Skip:      24,747      Not in table: 140,814
+Decoded OK:   822,251      Decode errors:      0
+Raw/Skip:      24,747      Not in table: 140,748
 No field name:  1,249      Typed:          83.1%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (822,185 + 24,747 + 140,814 +
+The four buckets partition `Rows offered` exactly (822,251 + 24,747 + 140,748 +
 1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. `check_docs.py`
 compares these counters and USAGE's Parquet row/byte table with that baseline.
 

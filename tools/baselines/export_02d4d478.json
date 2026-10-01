@@ -57,10 +57,10 @@
   "cnc_bruteforce_payloads_unwalked": 0,
   "rep_layout_cnc_tails_decoded": 218,
   "rep_layout_cnc_tails_preserved": 114,
-  "overlay_decoded_ok": 822185,
+  "overlay_decoded_ok": 822251,
   "overlay_decode_errors": 0,
   "overlay_raw_skip": 24747,
-  "overlay_not_in_table": 140814,
+  "overlay_not_in_table": 140748,
   "overlay_no_field_name": 1249,
   "overlay_rows_offered": 988995,
   "effect_blobs_decoded": 61617
@@ -68,8 +68,8 @@
  "parquet": {
   "fields": {
    "rows": 1296660,
-   "bytes": 12691843,
-   "sha256": "6e542a82801097ddf8efc34e15ef4aa0fd2700398adf9c8e98b627e687ac40db"
+   "bytes": 12692351,
+   "sha256": "115cb1b08de5e4d64808f6aeee6eea9768447119cb522bde112a021dfa6637c5"
   },
   "movement": {
    "rows": 1844147,
