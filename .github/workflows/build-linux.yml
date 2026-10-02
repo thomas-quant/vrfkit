@@ -3,7 +3,7 @@ name: build-linux
 # exported on a Linux VPS. Builds and tests on Linux and uploads the binary.
 on:
   push:
-    branches: [upstream-sync, build-artifacts]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
