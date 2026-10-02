@@ -1,27 +1,18 @@
-#!/usr/bin/env python3
-"""Self-check the live shot-effect decoder against pinned wire examples.
+"""Pinned wire examples for the live Python shot-effect decoder, which
+tools/tests/test_check_effect_decoder.py runs through `check`.
 
-The first nine cases are every executable example currently in
-``crates/vrf-decode/src/effect.rs``: six non-empty hex blobs and the three
-one-byte empty arrays.  The Rust module is a format specification only; this
-script deliberately calls the Python decoder that produces the valplay bundle.
-
-The two ``reference_*`` cases use the C# reference bundle at
-``valplay/pipeline/exports/02d4d478-1dfb-4412-9a77-29ca29105a9d/events.ndjson``:
-
-* packet 39959, ``FloatValues``: adds ``FiringState.BurstShotNumber``;
-* packet 15347, ``ObjectValues``: adds a singleton ``FXC.EffectContext``.
-
-Run with:
-    python tools/check_effect_decoder.py --check
-
-For a deliberate-corruption demonstration (which must fail):
-    python tools/check_effect_decoder.py --check --corrupt rust_float_sheriff_basic
+The first nine cases are the wire vectors the Rust decoder's tests pin in
+``crates/vrf-decode/src/effect/tests.rs``: six non-empty hex blobs and the three
+one-byte empty arrays. Here they run through the Python decoder that produces
+the valplay bundle, so the same vectors are checked on both sides. The two
+``reference_*`` cases come from the reference bundle's ``events.ndjson`` for
+replay 02d4d478: packet 39959 ``FloatValues`` adds
+``FiringState.BurstShotNumber``; packet 15347 ``ObjectValues`` adds a
+singleton ``FXC.EffectContext``.
 """
 
 from __future__ import annotations
 
-import argparse
 import math
 import struct
 import sys
@@ -47,8 +38,8 @@ def _hex(text: str) -> bytes:
     return bytes.fromhex("".join(text.split()))
 
 
-# The exact f32 represented by the C# JSON number is the comparison value.
-# System.Text.Json renders a shortest round-trippable decimal, which can differ
+# The exact f32 represented by the reference JSON number is the comparison
+# value. The bundle holds a shortest round-trippable decimal, which can differ
 # textually from Python's f32 promoted to f64 (for example, random seeds).
 def _reference_f32(value: float) -> float:
     return struct.unpack("<f", struct.pack("<f", value))[0]
@@ -61,12 +52,12 @@ RUST_FLOAT_SHERIFF = _hex("""
 
 
 CASES = (
-    # Rust effect.rs: packet 4368, Sheriff FloatValues.
+    # Rust effect/tests.rs: packet 4368, Sheriff FloatValues.
     Case(
         "rust_float_sheriff_basic", RUST_FLOAT_SHERIFF, 400, bundle._EFFECT_FLOATS,
         ((284, 1.0), (263, 5.0), (286, 1.0), (285, -1509722752.0)),
     ),
-    # Rust effect.rs: packet 17421, Classic FloatValues with YawSwitch.
+    # Rust effect/tests.rs: packet 17421, Classic FloatValues with YawSwitch.
     Case(
         "rust_float_yaw_switch",
         _hex("""
@@ -79,7 +70,7 @@ CASES = (
         ((284, 1.0), (263, 7.0), (286, 1.0),
          (285, _reference_f32(-68573580.0)), (287, 16.0)),
     ),
-    # Rust effect.rs: packet 30968, Judge FloatValues without TracerOption.
+    # Rust effect/tests.rs: packet 30968, Judge FloatValues, no TracerOption.
     Case(
         "rust_float_shotgun",
         _hex("""
@@ -90,7 +81,7 @@ CASES = (
         bundle._EFFECT_FLOATS,
         ((284, 12.0), (263, 4.0), (285, 480247136.0)),
     ),
-    # Rust effect.rs: packet 4368 ObjectValues.
+    # Rust effect/tests.rs: packet 4368 ObjectValues.
     Case(
         "rust_object_basic",
         _hex("""
@@ -101,7 +92,7 @@ CASES = (
         bundle._EFFECT_OBJECTS,
         ((283, 3086), (282, 268), (65535, 2731), (306, 1466)),
     ),
-    # Rust effect.rs: packet 4368, one Sheriff attack vector.
+    # Rust effect/tests.rs: packet 4368, one Sheriff attack vector.
     Case(
         "rust_vector_single",
         _hex("""
@@ -112,7 +103,7 @@ CASES = (
         bundle._EFFECT_VECTORS,
         ((265, (-0.7793076561609785, 0.6228944653768754, -0.06842559500463913)),),
     ),
-    # Rust effect.rs: packet 30968, twelve Judge attack vectors.
+    # Rust effect/tests.rs: packet 30968, twelve Judge attack vectors.
     Case(
         "rust_vector_shotgun_12",
         _hex("""
@@ -150,11 +141,11 @@ CASES = (
             (268, (-0.6034491419288359, 0.796167975209223, -0.04433608413693601)),
         ),
     ),
-    # Rust effect.rs: the three one-byte IntPacked-zero arrays.
+    # Rust effect/tests.rs: the three one-byte IntPacked-zero arrays.
     Case("rust_empty_float", b"\x00", 8, bundle._EFFECT_FLOATS, ()),
     Case("rust_empty_object", b"\x00", 8, bundle._EFFECT_OBJECTS, ()),
     Case("rust_empty_vector", b"\x00", 8, bundle._EFFECT_VECTORS, ()),
-    # C# reference bundle packet 39959 FloatValues, fields listed in docstring.
+    # Reference bundle packet 39959 FloatValues, fields listed in docstring.
     Case(
         "reference_float_burst",
         _hex("""
@@ -169,7 +160,7 @@ CASES = (
             (285, _reference_f32(1614889000.0)),
         ),
     ),
-    # C# reference bundle packet 15347 ObjectValues, FXC.EffectContext=1368.
+    # Reference bundle packet 15347 ObjectValues, FXC.EffectContext=1368.
     Case(
         "reference_object_effect_context_only",
         _hex("0202202065042220b1140000"),
@@ -192,9 +183,7 @@ def _same_value(actual: object | None, expected: object | None,
                 spec: bundle._EffectArraySpec) -> bool:
     if actual is None or expected is None:
         return actual is expected
-    if spec is bundle._EFFECT_FLOATS:
-        return actual == expected
-    if spec is bundle._EFFECT_OBJECTS:
+    if spec is bundle._EFFECT_FLOATS or spec is bundle._EFFECT_OBJECTS:
         return actual == expected
     if isinstance(actual, tuple) and isinstance(expected, tuple):
         return len(actual) == len(expected) and all(
@@ -222,11 +211,11 @@ def _preview(elements: tuple[tuple[int | None, object | None], ...]) -> str:
 
 
 def check(corrupt_name: str | None = None) -> list[str]:
-    """Return one failure per Python-decoder disagreement."""
+    """One failure per Python-decoder disagreement, with case `corrupt_name`
+    corrupted by one flipped byte."""
     failures = []
-    names = {case.name for case in CASES}
-    if corrupt_name is not None and corrupt_name not in names:
-        return [f"unknown case for --corrupt: {corrupt_name}"]
+    if corrupt_name is not None and corrupt_name not in {case.name for case in CASES}:
+        return [f"unknown case to corrupt: {corrupt_name}"]
     for original in CASES:
         case = _corrupt(original) if original.name == corrupt_name else original
         actual = tuple(bundle._decode_effect_elements(case.data, case.bit_count, case.spec))
@@ -247,20 +236,5 @@ def check(corrupt_name: str | None = None) -> list[str]:
     return failures
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="verify pinned cases")
-    parser.add_argument("--corrupt", metavar="CASE", help="flip one byte in CASE")
-    args = parser.parse_args()
-    failures = check(args.corrupt)
-    if failures:
-        print(f"FAILED: {len(failures)} effect decoder check(s)", file=sys.stderr)
-        for failure in failures:
-            print(f"  {failure}", file=sys.stderr)
-        return 1
-    print(f"OK: {len(CASES)} live effect decoder cases")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("no CLI: run python -m unittest tools/tests/test_check_effect_decoder.py")

@@ -1,105 +1,80 @@
 //! `export` subcommand driver -- full pipeline from .vrf to Parquet.
 //!
-//! # Architecture
-//!
-//! DemoFrames and packets are processed in one wire-order pass. The frame
-//! iterator applies one frame's ExportData, then lends that exact cache state
-//! to the packet callback. Packet-side export mutations therefore precede the
-//! next packet, while a later frame's schema cannot leak backward into an
-//! earlier packet.
-//!
-//! # Layout
-//!
-//! - [`writers`] -- the two large tables' writers, running off the packet loop.
-//! - [`checkpoints`] -- the optional full-state snapshot pass.
-//! - [`summary`] -- the stderr report, whose every line a Python harness pins.
+//! One wire-order pass: the frame walk applies a frame's ExportData, then
+//! lends that exact cache state to its packets, so packet-side export
+//! mutations precede the next packet and a later frame's schema cannot leak
+//! backward. [`writers`] runs the large tables off the packet loop,
+//! [`checkpoints`] is the optional snapshot pass on its own thread,
+//! [`publish`] stages and publishes the directory, and [`summary`] prints the
+//! stderr report whose labels the Python harnesses parse.
 
 pub(crate) mod checkpoints;
 mod publish;
 mod summary;
-pub(crate) mod totals;
 mod writers;
 
 use std::fs;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::thread;
 use std::time::Instant;
 
 use vrf_container::{
-    ChunkIterator, ChunkType, decompress_replay_data_with_trailing,
     event_payload_seconds_matches_time, known_event_word_count, parse_event_chunk,
     parse_known_event_payload, parse_preamble,
 };
-#[cfg(test)]
-use vrf_container::{EventPayload, parse_event_payload};
-use vrf_decode::OverlayErrorReport;
 use vrf_export::{
-    ActorWriter, EventRecord, EventWriter, FieldRecord, FieldWriter, MovementRecord,
-    MovementWriter, NetGuidRecord, NetGuidWriter,
+    ActorWriter, EventRecord, EventWriter, FieldWriter, MovementWriter, NetGuidRecord,
+    NetGuidWriter, PartialRecord, PartialWriter,
 };
-use vrf_frame::iter_demo_frames;
-use vrf_net::pipeline::ReplicationReader;
 use vrf_schema::NetGuidCache;
 
 use crate::error::CliError;
 use crate::manifest::{self, ManifestQuality};
-use crate::sink::{ChannelState, ExportSink, RecordBuffers};
-use checkpoints::{CheckpointStats, ReplayContext};
+use crate::pass::{Chunk, Pass, Replay, for_each_chunk};
 use publish::OutputTransaction;
-use summary::RunTotals;
-use totals::SinkTotals;
+pub(crate) use summary::RunTotals;
 use writers::WriterThread;
 
-/// The structural payload for an Event group that declares `word_count` words,
-/// or `None` when the payload does not fit that layout.
-///
-/// The payload is `[u32 tag][N x u32 words][FString name][f32 seconds]` and is
-/// not self-describing: no count precedes the words. `N` was therefore assumed
-/// per group and the words copied from fixed offsets with nothing checking that
-/// the rest of the payload agreed. A build that changed `N` would not fail --
-/// `characterDeath` claims two words, and on a payload carrying one the second
-/// read lands exactly on the `FString`'s length prefix, which is a small
-/// positive integer and reads in the exported column as an entirely plausible
-/// killed NetGUID.
-///
-/// `N` is not readable forward, but it *is* checkable backward: the remaining
-/// three parts have known widths, so the assumed layout must consume the
-/// payload exactly. That is what this verifies. It is the same rule
-/// `vrf_decode::decode_field` applies to every leaf -- refuse to return a
-/// plausible wrong number when bits are left over -- applied to the container
-/// the leaves sit in.
-///
-/// A measured zero-word group is still checked: zero is an established arity,
-/// not the absence of a claim. Unknown groups never call this test helper and
-/// remain raw-only in the production path.
-#[cfg(test)]
-fn typed_event_payload(payload: &[u8], word_count: usize) -> Option<EventPayload> {
-    parse_event_payload(payload, word_count)
-}
+/// The six tables every export writes. With [`CHECKPOINT_TABLES`] and
+/// [`MANIFEST`], every name `run` creates: `publish` refuses a destination
+/// holding anything else, so a table missing here makes the next export to
+/// that directory refuse it.
+const MAIN_TABLES: [&str; 6] = [
+    "fields.parquet",
+    "movement.parquet",
+    "actors.parquet",
+    "net_guids.parquet",
+    "events.parquet",
+    "partials.parquet",
+];
+/// The tables written only when `--checkpoints` asks for them.
+const CHECKPOINT_TABLES: [&str; 7] = [
+    "checkpoint_fields.parquet",
+    "checkpoint_actors.parquet",
+    "checkpoint_net_guids.parquet",
+    "checkpoint_blocks.parquet",
+    "checkpoint_guid_entries.parquet",
+    "checkpoint_export_groups.parquet",
+    "checkpoint_export_fields.parquet",
+];
+/// Written after every table is complete.
+const MANIFEST: &str = "manifest.json";
 
 pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), CliError> {
     let start = Instant::now();
 
-    // -- Read file ---------------------------------------------------------
     eprintln!("reading {vrf_path}...");
     let data = fs::read(vrf_path)?;
     let file_size = data.len();
 
-    // -- Parse preamble ----------------------------------------------------
     let preamble = parse_preamble(&data)?;
-    let ctx = ReplayContext {
-        branch: &preamble.header.replay_version.branch,
-        flags: preamble.header.flags,
-        compressed: preamble.info.compressed,
-        encrypted: preamble.info.encrypted,
-    };
-
+    let replay = Replay::new(&preamble);
     eprintln!(
         "branch: {}, flags: 0x{:04X}, compressed: {}, duration: {} ms",
-        ctx.branch, ctx.flags, ctx.compressed, preamble.info.length_in_ms
+        replay.branch, replay.flags, replay.compressed, preamble.info.length_in_ms
     );
 
-    // -- Setup output ------------------------------------------------------
     let destination = PathBuf::from(out_dir);
     let output = OutputTransaction::begin(&destination)?;
     let out_path = output.path();
@@ -108,495 +83,243 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         Ok(BufWriter::new(fs::File::create(out_path.join(name))?))
     };
 
-    let mut field_writer = FieldWriter::new(create("fields.parquet")?)?;
-    let mut movement_writer = MovementWriter::new(create("movement.parquet")?)?;
     let mut actor_writer = ActorWriter::new(create("actors.parquet")?)?;
-    // Event chunks are a couple of hundred rows and are written inline for the
-    // same reason `actors` is: the encoding cost is far below a thread's worth.
+    // A couple of hundred rows, so inline like `actors`: far below a thread's
+    // worth of encoding.
     let mut event_writer = EventWriter::new(create("events.parquet")?)?;
-    let mut checkpoint_writer = if with_checkpoints {
-        Some(FieldWriter::new(create("checkpoint_fields.parquet")?)?)
-    } else {
-        None
-    };
+    let mut partial_writer = PartialWriter::new(create("partials.parquet")?)?;
+    let checkpoint_writers = with_checkpoints
+        .then(|| checkpoints::CheckpointWriters::new(create))
+        .transpose()?;
 
-    let mut fields = WriterThread::<FieldRecord>::spawn("fields", move |rx| {
-        for batch in rx {
-            field_writer.push_batch(batch)?;
-        }
-        field_writer.finish()
+    let mut fields =
+        WriterThread::spawn_table("fields", FieldWriter::new(create("fields.parquet")?)?);
+    let mut movement = WriterThread::spawn_table(
+        "movement",
+        MovementWriter::new(create("movement.parquet")?)?,
+    );
+
+    let mut pass = Pass::new(&replay)?;
+    let mut totals = RunTotals::default();
+
+    // The checkpoint pass shares only the chunk list with this one, so it runs
+    // beside it; a main-pass error waits for it and wins.
+    let (main, checkpoints) = thread::scope(|scope| {
+        let worker = checkpoint_writers
+            .map(|writers| scope.spawn(|| checkpoints::run(&data, &replay, writers)));
+        let main = for_each_chunk(&data, &replay, |chunk| {
+            match chunk {
+                Chunk::Event(payload) => write_event(payload, &mut event_writer, &mut totals)?,
+                Chunk::ReplayData(frames, unread) => {
+                    totals.replay_data_trailing_bytes += unread as u64;
+                    pass.walk(&frames, &mut totals.sink, |buffers| {
+                        fields.append(&mut buffers.fields)?;
+                        totals.movement_rows += buffers.movement.len() as u64;
+                        movement.append(&mut buffers.movement)?;
+                        actor_writer.push_batch(buffers.actors.drain(..))?;
+                        push_partials(
+                            &mut partial_writer,
+                            buffers.partials.drain(..),
+                            &mut totals.partial_rows,
+                            &mut totals.partial_bits,
+                        )
+                    })?;
+                    totals.chunks_processed += 1;
+                }
+                Chunk::Checkpoint(_) => {}
+            }
+            Ok(())
+        });
+        let checkpoints = worker.map(|worker| {
+            (worker.join())
+                .unwrap_or_else(|_| Err(CliError::Usage("checkpoint pass panicked".to_owned())))
+        });
+        (main, checkpoints.transpose())
     });
-    let mut movement = WriterThread::<MovementRecord>::spawn("movement", move |rx| {
-        for batch in rx {
-            movement_writer.push_batch(batch)?;
-        }
-        movement_writer.finish()
-    });
+    totals.unknown_chunks = main?;
+    let mut checkpoints = checkpoints?;
 
-    // -- Setup replication reader and schema cache --------------------------
-    let mut cache = NetGuidCache::new();
-    let mut repl_reader = ReplicationReader::new(ctx.branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
-
-    // -- Iterate chunks ----------------------------------------------------
-    let mut chunk_iter = ChunkIterator::new(&data, preamble.remaining_offset);
-    let mut chunks_processed = 0u32;
-    let mut total_packets: u32 = 0;
-    let mut channel_state = ChannelState::new();
-
-    // Reusable per-packet record buffers; see `RecordBuffers`.
-    let mut buffers = RecordBuffers::default();
-    let mut movement_rows: u64 = 0;
-    let mut event_rows: u64 = 0;
-    let mut event_trailing_bytes: u64 = 0;
-    let mut replay_data_trailing_bytes: u64 = 0;
-    let mut error_report = OverlayErrorReport::default();
-    // Every sink-derived counter, in one place. See `totals`.
-    let mut sink_totals = SinkTotals::default();
-    let mut event_layout_mismatches: u64 = 0;
-    let mut event_first_layout_mismatch: Option<String> = None;
-    let mut event_payloads_decoded: u64 = 0;
-    let mut event_payload_unknown_groups: u64 = 0;
-    let mut cp_stats = CheckpointStats::default();
-
-    while let Some(chunk) = chunk_iter.next_chunk()? {
-        // Sliced once for all three chunk kinds. Safe for the kinds this loop
-        // ignores too: `next_chunk` refuses a chunk whose declared size runs
-        // past the file, so the range is in bounds before it is returned.
-        let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
-
-        // Event chunks carry the server's own labelled timeline. They are
-        // uncompressed and independent of the replication pass, so they are
-        // read here and written straight out.
-        if chunk.chunk_type == ChunkType::Event {
-            let event = parse_event_chunk(payload)?;
-            event_trailing_bytes += event.trailing_bytes as u64;
-            // Structural payload fields for groups whose word count, tag and
-            // public enum-name FString are established. Payload layout:
-            // [u32 tag][N x u32 words][FString][f32]. The guarded parser also
-            // requires exact consumption; the final filter checks the inner
-            // seconds against Time1. A disagreement yields no overlay fields
-            // and is counted, never guessed at. `raw_payload` still keeps
-            // every byte either way.
-            let word_count = known_event_word_count(&event.group);
-            let parsed_payload = match word_count {
-                Some(count) => {
-                    let parsed =
-                        parse_known_event_payload(&event.group, event.payload).filter(|payload| {
-                            event_payload_seconds_matches_time(event.time1, payload.seconds)
-                        });
-                    if parsed.is_some() {
-                        event_payloads_decoded += 1;
-                    } else {
-                        event_layout_mismatches += 1;
-                        event_first_layout_mismatch.get_or_insert_with(|| {
-                            format!(
-                                "{} declared {count} word(s), public tag/name and millisecond time but its {}-byte payload does not fit that layout",
-                                event.group,
-                                event.payload.len()
-                            )
-                        });
-                    }
-                    parsed
-                }
-                None => {
-                    event_payload_unknown_groups += 1;
-                    None
-                }
-            };
-            let (word0, word1, payload_tag, payload_name, payload_seconds) = match parsed_payload {
-                Some(parsed) => (
-                    parsed.words.first().copied(),
-                    parsed.words.get(1).copied(),
-                    Some(parsed.tag),
-                    Some(parsed.name),
-                    Some(parsed.seconds),
-                ),
-                None => (None, None, None, None, None),
-            };
-            event_writer.push(EventRecord {
-                id: event.id,
-                group: event.group,
-                metadata: event.metadata,
-                time1: event.time1,
-                time2: event.time2,
-                payload_size: event.size_in_bytes,
-                raw_payload: event.payload.to_vec(),
-                word0,
-                word1,
-                payload_tag,
-                payload_name,
-                payload_seconds,
-            })?;
-            event_rows += 1;
-            continue;
-        }
-        if chunk.chunk_type == ChunkType::Checkpoint {
-            if let Some(writer) = checkpoint_writer.as_mut() {
-                checkpoints::process_chunk(
-                    payload,
-                    &ctx,
-                    writer,
-                    &mut cp_stats,
-                    &mut error_report,
-                )?;
-            }
-            continue;
-        }
-        if chunk.chunk_type != ChunkType::ReplayData {
-            continue;
-        }
-
-        // `_with_trailing` rather than the plain call: the outer chunk can be
-        // larger than the inner SizeInBytes, and the plain signature drops that
-        // excess with nothing to show for it. Counted, not rejected -- no replay
-        // has ever been measured carrying any, so failing on it would be
-        // guessing at a format we have not seen.
-        let (decompressed, trailing) =
-            decompress_replay_data_with_trailing(payload, ctx.compressed, ctx.encrypted)?;
-        replay_data_trailing_bytes += trailing as u64;
-
-        // Process each packet before the iterator advances to later ExportData.
-        // The callback cannot return a writer error through `FrameError`, so it
-        // records the first one and makes later callbacks no-ops until the
-        // frame walk finishes and the error can be returned here.
-        let mut packet_error = None;
-        iter_demo_frames(&decompressed, ctx.flags, &mut cache, |pkt, packet_cache| {
-            if packet_error.is_some() {
-                return;
-            }
-            let pkt_id = total_packets;
-            total_packets += 1;
-
-            // Scoped so the sink's borrow of `buffers` ends before they are
-            // drained. The buffers outlive the sink; that is the point.
-            {
-                let mut sink = ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
-                sink.time_ms = pkt.time_ms;
-                sink.packet_id = pkt_id;
-
-                repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
-
-                // The sink is dropped at the end of this scope, so a counter
-                // not read here is a counter that never existed. All of them
-                // go through one function; see `totals`.
-                sink_totals.absorb(&mut sink.stats, &mut error_report);
-            }
-
-            // Hand field and movement records to their writer threads.
-            let result = (|| -> Result<(), CliError> {
-                fields.append(&mut buffers.fields)?;
-                movement_rows += buffers.movement.len() as u64;
-                movement.append(&mut buffers.movement)?;
-                // Drain actor lifecycle records to the inline writer.
-                for record in buffers.actors.drain(..) {
-                    actor_writer.push(record)?;
-                }
-                Ok(())
-            })();
-            if let Err(error) = result {
-                packet_error = Some(error);
-            }
-        })?;
-        if let Some(error) = packet_error {
-            return Err(error);
-        }
-
-        chunks_processed += 1;
-
-        if chunks_processed % 100 == 0 {
-            eprintln!(
-                "  chunk {chunks_processed}: {total_packets} packets, {} groups",
-                cache.group_count()
-            );
-        }
-    }
-
-    // -- Finish writers ----------------------------------------------------
-    //
-    // The two offloaded writers are joined here, before the elapsed time is
-    // taken and before any file size is read, so both files are complete and
-    // both results are checked.
+    // Joined before the elapsed time is taken and any file size is read, so
+    // both files are complete and both results are checked.
     fields.finish()?;
     movement.finish()?;
+    pass.finish();
+    push_partials(
+        &mut partial_writer,
+        pass.buffers.partials.drain(..),
+        &mut totals.partial_rows,
+        &mut totals.partial_bits,
+    )?;
+    // Both passes' decode errors: the only place a checkpoint-only one surfaces.
+    let mut error_report = std::mem::take(&mut totals.sink.overlay.error_report);
+    // After every main-pass row: partials.parquet is ordered by pass, then
+    // stream position.
+    if let Some(cp) = checkpoints.as_mut() {
+        error_report.merge_from(&cp.stats.sink.overlay.error_report);
+        push_partials(
+            &mut partial_writer,
+            cp.partials.drain(..),
+            &mut cp.stats.partial_rows,
+            &mut cp.stats.partial_bits,
+        )?;
+    }
     actor_writer.finish()?;
     event_writer.finish()?;
-    if let Some(w) = checkpoint_writer.take() {
-        w.finish()?;
-    }
+    partial_writer.finish()?;
 
-    // -- Write the NetGUID registry ----------------------------------------
-    //
-    // Written after the replication pass because the cache accumulates over the
-    // whole replay: a GUID's outer may be declared in a later chunk than the
-    // one that first referenced it. Sorted so the file is byte-reproducible
-    // across runs (the cache is HashMap-backed and iterates in arbitrary order).
+    // After the pass: a GUID's outer may be declared in a later chunk than the
+    // one that first referenced it.
+    let net_guids = net_guid_rows(&pass.cache);
+    totals.net_guid_rows = net_guids.len();
     let mut net_guid_writer = NetGuidWriter::new(create("net_guids.parquet")?)?;
-    let mut guid_entries = cache.net_guid_entries();
-    guid_entries.sort_unstable_by_key(|e| e.net_guid);
-    let net_guid_rows = guid_entries.len();
-    for entry in guid_entries {
-        net_guid_writer.push(NetGuidRecord {
-            net_guid: entry.net_guid,
-            path: entry.path.to_owned(),
-            outer_net_guid: entry.outer_net_guid,
-        })?;
-    }
+    net_guid_writer.push_batch(net_guids)?;
     net_guid_writer.finish()?;
 
-    // Drain fragments that never got their final piece. Without this the
-    // accumulator is simply dropped and a partial bunch lost at EOF is
-    // indistinguishable from one still legitimately in flight -- the counters
-    // it feeds only exist if someone asks for them.
-    repl_reader.finish();
+    let net_stats = pass.reader.stats();
+    totals.export_groups = pass.cache.group_count();
+    totals.total_packets = pass.packets;
+    totals.frames = pass.frames;
+    totals.frame_skips = pass.frame_skips;
+    totals.non_finite_frame_times = pass.non_finite_frame_times;
+    totals.elapsed = start.elapsed();
 
-    let net_stats = repl_reader.stats();
-    let elapsed = start.elapsed();
-
-    // -- Write manifest ----------------------------------------------------
-    //
-    // Before the summary so the path the summary prints names a file that
-    // exists by the time it is read.
-    let staged_manifest_path = out_path.join("manifest.json");
-    // Drain per-PlayerState identity (Subject + SpawnedCharacter) captured
-    // during the walk into a sorted players list for the manifest.
-    let mut players: Vec<(u32, Option<String>, Option<u32>)> = channel_state
-        .players()
-        .iter()
+    // Before the summary, so the path it prints names a file that exists.
+    let staged_manifest_path = out_path.join(MANIFEST);
+    let mut players: Vec<_> = (pass.channels.players().iter())
         .filter(|(_, id)| id.subject.is_some())
-        .map(|(&g, id)| (g, id.subject.clone(), id.character_net_guid))
+        .map(|(&guid, id)| (guid, id))
         .collect();
-    players.sort_unstable_by_key(|(g, _, _)| *g);
+    players.sort_unstable_by_key(|(guid, _)| *guid);
     manifest::write_manifest(
         &staged_manifest_path,
         vrf_path,
         file_size,
         &preamble,
-        &cache,
-        net_stats,
-        total_packets,
-        elapsed,
+        &pass.cache,
         &players,
         &ManifestQuality {
-            chunks_processed,
-            export_groups: cache.group_count(),
-            movement_rows,
-            net_guid_rows,
-            event_rows,
-            event_trailing_bytes,
-            replay_data_trailing_bytes,
-            event_layout_mismatches,
-            event_first_layout_mismatch: event_first_layout_mismatch.as_deref(),
-            event_payloads_decoded,
-            event_payload_unknown_groups,
+            run: &totals,
             net: net_stats,
-            sink: &sink_totals,
             error_report: &error_report,
-            checkpoints: with_checkpoints.then_some(&cp_stats),
+            checkpoints: checkpoints.as_ref().map(|cp| &cp.stats),
         },
     )?;
 
-    // Checked against the directory `publish` is about to replace, not the
-    // one that exists once it returns: publication is a single atomic
-    // rename of the whole destination, so a table this run did not rewrite
-    // can only still be found here, before that swap happens. See
-    // `summary::stale_checkpoint_note`'s own doc for why checking afterward
-    // could never see it.
-    let stale_checkpoint_note = summary::stale_checkpoint_note(&destination, with_checkpoints);
+    // Before `publish`: see `summary::stale_checkpoint_note`.
+    totals.stale_checkpoint_note = summary::stale_checkpoint_note(&destination, with_checkpoints);
 
-    // No handle remains open in staging at this point. Replace the destination
-    // only after every table and the manifest are complete; a failed run before
-    // here drops the guard and removes staging without touching the prior run.
+    // Every table and the manifest are complete and closed. A run that failed
+    // before here dropped the guard, removing staging only.
     output.publish()?;
-    let manifest_path = destination.join("manifest.json");
+    let manifest_path = destination.join(MANIFEST);
 
     summary::print(
         &destination,
         net_stats,
-        &RunTotals {
-            chunks_processed,
-            total_packets,
-            export_groups: cache.group_count(),
-            movement_rows,
-            net_guid_rows,
-            event_rows,
-            event_trailing_bytes,
-            replay_data_trailing_bytes,
-            elapsed,
-            event_layout_mismatches,
-            event_first_layout_mismatch,
-            event_payloads_decoded,
-            event_payload_unknown_groups,
-            sink: sink_totals,
-            stale_checkpoint_note,
-        },
+        &totals,
         &error_report,
-        with_checkpoints.then_some(&cp_stats),
+        checkpoints.as_ref().map(|cp| &cp.stats),
         &manifest_path,
     );
 
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{SinkTotals, typed_event_payload};
-    use vrf_decode::OverlayErrorReport;
-
-    /// Every counter a packet's sink produced must survive the sink.
-    ///
-    /// `ExportSink` is rebuilt for each of a replay's ~530,000 packets, so a
-    /// counter the driver does not read is dropped 530,000 times and reads as a
-    /// permanent zero. `cnc_rpcs_emitted` was exactly that: the only evidence
-    /// the AbilitiesAndBuffs brute-force produced RPC structure at all, never
-    /// aggregated, so a build that stopped reaching that decoder would leave
-    /// "Decode errors: 0" and every other line on the summary untouched.
-    ///
-    /// This is one accumulation point shared by the ReplayData pass and the
-    /// checkpoint pass, so the same omission cannot be made twice.
-    #[test]
-    fn absorbing_a_packets_stats_keeps_every_counter() {
-        let mut report = OverlayErrorReport::default();
-        let mut totals = SinkTotals::default();
-
-        for _ in 0..2 {
-            let mut stats = crate::sink::ExportStats {
-                effect_blobs_decoded: 1,
-                struct_blobs_decoded: 2,
-                struct_blobs_failed: 3,
-                struct_blob_first_error: Some("blob boom".to_owned()),
-                multi_contents_items_emitted: 4,
-                movement_rpc_errors: 5,
-                movement_first_error: Some("movement boom".to_owned()),
-                truncated_rpcs: 6,
-                rpc_suffix_bits_dropped: 7,
-                cnc_rpcs_emitted: 8,
-                array_leaf_decode_errors: 22,
-                ..crate::sink::ExportStats::default()
-            };
-            stats.overlay.decoded_ok = 9;
-            stats.overlay.decoded_err = 10;
-            stats.overlay.raw_or_skip = 11;
-            stats.overlay.not_in_table = 12;
-            stats.overlay.no_field_name = 13;
-            stats.overlay.handle_conflicts_refused = 14;
-            stats.array.elements_decoded = 15;
-            stats.array.fields_emitted = 16;
-            stats.array.truncations = 17;
-            stats.array.errors = 18;
-            stats.array.unconsumed_nested_bits = 19;
-            stats.array.implicit_terminations = 20;
-            stats.array.unconsumed_root_bits = 21;
-            totals.absorb(&mut stats, &mut report);
+/// The server's own labelled timeline: uncompressed and independent of
+/// replication, so written straight out. Layout [u32 tag][N x u32
+/// words][FString][f32] for groups whose word count, tag and public name are
+/// established; the parse must consume it exactly and its seconds must match
+/// Time1. A mismatch is counted, never guessed at; `raw_payload` keeps every
+/// byte.
+fn write_event<W: Write + Send>(
+    payload: &[u8],
+    writer: &mut EventWriter<W>,
+    totals: &mut RunTotals,
+) -> Result<(), CliError> {
+    let event = parse_event_chunk(payload)?;
+    totals.event_trailing_bytes += event.trailing_bytes as u64;
+    let parsed_payload = match known_event_word_count(&event.group) {
+        Some(count) => {
+            let parsed = parse_known_event_payload(&event.group, event.payload)
+                .filter(|payload| event_payload_seconds_matches_time(event.time1, payload.seconds));
+            if parsed.is_some() {
+                totals.event_payloads_decoded += 1;
+            } else {
+                totals.event_layout_mismatches += 1;
+                totals.event_first_layout_mismatch.get_or_insert_with(|| {
+                    format!(
+                        "{} declared {count} word(s), public tag/name and millisecond time but its {}-byte payload does not fit that layout",
+                        event.group,
+                        event.payload.len()
+                    )
+                });
+            }
+            parsed
         }
-
-        assert_eq!(totals.effect_blobs_decoded, 2);
-        assert_eq!(totals.struct_blobs_decoded, 4);
-        assert_eq!(totals.struct_blobs_failed, 6);
-        assert_eq!(totals.multi_contents_items_emitted, 8);
-        assert_eq!(totals.movement_rpc_errors, 10);
-        assert_eq!(totals.truncated_rpcs, 12);
-        assert_eq!(totals.rpc_suffix_bits_dropped, 14);
-        assert_eq!(totals.cnc_rpcs_emitted, 16);
-        assert_eq!(totals.array_leaf_decode_errors, 44);
-        assert_eq!(totals.overlay.decoded_ok, 18);
-        assert_eq!(totals.overlay.decoded_err, 20);
-        assert_eq!(totals.overlay.raw_or_skip, 22);
-        assert_eq!(totals.overlay.not_in_table, 24);
-        assert_eq!(totals.overlay.no_field_name, 26);
-        assert_eq!(totals.overlay.handle_conflicts_refused, 28);
-        assert_eq!(totals.array.elements_decoded, 30);
-        assert_eq!(totals.array.fields_emitted, 32);
-        assert_eq!(totals.array.truncations, 34);
-        assert_eq!(totals.array.errors, 36);
-        assert_eq!(totals.array.unconsumed_nested_bits, 38);
-        assert_eq!(totals.array.implicit_terminations, 40);
-        assert_eq!(totals.array.unconsumed_root_bits, 42);
-        // First error wins, so a later packet cannot overwrite the one that
-        // names the build change.
-        assert_eq!(totals.struct_blob_first_error.as_deref(), Some("blob boom"));
-        assert_eq!(
-            totals.movement_first_error.as_deref(),
-            Some("movement boom")
-        );
-    }
-
-    /// Build an Event payload: `[u32 tag][words][FString][f32 seconds]`.
-    fn payload(tag: u32, words: &[u32], name: &str) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&tag.to_le_bytes());
-        for w in words {
-            out.extend_from_slice(&w.to_le_bytes());
+        None => {
+            totals.event_payload_unknown_groups += 1;
+            None
         }
-        // Unreal's FString length counts the null terminator.
-        let len = i32::try_from(name.len() + 1).expect("test name fits");
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(name.as_bytes());
-        out.push(0);
-        out.extend_from_slice(&1.5f32.to_le_bytes());
-        out
-    }
+    };
+    let (word0, word1, payload_tag, payload_name, payload_seconds) = match parsed_payload {
+        Some(parsed) => (
+            parsed.words.first().copied(),
+            parsed.words.get(1).copied(),
+            Some(parsed.tag),
+            Some(parsed.name),
+            Some(parsed.seconds),
+        ),
+        None => (None, None, None, None, None),
+    };
+    writer.push(EventRecord {
+        id: event.id,
+        group: event.group,
+        metadata: event.metadata,
+        time1: event.time1,
+        time2: event.time2,
+        payload_size: event.size_in_bytes,
+        raw_payload: event.payload.to_vec(),
+        word0,
+        word1,
+        payload_tag,
+        payload_name,
+        payload_seconds,
+    })?;
+    totals.event_rows += 1;
+    Ok(())
+}
 
-    /// A payload that matches the assumed word count yields its words.
-    #[test]
-    fn a_payload_matching_the_assumed_layout_yields_its_words() {
-        let p = payload(
-            3,
-            &[0x1111_1111, 0x2222_2222],
-            "EReplayEventGroup::CharacterDeath",
-        );
-        let parsed = typed_event_payload(&p, 2).expect("two-word layout");
-        assert_eq!(parsed.tag, 3);
-        assert_eq!(parsed.words, [0x1111_1111, 0x2222_2222]);
-        assert_eq!(parsed.name, "EReplayEventGroup::CharacterDeath");
-        assert_eq!(parsed.seconds, 1.5);
-        let p1 = payload(3, &[0x3333_3333], "EReplayEventGroup::RoundStart");
-        assert_eq!(
-            typed_event_payload(&p1, 1).map(|value| value.words),
-            Some(vec![0x3333_3333])
-        );
-    }
+/// Write `records`, counting each into `rows` and `bits` as it reaches the
+/// writer. The checkpoint pass labels its own rows; the rest are the main
+/// pass's.
+fn push_partials<W: Write + Send>(
+    writer: &mut PartialWriter<W>,
+    records: impl IntoIterator<Item = PartialRecord>,
+    rows: &mut u64,
+    bits: &mut u64,
+) -> Result<(), CliError> {
+    writer.push_batch(records.into_iter().map(|mut record| {
+        *rows += 1;
+        *bits += record.bit_count;
+        if record.checkpoint_id.is_none() {
+            record.source = "main";
+        }
+        record
+    }))?;
+    Ok(())
+}
 
-    /// A build that changes the word count must not export a plausible NetGUID
-    /// read out of the following `FString`.
-    ///
-    /// The words were copied from fixed offsets with nothing checking that the
-    /// rest of the payload agreed. `characterDeath` claims two words; a payload
-    /// carrying one puts the FString's length prefix exactly where `word1` is
-    /// read, and a length prefix is a small positive integer -- indistinguishable
-    /// from a NetGUID in the exported column. No counter moved and no error was
-    /// raised, because nothing had asked whether the layout still held.
-    #[test]
-    fn a_payload_that_does_not_fit_the_assumed_word_count_yields_nothing() {
-        // One real word, but `characterDeath`'s assumed count is two.
-        let p = payload(3, &[0x1111_1111], "EReplayEventGroup::CharacterDeath");
-        assert_eq!(
-            typed_event_payload(&p, 2),
-            None,
-            "a payload one word short must refuse to name word1"
-        );
-        // ...and the reverse: three words where two were assumed.
-        let p3 = payload(3, &[1, 2, 3], "EReplayEventGroup::CharacterDeath");
-        assert_eq!(typed_event_payload(&p3, 2), None);
-    }
-
-    /// A measured zero-word group is still validated through its tag, FString
-    /// and trailing f32. Unknown groups never call this helper.
-    #[test]
-    fn a_measured_zero_word_group_must_still_fit_the_structural_tail() {
-        let p = payload(4, &[], "EReplayEventGroup::SpikePlanted");
-        let parsed = typed_event_payload(&p, 0).expect("zero-word layout");
-        assert_eq!(parsed.tag, 4);
-        assert!(parsed.words.is_empty());
-        assert_eq!(parsed.name, "EReplayEventGroup::SpikePlanted");
-        assert_eq!(parsed.seconds, 1.5);
-        assert_eq!(typed_event_payload(&[0xAB; 3], 0), None);
-    }
-
-    /// A truncated payload cannot be verified, so it yields nothing rather than
-    /// whatever `get()` happens to return.
-    #[test]
-    fn a_truncated_payload_yields_nothing() {
-        assert_eq!(typed_event_payload(&[0u8; 6], 1), None);
-    }
+/// The cache's GUID table as rows, sorted: the cache is a HashMap and the file
+/// must be byte-reproducible.
+fn net_guid_rows(cache: &NetGuidCache) -> Vec<NetGuidRecord> {
+    let mut entries = cache.net_guid_entries();
+    entries.sort_unstable_by_key(|entry| entry.net_guid);
+    entries
+        .into_iter()
+        .map(|entry| NetGuidRecord {
+            net_guid: entry.net_guid,
+            path: entry.path.to_owned(),
+            outer_net_guid: entry.outer_net_guid,
+        })
+        .collect()
 }

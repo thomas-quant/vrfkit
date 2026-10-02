@@ -1,54 +1,22 @@
-//! Net field export group and individual field descriptors.
-//!
-//! A [`NetFieldExportGroup`] is one path in the game's object hierarchy (e.g.
-//! `/Game/Abilities/GrenadeExplodeIndicator.GrenadeExplodeIndicator_C:MulticastTriggerExplodeIndicator`)
-//! and contains a sparse vector of [`NetFieldExport`] entries keyed by numeric
-//! handle.
-//!
-//! These are **not** hard-coded -- the replay stream declares them at runtime,
-//! and handles may shift between game builds.
+//! Net field export groups: one object path each, with a sparse table of
+//! [`NetFieldExport`] descriptors keyed by handle.
 
-/// Apply an `FName`'s instance number to its string, Unreal's way.
-///
-/// An `FName` is a (string, number) pair and the number is stored as **the
-/// displayed suffix plus one**: 0 renders the bare name, and `N != 0` renders
-/// `Name_{N-1}`. Both schema readers used to read the number into `let _number`
-/// and drop it, so two handles whose base string matched arrived under one
-/// name and the manifest's handle-to-name mapping could not tell them apart --
-/// with nothing reporting the collision.
-///
-/// A negative number cannot come off a well-formed wire and has no display
-/// form, so it is appended as it is rather than wrapped into a plausible
-/// positive suffix.
-///
-/// Shared by [`crate::read_net_field_exports`]'s reader and the checkpoint
-/// one, which are deliberately separate functions (their leading bytes mean
-/// opposite things) but must render a name identically. `vrf-decode`'s
-/// `scalar::render_fname` is the same function over the same rule, so a name
-/// means the same thing whichever layer produced it; the two crates share no
-/// dependency edge, which is why it is written twice rather than imported.
+/// An `FName`'s instance number is its displayed suffix plus one: 0 renders
+/// the bare name, `N` renders `Name_{N-1}`. A negative number has no display
+/// form and is appended as is, never wrapped into a plausible suffix
+/// (`vrf-decode`'s reader rejects one; the schema must still name the field).
 pub(crate) fn render_fname(name: String, number: i32) -> String {
     match number {
         0 => name,
-        // `wrapping_sub` here would turn `i32::MIN` into `i32::MAX` -- exactly
-        // the "plausible positive suffix" the doc above says this must not
-        // produce for a value with no display form. A plain subtraction would
-        // panic in a debug build over the same input, so the positive branch
-        // still needs a variant that cannot; only the negative one is exempt.
         n if n > 0 => format!("{name}_{}", n - 1),
         n => format!("{name}_{n}"),
     }
 }
 
-/// A single replicated-field descriptor within a group.
-///
-/// The `handle` is the key used in content blocks to identify which field is
-/// being replicated. The `name` is purely informational for the parser (used to
-/// route the payload to the correct decoder).
+/// One replicated-field descriptor within a group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetFieldExport {
-    /// Numeric handle assigned by the server. Content blocks reference this
-    /// number; the parser looks it up here to learn the field's name.
+    /// The key content blocks name this field by.
     pub handle: u32,
     /// Checksum the engine uses to detect schema drift between client and server.
     pub compatible_checksum: u32,
@@ -56,23 +24,16 @@ pub struct NetFieldExport {
     pub name: String,
 }
 
-/// A group of field exports sharing a common object path.
-///
-/// The engine sends groups incrementally: the first time a path is seen it
-/// carries the path string and declares the array length; subsequent appearances
-/// may re-use the `path_name_index` and only add or overwrite individual fields.
-///
-/// Fields are stored in a `Vec` indexed directly by handle for O(1) access.
-/// Slots that have not yet been populated are `None`.
+/// Field exports sharing an object path. The first appearance carries the path
+/// and slot count; later frames reuse `path_name_index` to add or overwrite
+/// fields, and a re-export can grow the group.
 #[derive(Debug, Clone)]
 pub struct NetFieldExportGroup {
-    /// The full path identifying this group in the Unreal object hierarchy.
+    /// The group's full object path.
     pub path: String,
-    /// Numeric index used on subsequent frames to reference this group without
-    /// re-transmitting the path string.
+    /// The index later frames use instead of the path string.
     pub path_name_index: u32,
-    /// Sparse field table. Index = handle, value = export descriptor.
-    /// The length equals the declared `num_exports` (may grow on re-export).
+    /// Indexed by handle; the length is the declared slot count.
     pub fields: Vec<Option<NetFieldExport>>,
 }
 
@@ -84,27 +45,6 @@ impl NetFieldExportGroup {
             path_name_index,
             fields: vec![None; capacity as usize],
         }
-    }
-
-    /// Create a group while reporting allocation failure to an untrusted-wire
-    /// caller instead of relying on infallible `vec!` growth.
-    pub(crate) fn try_new(
-        path: String,
-        path_name_index: u32,
-        capacity: u32,
-    ) -> crate::error::Result<Self> {
-        let capacity_usize = usize::try_from(capacity)
-            .map_err(|_| crate::error::SchemaError::FieldAllocationFailed { count: capacity })?;
-        let mut fields = Vec::new();
-        fields
-            .try_reserve_exact(capacity_usize)
-            .map_err(|_| crate::error::SchemaError::FieldAllocationFailed { count: capacity })?;
-        fields.resize_with(capacity_usize, || None);
-        Ok(Self {
-            path,
-            path_name_index,
-            fields,
-        })
     }
 
     /// Number of declared field slots (including unfilled ones).
@@ -119,18 +59,14 @@ impl NetFieldExportGroup {
         self.fields.is_empty()
     }
 
-    /// Look up a field by its numeric handle. Returns `None` if the handle is
-    /// out of range or the slot is unpopulated.
+    /// The field at `handle`; `None` if out of range or unpopulated.
     #[must_use]
     pub fn get_field(&self, handle: u32) -> Option<&NetFieldExport> {
         self.fields.get(handle as usize)?.as_ref()
     }
 
-    /// Insert or overwrite a field at the given handle.
-    ///
-    /// Returns `true` if the handle was within range and the write succeeded.
-    /// Returns `false` (without panicking) if the handle exceeds the declared
-    /// group length -- the C# reference simply logs a warning and skips.
+    /// Insert or overwrite the field at its handle. An out-of-range handle
+    /// returns `false`; the caller counts it.
     pub fn set_field(&mut self, field: NetFieldExport) -> bool {
         let idx = field.handle as usize;
         if idx >= self.fields.len() {
@@ -140,16 +76,13 @@ impl NetFieldExportGroup {
         true
     }
 
-    /// Iterate all populated (non-`None`) fields in handle order.
-    ///
-    /// Useful for manifest serialization where only declared fields are relevant.
+    /// Populated fields, in handle order.
     pub fn populated_fields(&self) -> impl Iterator<Item = &NetFieldExport> {
         self.fields.iter().filter_map(|slot| slot.as_ref())
     }
 
-    /// Merge another group's fields into this one, growing the field vector if
-    /// the incoming group is larger. Existing non-`None` fields in `other`
-    /// overwrite those in `self`.
+    /// Merge `other`'s populated fields over this group's, growing it to
+    /// `other`'s length if that is larger.
     pub fn merge_from(&mut self, other: &NetFieldExportGroup) {
         if other.fields.len() > self.fields.len() {
             self.fields.resize(other.fields.len(), None);
@@ -173,10 +106,8 @@ mod tests {
         assert_eq!(render_fname("Foo".into(), 3), "Foo_2");
     }
 
-    /// A negative number has no display form; it must render distinguishably
-    /// wrong, not wrap into a value that reads as a normal instance suffix.
-    /// `i32::MIN.wrapping_sub(1)` is `i32::MAX` -- exactly such a value -- so
-    /// this is the case that would have caught the bug directly.
+    /// Rendered as-is, not wrapped: `i32::MIN.wrapping_sub(1)` is `i32::MAX`,
+    /// which reads as a normal suffix.
     #[test]
     fn render_fname_negative_is_not_wrapped_into_a_plausible_suffix() {
         assert_eq!(render_fname("Foo".into(), -1), "Foo_-1");

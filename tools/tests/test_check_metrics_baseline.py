@@ -1,27 +1,21 @@
-"""Guards for the metrics guard.
-
-check_metrics_baseline.py exists because framing counters cannot see a decoder
-that stops producing values. Its invariants are the part that carries that
-weight -- they need no baseline and survive legitimate changes -- so they are
-the part that must not rot.
-
-The headline case uses the REAL shape of the section-26 break, measured on the
-13.02 fixture before commit bcc7d70: ClientRoundStart RPCs said 21 rounds while
-BombGameState RoundResults produced none, so team_score was empty.
+"""Guards for the metrics guard, whose baseline-free invariants carry its
+weight. The headline case is the measured shape of the 13.02 break:
+ClientRoundStart RPCs said 21 rounds while BombGameState RoundResults produced
+none, so team_score was empty.
 """
 import contextlib
 import copy
-import io
 import json
 import os
+import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_metrics_baseline as guard  # noqa: E402
+from support import TempDirTestCase, run_cli
+import check_metrics_baseline as guard
 
 
 # A healthy 13.02 fixture run, as pinned.
@@ -51,8 +45,8 @@ HEALTHY = {
     "economy_rounds": 21,
 }
 
-# What the SAME replay produced before bcc7d70: RoundResults decoded nothing.
-SECTION_26_BREAK = dict(
+# What the SAME replay produced while RoundResults decoded nothing.
+ROUND_RESULTS_BREAK = dict(
     HEALTHY, rounds_objective=0, team_score={}, economy_rounds=0
 )
 
@@ -61,23 +55,17 @@ class InvariantTests(unittest.TestCase):
     def test_a_healthy_run_violates_nothing(self):
         self.assertEqual(guard.invariants(HEALTHY), [])
 
-    def test_the_section_26_break_is_caught(self):
-        """The whole reason this tool exists.
+    def test_the_13_02_round_results_break_is_caught(self):
+        """R1 (no rounds at all) and R2 (the two round sources disagree) each
+        catch it, so neither can rot silently.
 
-        R1 (no rounds at all) and R2 (the two round sources disagree) each
-        catch it independently, so neither can rot silently and leave the tool
-        green.
-
-        R3 deliberately does NOT fire here, and that is worth stating so nobody
-        "fixes" it later: an empty team_score sums to 0, and rounds_objective
-        is also 0, so the two are internally consistent. R3's job is to catch a
-        round with no recorded winner WITHIN a working RoundResults stream, not
-        to catch the stream being absent -- that is R1 and R2's job. Rewiring
-        R3 to compare against the RPC count would make it a duplicate of R2 and
-        would risk a false positive on a replay whose recording stops
-        mid-round.
+        R3 deliberately does NOT fire: an empty team_score sums to 0, as
+        rounds_objective is 0. R3 catches a round with no recorded winner
+        within a working RoundResults stream; an absent stream is R1 and R2's
+        job. Rewiring R3 to the RPC count would duplicate R2 and risk a false
+        positive on a recording that stops mid-round.
         """
-        bad = guard.invariants(SECTION_26_BREAK)
+        bad = guard.invariants(ROUND_RESULTS_BREAK)
         self.assertTrue(bad, "the 13.02 regression must not pass")
         codes = " ".join(bad)
         for code in ("R1", "R2"):
@@ -105,14 +93,8 @@ class InvariantTests(unittest.TestCase):
         self.assertTrue(any("R4" in b for b in bad), bad)
 
     def test_kills_need_not_equal_deaths(self):
-        """Resurrection breaks that equality on CORRECT data (section 34).
-
-        A resurrected player who dies again in the same round gets two `bDied`
-        reports, so deaths counts both, while kills counts DidKill per
-        (round, subject) and collapses them. Measured: gap 0 on the three
-        Swiftplay replays with no resurrections, exactly 1 on each of the two
-        that had one.
-        """
+        """Resurrection breaks that equality on correct data; the measurement
+        is in check_metrics_baseline's module docstring."""
         self.assertEqual(guard.invariants(dict(HEALTHY, kills=150, deaths=151)), [])
 
     def test_a_zero_kill_fixture_is_not_a_violation(self):
@@ -144,77 +126,44 @@ class DriftTests(unittest.TestCase):
 
 
 class UpdateScopeTests(unittest.TestCase):
-    """`--update --only X` used to rewrite the whole-build baseline with X alone.
-
-    The module docstring makes the one-file-covering-every-build design a
-    guarantee: "a build disappearing from the set is itself a failure. Per-file
-    baselines cannot see that". Re-pinning after looking at a single build
-    deleted the other four from the file, so the very next full run reported
-    them as new rather than as missing, and the guarantee was gone.
-    """
+    """A scoped `--update --only X` keeps every other build pinned; only a
+    full run replaces the set (see `merged_metrics`)."""
 
     STORED = {"12.10": {"kills": 1}, "13.02": {"kills": 2}}
 
-    def test_a_scoped_update_keeps_the_builds_it_did_not_look_at(self):
+    def test_a_scoped_update_replaces_only_the_build_it_looked_at(self):
         merged = guard.merged_metrics(self.STORED, {"13.02": {"kills": 9}},
                                       only=["13.02"])
-        self.assertEqual(sorted(merged), ["12.10", "13.02"])
-        self.assertEqual(merged["12.10"], {"kills": 1})
-
-    def test_a_scoped_update_replaces_the_build_it_did_look_at(self):
-        merged = guard.merged_metrics(self.STORED, {"13.02": {"kills": 9}},
-                                      only=["13.02"])
-        self.assertEqual(merged["13.02"], {"kills": 9})
+        self.assertEqual(merged, {"12.10": {"kills": 1}, "13.02": {"kills": 9}})
 
     def test_an_unscoped_update_replaces_the_whole_set(self):
-        """A full run is the only thing allowed to retire a build.
-
-        Merging there would keep a build pinned forever after it left REPLAYS,
-        and every later run would then fail with "MISSING from this run".
-        """
+        """A full run alone may retire a build: merging would keep one pinned
+        after it left REPLAYS and fail every later run."""
         merged = guard.merged_metrics(self.STORED, {"13.02": {"kills": 9}},
                                       only=None)
         self.assertEqual(sorted(merged), ["13.02"])
 
 
 class WiringTests(unittest.TestCase):
-    def test_pipeline_uses_separate_export_and_bundle_trees(self):
-        self.assertTrue(hasattr(guard, "pipeline_paths"))
-        export_dir, bundle_dir, metrics_path = guard.pipeline_paths(Path("scratch"))
-        self.assertEqual(export_dir, Path("scratch/export"))
-        self.assertEqual(bundle_dir, Path("scratch/bundle"))
-        self.assertEqual(metrics_path, Path("scratch/metrics.json"))
-
-    def test_every_build_has_a_replay_path(self):
-        self.assertEqual(sorted(guard.REPLAYS),
-                         ["12.10", "12.11", "13.00", "13.01", "13.02"])
+    def test_a_stage_that_fails_or_times_out_is_a_controlled_stage_error(self):
+        for effect, stage, why in (([(0, ""), (3, "a\nboom")], "bundle", "rc=3: a | boom"),
+                                   (subprocess.TimeoutExpired("x", 1), "export",
+                                    "timeout after 1800 seconds")):
+            with self.subTest(why=why), mock.patch.object(guard.sc, "run", side_effect=effect):
+                got = guard.run_pipeline(Path("vrfkit"), Path("m.vrf"), Path("e"), Path("b"))
+            self.assertEqual(got, (None, stage, why))
 
     def test_no_build_points_at_the_directory_the_game_rotates(self):
-        """Saved\\Demos is owned by VALORANT and lost four pinned replays once."""
+        """Saved\\Demos is VALORANT's own, and the game rotates it."""
         for build, path in guard.REPLAYS.items():
             self.assertNotIn("Saved\\Demos", path, f"{build} points at Saved\\Demos")
 
-    def test_extract_and_invariants_agree_on_their_keys(self):
-        """Every field the invariants read must be one extract() produces."""
-        produced = guard.extract(RAW_METRICS)
-        for key in ("rounds_rpc", "rounds_objective", "team_score", "players",
-                    "kills", "damage_dealt"):
-            self.assertIn(key, produced)
-        # invariants() indexes with `[...]`, never `.get(..., default)`, so a
-        # key it reads that extract() does not produce raises KeyError here
-        # rather than passing silently.
-        guard.invariants(produced)
 
-
-#: A raw `compute_metrics.py` output, shaped exactly like the real valplay
-#: JSON `extract()` reads -- nested dicts, `per_player` maps, not the already
-#: flattened `HEALTHY` fixture above. `HEALTHY` pins what the invariants see;
-#: this pins the seam one layer earlier, between valplay's schema and this
-#: tool's parsing of it. That seam had no coverage: a renamed or reshaped key
-#: on the valplay side raises a loud `KeyError` today (by construction --
-#: `extract()` indexes with `[...]`, never `.get(..., default)`), but nothing
-#: proved the *mapping itself* -- which flattened key reads which nested path,
-#: and which fields get summed versus counted -- was still right.
+#: A raw `compute_metrics.py` output shaped like the valplay JSON `extract()`
+#: reads (nested dicts, `per_player` maps), pinning the mapping into the
+#: flattened keys `HEALTHY` starts from. `extract()` indexes every nested path
+#: with `[...]`, so a renamed valplay section or key raises KeyError, and
+#: `_sum` refuses a per-player counter a player lacks or that is not a count.
 RAW_METRICS = {
     "combat": {
         "per_player": {
@@ -246,12 +195,8 @@ RAW_METRICS = {
 
 
 class ExtractShapeTests(unittest.TestCase):
-    """`extract()` is the only code that reads valplay's real JSON shape.
-    Nothing else in this suite exercises it against a shape that looks like
-    what `compute_metrics.py` actually emits -- every other test starts from
-    the already-flattened `HEALTHY` dict, which proves the invariants but
-    never proves the mapping into them.
-    """
+    """`extract()`, the only code that reads valplay's real JSON shape, against
+    one; every other test starts from the flattened `HEALTHY` dict."""
 
     def test_scalar_fields_are_read_from_their_nested_path(self):
         got = guard.extract(RAW_METRICS)
@@ -292,9 +237,26 @@ class ExtractShapeTests(unittest.TestCase):
         self.assertEqual(got["shots"], 42)  # 30 + 12
         self.assertNotEqual(got["shots"], got["distinct_weapons"])
 
+    def test_a_renamed_per_player_counter_is_an_error_not_a_zero(self):
+        """A missing key, or a value that is not a count, must fail, never
+        read as a plausible 0; a present 0 stays 0 (p2's assists above)."""
+        for section, player, field in (("combat", "p2", "headshots"),
+                                       ("tactical", "p1", "trade_kills"),
+                                       ("kast", "p2", "kast_rounds")):
+            for broken in ("renamed", None, "3"):
+                with self.subTest(field=field, broken=broken):
+                    raw = copy.deepcopy(RAW_METRICS)
+                    stats = raw[section]["per_player"][player]
+                    if broken == "renamed":
+                        stats[field + "_renamed"] = stats.pop(field)
+                    else:
+                        stats[field] = broken
+                    with self.assertRaisesRegex(ValueError, field):
+                        guard.extract(raw)
+
     def test_a_player_with_no_combat_entry_does_not_crash_the_sum(self):
-        """`_sum` reads `.get(field) or 0` per player -- a player present in
-        `players` but absent from `combat.per_player` (never fired a shot,
+        """`_sum` walks `combat.per_player`, not `players` -- a player present
+        in `players` but absent from `combat.per_player` (never fired a shot,
         never took damage) must not raise, and must not count."""
         raw = copy.deepcopy(RAW_METRICS)
         raw["players"].append("p3")
@@ -304,16 +266,10 @@ class ExtractShapeTests(unittest.TestCase):
         self.assertEqual(got["kills"], 7)            # unchanged
 
 
-#: Stand-ins for the three pipeline stages `run_one` shells out to --
-#: `vrfkit export`, `to_valplay_bundle.py`, and valplay's `compute_metrics.py`.
-#: The first is invoked positionally (`[str(exe), "export", ...]`), so under
-#: `sys.executable` a file literally named `export` in the process's cwd
-#: stands in for it, exactly as the other two corpus scripts' fake executables
-#: do. The other two are invoked by explicit path, so ordinary `.py` files
-#: patched onto `guard.BUNDLE_TOOL` / `guard.COMPUTE_METRICS` stand in for
-#: them. The fake `compute_metrics.py` does not compute anything -- it copies
-#: whatever this test staged as the desired metrics.json, so one pair of fake
-#: scripts can play every scenario below by changing what gets staged.
+#: Stand-ins for the three stages `run_one` shells out to: a file named
+#: `export` run under `sys.executable` (see test_validate_corpus's
+#: FAKE_VALIDATE_SCRIPT), and `.py` files patched onto `guard.BUNDLE_TOOL` /
+#: `guard.COMPUTE_METRICS`.
 FAKE_EXPORT_SCRIPT = '''\
 import sys
 from pathlib import Path
@@ -326,15 +282,14 @@ FAKE_BUNDLE_SCRIPT = '''\
 import sys
 from pathlib import Path
 out = Path(sys.argv[sys.argv.index("-o") + 1])
+if out.resolve() == Path(sys.argv[1]).resolve():
+    raise SystemExit("the bundle would overwrite its own input")
 out.mkdir(parents=True, exist_ok=True)
 print("bundle ok")
 '''
 
-#: Reads the desired metrics.json from the path the test staged in an
-#: environment variable (`subprocess.run` inherits the parent's environment
-#: by default, so this reaches the child) and writes it to wherever `-o`
-#: says -- so it stands in for compute_metrics.py without knowing anything
-#: about the bundle format `-o`'s sibling argument actually names.
+#: Copies the metrics.json the test staged (its path in an inherited
+#: environment variable) to `-o`, so one fake plays every scenario.
 FAKE_METRICS_SCRIPT = '''\
 import os
 import shutil
@@ -347,18 +302,12 @@ print("metrics ok")
 '''
 
 
-class MainWiringTests(unittest.TestCase):
-    """`InvariantTests` and `DriftTests` above prove the pure functions; they
-    say nothing about whether `main()` calls them and acts on the result
-    before deciding an exit code -- the same wiring gap the other two corpus
-    scripts' `MainWiringTests` closes, for the one check this project built
-    specifically because the framing layer cannot see a semantic break.
-    """
+class MainWiringTests(TempDirTestCase):
+    """`main()` must call the pure functions above and act on them before
+    deciding an exit code."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.root = self.tmp()
         (self.root / "export").write_text(FAKE_EXPORT_SCRIPT, encoding="utf-8")
         self.bundle_tool = self.root / "fake_bundle.py"
         self.bundle_tool.write_text(FAKE_BUNDLE_SCRIPT, encoding="utf-8")
@@ -368,28 +317,10 @@ class MainWiringTests(unittest.TestCase):
         self.replay = self.root / "match.vrf"
         self.replay.write_bytes(b"not a real replay")
 
-        self._orig_bundle_tool = guard.BUNDLE_TOOL
-        self._orig_compute_metrics = guard.COMPUTE_METRICS
-        self._orig_replays = guard.REPLAYS
-        guard.BUNDLE_TOOL = self.bundle_tool
-        guard.COMPUTE_METRICS = self.compute_metrics
-        guard.REPLAYS = {"test": str(self.replay)}
-        self.addCleanup(self._restore_module_state)
-
-        self._previous_cwd = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, self._previous_cwd)
-
-        self._argv = sys.argv
-        self.addCleanup(self._restore_argv)
-
-    def _restore_module_state(self):
-        guard.BUNDLE_TOOL = self._orig_bundle_tool
-        guard.COMPUTE_METRICS = self._orig_compute_metrics
-        guard.REPLAYS = self._orig_replays
-
-    def _restore_argv(self):
-        sys.argv = self._argv
+        self.enterContext(mock.patch.multiple(guard, BUNDLE_TOOL=self.bundle_tool,
+                                              COMPUTE_METRICS=self.compute_metrics,
+                                              REPLAYS={"test": str(self.replay)}))
+        self.enterContext(contextlib.chdir(self.root))
 
     def stage_metrics(self, metrics: dict) -> None:
         staged = self.root / "desired_metrics.json"
@@ -398,13 +329,9 @@ class MainWiringTests(unittest.TestCase):
         self.addCleanup(os.environ.pop, "VRFKIT_TEST_DESIRED_METRICS", None)
 
     def run_main(self, extra_args=()):
-        argv = ["check_metrics_baseline.py", "--exe", sys.executable,
-                "--only", "test", "--jobs", "1", *extra_args]
-        sys.argv = argv
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            code = guard.main()
-        return code, out.getvalue()
+        code, out, _ = run_cli(guard.main, "--exe", sys.executable, "--only", "test", "--jobs", "1",
+                               *extra_args, prog="check_metrics_baseline.py", merged=True)
+        return code, out
 
     def test_a_healthy_run_matching_the_baseline_exits_zero(self):
         self.stage_metrics(RAW_METRICS)
@@ -451,6 +378,23 @@ class MainWiringTests(unittest.TestCase):
         self.assertIn("drifted", output)
         self.assertIn("kills", output)
 
+    def test_a_renamed_per_player_counter_fails_the_pipeline(self):
+        """Reported like any other failed stage, with the counter named,
+        not read as 0 and compared with the baseline."""
+        renamed = copy.deepcopy(RAW_METRICS)
+        renamed["combat"]["per_player"]["p1"]["kill_count"] = (
+            renamed["combat"]["per_player"]["p1"].pop("kills"))
+        self.stage_metrics(renamed)
+        baseline = self.root / "baseline.json"
+        baseline.write_text(json.dumps({"metrics": {"test": guard.extract(RAW_METRICS)}}),
+                            encoding="utf-8")
+
+        code, output = self.run_main(["--baseline", str(baseline)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("PIPELINE FAILED", output)
+        self.assertIn("'kills'", output)
+
     def test_a_missing_baseline_is_a_controlled_failure(self):
         self.stage_metrics(RAW_METRICS)
         baseline = self.root / "does-not-exist.json"
@@ -470,7 +414,3 @@ class MainWiringTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("did not complete the pipeline", output)
         self.assertIn("replay not found", output)
-
-
-if __name__ == "__main__":
-    unittest.main()

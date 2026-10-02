@@ -1,59 +1,28 @@
-//! Scalar field readers: everything Unreal writes as a single primitive.
-//!
-//! Each function consumes exactly the field's payload and returns the value in
-//! the slot the overlay writes it to. `decode_field` is what checks that the
-//! payload was fully consumed, so nothing here needs to.
+//! The scalar readers with more to them than one `BitReader` call; the rest
+//! are inline in `dispatch_decode`. `decode_field` checks that the payload was
+//! fully consumed, so none of these needs to.
 
-use vrf_bitio::BitReader;
+use core::fmt::Write as _;
+
+use vrf_bitio::{BitError, BitReader};
 
 use super::{DecodeError, DecodedValue};
 
-pub(super) fn decode_bool(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::Bool(r.read_bit()?))
-}
-
-/// Decode a byte-width enum or `uint8` property.
-///
-/// The width is taken from what the field payload actually carries rather than
-/// fixed at 8 bits. Unreal writes only the significant bits for byte-sized
-/// properties nested inside replicated arrays, so a 5-bit payload is normal and a
-/// hard 8-bit read fails on it. The reference implementation does the same thing:
-///
-/// ```csharp
-/// private static byte ReadByte(FBitArchive archive) =>
-///     checked((byte)archive.ReadBitsToUInt64(checked((int)archive.BitsRemaining)));
-/// ```
-///
-/// Concretely this is what makes `CombatReport` `AssistType` (5 bits) decode; a
-/// fixed-width read left all 364 of its rows untyped.
-///
-/// Payloads wider than 8 bits are rejected rather than truncated: that means the
-/// field is not really byte-sized and silently keeping the low byte would emit a
-/// plausible wrong number.
+/// A byte enum or `uint8`, as wide as the payload rather than a fixed 8 bits:
+/// Unreal writes only the significant bits of byte properties nested in
+/// replicated arrays (`CombatReport` `AssistType` is 5 bits; a fixed 8-bit
+/// read left all 364 of its rows untyped). Wider than 8 bits is refused, not
+/// truncated to a plausible low byte.
 pub(super) fn decode_byte(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     let width = r.bits_remaining();
     if width == 0 || width > 8 {
         // Fall back to the nominal width so the error names a concrete read.
         return Ok(DecodedValue::I64(i64::from(r.read_u8()?)));
     }
-    let raw = r.read_bits(width as u32)?;
-    Ok(DecodedValue::I64(raw as i64))
-}
-
-pub(super) fn decode_i32(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::I64(i64::from(r.read_i32()?)))
-}
-
-pub(super) fn decode_u32(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::I64(i64::from(r.read_u32()?)))
+    Ok(DecodedValue::I64(r.read_bits(width as u32)? as i64))
 }
 
 pub(super) fn decode_u64(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    // The overlay stores integers as i64. A u64 with its high bit set cannot
-    // be represented without a silent sign flip, so reject it loudly rather
-    // than emit a plausible wrong (negative) number. The only UInt64 overlay
-    // entries are effect IDs (small values), so this never fires on supported
-    // replays -- it is a defensive loud failure for malformed input.
     let value = r.read_u64()?;
     if value > i64::MAX as u64 {
         return Err(DecodeError::UnsignedOverflow { value });
@@ -61,118 +30,32 @@ pub(super) fn decode_u64(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeEr
     Ok(DecodedValue::I64(value as i64))
 }
 
-pub(super) fn decode_float(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::F64(f64::from(r.read_f32()?)))
-}
-
-pub(super) fn decode_double(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::F64(r.read_f64()?))
-}
-
-pub(super) fn decode_fstring(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::Str(r.read_fstring(64 * 1024)?))
-}
-
-/// `FText` as a string-table entry, returning the key.
-///
-/// The one on this wire is `Comp_AbilityStatisticsReplicator`'s
-/// `LocalizedStat`, and the key it carries is the statistic's name --
-/// `EnemiesBlinded`, `DamageDealt`, and 27 more. That is worth having because
-/// the sibling `Statistic` enum decodes to a bare integer and nothing in this
-/// repository maps those integers to names; they exist only in a comment. So
-/// this is the only machine-readable source of them in the export.
-///
-/// Layout, confirmed on 4,341 of 4,341 rows with zero residual bits:
-///
-/// ```text
-///   41 bits  header, ending in the history-type discriminator (always 5)
-///   FString  the string table's asset path
-///   i32      that FName's numeric suffix (always 0)
-///   FString  the key
-/// ```
-///
-/// The header's internal boundary is not settled: `[1][u32][u8]` and
-/// `[u32][1][u8]` both fit every sample, because all 4,341 agree byte for byte
-/// and nothing splits them. It does not matter for decoding -- the 33 bits
-/// before the discriminator carry no value this needs -- so they are consumed
-/// rather than named, which is the honest thing to write down.
-///
-/// A history type other than 5 is refused. Each `ETextHistory` variant lays
-/// out differently after the header, so reading one as another would return a
-/// plausible wrong string: exactly the failure that had this field typed
-/// `FString` and returning null on every row.
-pub(super) fn decode_ftext(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    r.read_bits(33)?;
-    let history_type = r.read_bits(8)? as u8;
-    if history_type != 5 {
-        return Err(DecodeError::UnsupportedTextHistory { history_type });
-    }
-    let _table_path = r.read_fstring(64 * 1024)?;
-    let _number = r.read_bits(32)?;
-    Ok(DecodedValue::Str(r.read_fstring(64 * 1024)?))
-}
-
-/// FName on the wire: 1 bit `isHardcoded`, then one of two shapes.
-///
-/// Mirrors `FArchive.ReadFNameCore` in the reference. When the bit is set the
-/// name is an index into the engine's hardcoded name table, sent as a single
-/// IntPacked and rendered as its decimal value; there is no string. When it is
-/// clear the name is inline: FString plus an i32 suffix.
-///
-/// The comment here used to assert "isHardcoded=false for replays" and the
-/// code read the bit and discarded it, always taking the inline path. That is
-/// false: 177 of the 581 `DamagedBone` payloads on 02d4d478 are 9 bits, which
-/// is exactly the hardcoded shape (1 flag + one IntPacked byte). Reading them
-/// as an FString ran off the end of the payload and produced mojibake, which
-/// is why the field had to be forced to Raw in the type-correction pass.
-///
-/// # The instance number is part of the identity
-///
-/// Unreal's `FName` is a (comparison index, number) pair, and the number is
-/// stored as **the displayed suffix plus one**: 0 renders the bare name, and
-/// `N != 0` renders `Name_{N-1}`. It used to be read into `let _suffix` and
-/// dropped, so `Source_1` and `Source_2` both decoded to `Source` -- two
-/// distinct objects collapsed onto one string with nothing reporting it.
-///
-/// [`crate::structs::framing`]'s `read_fname` renders the same way, so a name
-/// means the same thing whichever decoder produced it.
-pub(super) fn decode_fname(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
+/// An FName: an `isHardcoded` bit, then either an IntPacked index into the
+/// engine's name table, rendered as its decimal (177 of 581 `DamagedBone`
+/// payloads on 02d4d478 are this 9-bit form), or an inline FString and an i32
+/// instance number (0 is the bare name, `N` is `Name_{N-1}`; docs/DATA.md
+/// "FName instance numbers are part of the name"). Generic over the error so
+/// the struct blobs keep their variants; `max_bytes` caps the inline string
+/// (64 KiB for fields, 1024 in struct blobs).
+pub(crate) fn read_fname<E: From<BitError> + From<DecodeError>>(
+    r: &mut BitReader<'_>,
+    max_bytes: i64,
+) -> Result<String, E> {
     if r.read_bit()? {
-        let index = r.read_int_packed()?;
-        return Ok(DecodedValue::Str(index.to_string()));
+        return Ok(r.read_int_packed()?.to_string());
     }
-    let name = r.read_fstring(64 * 1024)?;
-    let number = r.read_i32()?;
-    render_fname(name, number).map(DecodedValue::Str)
-}
-
-/// Apply an `FName`'s instance number to its string, Unreal's way.
-///
-/// `number == 0` is the bare name; otherwise the displayed suffix is
-/// `number - 1`. A negative number has no valid display form and is rejected;
-/// in particular, `i32::MIN - 1` must not wrap into a plausible positive name.
-pub(crate) fn render_fname(name: String, number: i32) -> Result<String, DecodeError> {
-    if number < 0 {
-        return Err(DecodeError::InvalidFNameNumber { number });
-    }
-    match number {
+    let name = r.read_fstring(max_bytes)?;
+    // Negative has no display form; `i32::MIN - 1` must not wrap into a name.
+    match r.read_i32()? {
         0 => Ok(name),
-        n => Ok(format!("{name}_{}", n - 1)),
+        number if number < 0 => Err(DecodeError::InvalidFNameNumber { number }.into()),
+        number => Ok(format!("{name}_{}", number - 1)),
     }
 }
 
-pub(super) fn decode_object_net_guid(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::I64(i64::from(r.read_int_packed()?)))
-}
-
-/// 128-bit GUID: 4 x u32 LE -> formatted as standard hex GUID.
-pub(super) fn decode_guid(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    use core::fmt::Write as _;
-    let a = r.read_u32()?;
-    let b = r.read_u32()?;
-    let c = r.read_u32()?;
-    let d = r.read_u32()?;
-    // 8 + 4 + 4 + 4 + 12 digits plus four dashes: always exactly 36 bytes.
+/// 128-bit GUID: 4 x u32 LE, formatted as a standard 36-byte hex GUID.
+pub(super) fn read_guid(r: &mut BitReader<'_>) -> Result<String, BitError> {
+    let [a, b, c, d] = [r.read_u32()?, r.read_u32()?, r.read_u32()?, r.read_u32()?];
     let mut s = String::with_capacity(36);
     let _ = write!(
         s,
@@ -183,72 +66,32 @@ pub(super) fn decode_guid(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeE
         (c >> 16) & 0xFFFF,
         (u64::from(c & 0xFFFF) << 32) | u64::from(d)
     );
-    Ok(DecodedValue::Str(s))
+    Ok(s)
 }
 
-pub(super) fn decode_serialized_int(
-    r: &mut BitReader<'_>,
-    max: u32,
-) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::I64(i64::from(r.read_serialized_int(max)?)))
-}
-
-/// A byte enum that occupies whatever width the field payload carries.
-///
-/// # A zero-width payload really is zero, and is not fabricated
-///
-/// The zero-width arms return `I64(0)` without reading a bit, which looks like
-/// a value invented out of nothing. It is not, and the reason is worth writing
-/// down because the surrounding code refuses exactly this shape elsewhere
-/// (`UnsignedOverflow`, `UnsupportedTextHistory`, and the no-exemption rule in
-/// [`super::decode_field`]).
-///
-/// Unreal serialises this enum in `ceil(log2(variant_count))` bits, and the
-/// number of bits needed to distinguish ONE possible variant is zero. A
-/// zero-width payload is therefore not a truncated value: it is the complete
-/// encoding of an enum whose only variant is the first, and reading it as 0 is
-/// the encoding's own answer, not a guess at a missing one. That is different
-/// in kind from a `NaN` component or an over-wide payload, where the bits are
-/// present and say something the type cannot represent.
-///
-/// The corpus agrees: `overlay::apply_overlay_inner` already answers a zero-bit
-/// `EnumRemainingBits` with `value_i64 = 0` and counts it `decoded_ok`, and the
-/// 215-replay export reports zero decode errors under that behaviour. Turning
-/// zero-width into an error or a null would move those rows to failures for a
-/// value the format defines.
+/// A byte enum as wide as its payload (at most 32 bits are read). Zero bits
+/// read as `I64(0)`, not a fabricated value: Unreal writes
+/// `ceil(log2(variant_count))` bits, so zero bits is the complete encoding of a
+/// one-variant enum, and the overlay counts it `decoded_ok`.
 pub(super) fn decode_enum_remaining_bits(
     r: &mut BitReader<'_>,
-    bit_count: u32,
 ) -> Result<DecodedValue, DecodeError> {
-    if bit_count == 0 {
-        return Ok(DecodedValue::I64(0));
-    }
-    let bits_left = r.bits_remaining();
-    if bits_left == 0 {
-        return Ok(DecodedValue::I64(0));
-    }
-    let to_read = bits_left.min(32);
-    Ok(DecodedValue::I64(i64::from(
-        r.read_bits(to_read as u32)? as u32
-    )))
-}
-
-pub(super) fn decode_gameplay_tag(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(DecodedValue::I64(i64::from(r.read_int_packed()?)))
+    let width = r.bits_remaining().min(32) as u32;
+    Ok(DecodedValue::I64(r.read_bits(width)? as i64))
 }
 
 /// Lowercase hex digits, indexed by nibble.
 const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
-/// Length-prefixed byte blob, rendered as lowercase hex into `value_str`.
-///
-/// The bytes are hex-encoded as they are read rather than collected first: the
-/// previous shape ran `format!("{b:02x}")` per byte, which is one heap
-/// allocation and one formatting machine per byte of payload.
-pub(super) fn decode_byte_array(
+/// Length-prefixed byte blob, hex-encoded as it is read (no per-byte
+/// `format!`). The table's cap is checked first and keeps its own variant; a
+/// count the payload cannot hold is then `InvalidLength` (`Malformed`), not
+/// `Eof`, as `read_fstring` refuses a string's: the prefix is at fault.
+pub(super) fn read_byte_array_hex(
     r: &mut BitReader<'_>,
     max_bytes: u32,
-) -> Result<DecodedValue, DecodeError> {
+) -> Result<String, DecodeError> {
+    let start = r.position();
     let count = r.read_int_packed()?;
     if count > max_bytes {
         return Err(DecodeError::ByteArrayLengthCapExceeded {
@@ -256,11 +99,18 @@ pub(super) fn decode_byte_array(
             max: max_bytes,
         });
     }
+    if u64::from(count) * 8 > r.bits_remaining() {
+        return Err(BitError::InvalidLength {
+            position: start,
+            length: i64::from(count),
+        }
+        .into());
+    }
     let mut hex = String::with_capacity(count as usize * 2);
     for _ in 0..count {
         let byte = r.read_u8()?;
         hex.push(HEX_DIGITS[(byte >> 4) as usize] as char);
         hex.push(HEX_DIGITS[(byte & 0x0F) as usize] as char);
     }
-    Ok(DecodedValue::Str(hex))
+    Ok(hex)
 }

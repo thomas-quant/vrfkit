@@ -1,45 +1,20 @@
 //! LSB-first bit reader for Unreal Engine replay streams.
 //!
-//! # Bit order
+//! Unreal's `FBitWriter` packs bits least-significant-first within each byte
+//! and lets values straddle bytes, so a payload is one bit stream: bit `i` is
+//! `data[i >> 3] >> (i & 7) & 1`, and a multi-bit read shifts right and masks.
 //!
-//! Unreal's `FBitWriter` packs bits **least-significant-first within each byte**
-//! and lets values straddle byte boundaries, so a payload is one continuous bit
-//! stream: global bit `i` lives at `data[i >> 3] >> (i & 7) & 1`. Reading a
-//! multi-bit value therefore means "shift the window right by the bit offset and
-//! mask", never "shift left and OR" as an MSB-first reader would.
-//!
-//! # Why a bespoke reader
-//!
-//! Three of the wire primitives are Unreal-specific and consume a *variable*
-//! number of bits, so the exact implementation is part of the format:
-//!
-//! * [`BitReader::read_int_packed`] -- 7 bits of payload per byte, low bit is the
-//!   continuation flag, capped at five bytes.
-//! * [`BitReader::read_serialized_int`] -- `floor(log2(max))` bits, plus one more
-//!   bit only when the value could still reach `max`.
-//! * [`BitReader::read_fstring`] -- a signed length that selects UTF-8 (positive)
-//!   or UTF-16 (negative). Unreal's writer includes a trailing null in that
-//!   length; this reader strips one when present rather than requiring it, so
-//!   the width consumed is always the declared width and never depends on the
-//!   bytes. See the method for why that is deliberate.
-//!
-//! Getting the consumed bit count wrong on any of these desynchronises the rest
-//! of the stream rather than failing loudly, which is why each one is pinned by
-//! tests.
-//!
-//! # Errors
-//!
-//! Every read is bounds-checked and returns [`BitError`] instead of panicking or
-//! silently yielding zeros: a truncated payload must be distinguishable from a
-//! payload whose value happens to be zero.
+//! [`BitReader::read_int_packed`], [`BitReader::read_serialized_int`],
+//! [`BitReader::read_quantized_vector`] and [`BitReader::read_fstring`] consume
+//! a width that depends on the value, so a wrong count desynchronises the rest
+//! of the stream instead of failing; each is pinned by tests. Every read is
+//! bounds-checked: truncation is a [`BitError`], never a zero.
 //!
 //! # Features
 //!
-//! * `alloc` (default) -- enables `read_fstring`, the only entry point that
-//!   allocates. With it off the crate is `no_std` and allocator-free: every
-//!   other read returns a scalar into a caller-owned buffer, and `sub_reader`
-//!   borrows rather than copies. [`BitError`] is unconditional either way, so
-//!   the error type does not change shape with the feature.
+//! The crate is `no_std` whenever it is not being tested. `alloc` (default)
+//! only adds `read_fstring`, the one read that allocates; [`BitError`] keeps
+//! its shape either way.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), no_std)]
@@ -49,70 +24,57 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-#[cfg(feature = "alloc")]
-use alloc::vec::Vec;
 use core::fmt;
 
-/// Largest number of bytes an [`Int packed`](BitReader::read_int_packed) value
-/// may occupy. Unreal encodes 7 payload bits per byte, so five bytes cover the
-/// full 32-bit range (35 bits) and a sixth would mean a malformed stream.
+/// Five 7-bit chunks cover a `u32` (35 bits); a sixth means a malformed stream.
 const MAX_INT_PACKED_BYTES: u32 = 5;
 
-/// Shift applied to the final `IntPacked` chunk: `7 * (MAX_INT_PACKED_BYTES - 1)`.
 const LAST_INT_PACKED_SHIFT: u32 = 7 * (MAX_INT_PACKED_BYTES - 1);
 
-/// Largest payload the final chunk may carry. Four chunks spend 28 of a `u32`'s
-/// 32 bits, so only four remain -- an encoder writing `Value >> 28` can never
-/// exceed this, and a chunk that does is describing a number no `u32` holds.
+/// The final chunk's largest legal payload: at shift 28 a `u32` has 4 bits left.
 const LAST_INT_PACKED_MAX: u32 = u32::MAX >> LAST_INT_PACKED_SHIFT;
 
-/// Failure modes of a bit read. All of them mean "the stream is not what the
-/// caller assumed", never "the value was empty".
+/// Why a bit read failed: the stream is not what the caller assumed, never
+/// "the value was empty". Positions are bit offsets within the reader's window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BitError {
-    /// Fewer bits remain than the read requires.
+    /// Fewer bits remain than the read requires; `length` is the window's.
     Eof {
-        /// Bit position at which the read was attempted.
         position: u64,
-        /// Total length of the archive, in bits.
         length: u64,
-        /// Bits the read needed.
         requested: u64,
     },
-    /// An `IntPacked` value did not terminate within `MAX_INT_PACKED_BYTES`.
+    /// An `IntPacked` value did not terminate within five bytes.
     MalformedIntPacked {
-        /// Bit position at which the value started.
+        /// Where the value started.
         position: u64,
     },
-    /// An `IntPacked` value's final chunk carried more than the four bits a
-    /// `u32` has left at that shift, so the value is not representable.
+    /// An `IntPacked` value's fifth chunk does not fit the 4 bits a `u32` has
+    /// left at shift 28.
     IntPackedOverflow {
-        /// Bit position at which the value started.
+        /// Where the value started.
         position: u64,
     },
-    /// `read_serialized_int` was given a non-positive maximum.
+    /// `read_serialized_int` was given a zero maximum.
     InvalidSerializedIntMax {
         /// The rejected maximum.
         max: u32,
     },
-    /// A length-prefixed value declared a size beyond a sane limit or beyond the
-    /// remaining stream.
+    /// A length prefix beyond the caller's cap or the remaining stream.
     InvalidLength {
-        /// Bit position at which the length prefix started.
+        /// Where the length prefix started.
         position: u64,
-        /// The rejected length.
         length: i64,
     },
-    /// A requested reader window exceeds the supplied byte slice.
+    /// A requested bit length exceeds what a supplied byte slice holds.
     InvalidBitLength {
-        /// Requested window size in bits.
+        /// In bits, as is `available`.
         requested: u64,
-        /// Bits available in the supplied slice.
         available: u64,
     },
     /// A string's bytes were not valid UTF-8 / UTF-16.
     InvalidString {
-        /// Bit position at which the string started.
+        /// Where the string started.
         position: u64,
     },
 }
@@ -161,20 +123,15 @@ impl core::error::Error for BitError {}
 /// Result alias for bit reads.
 pub type Result<T> = core::result::Result<T, BitError>;
 
-/// A cursor over a bit stream.
-///
-/// The reader borrows its backing bytes, so sub-readers carved out of a payload
-/// are views rather than copies -- framing a bunch into content blocks and a
-/// content block into fields allocates nothing.
-///
-/// `start_bit` lets a sub-reader address a window that does not begin on a byte
-/// boundary, which is the normal case: Unreal field payloads are bit-aligned.
+/// A cursor over a borrowed bit stream. Sub-readers are views, not copies, so
+/// framing a bunch into blocks and a block into fields allocates nothing; a
+/// window may start mid-byte, the normal case for field payloads.
 #[derive(Debug, Clone)]
 pub struct BitReader<'a> {
     data: &'a [u8],
-    /// Absolute bit index (into `data`) where this reader's window begins.
+    /// Absolute bit index in `data` where the window begins.
     start_bit: u64,
-    /// Bits consumed so far, relative to `start_bit`.
+    /// Bits consumed, relative to `start_bit`.
     pos: u64,
     /// Window length in bits.
     len: u64,
@@ -192,14 +149,10 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Create a reader over the first `bit_len` bits of `data`.
+    /// Create a reader over the first `bit_len` bits of `data`, for a payload
+    /// whose wire-declared length leaves padding in its final byte.
     ///
-    /// Used for payloads whose exact bit length is known from the wire (a bunch
-    /// header, a content block header) and whose final byte therefore carries
-    /// padding that must not be read as data.
-    ///
-    /// Returns [`BitError::InvalidBitLength`] when `bit_len` exceeds the bits
-    /// available in `data`.
+    /// [`BitError::InvalidBitLength`] when `bit_len` exceeds `data`.
     pub fn with_bit_len(data: &'a [u8], bit_len: u64) -> Result<Self> {
         let available = (data.len() as u64).saturating_mul(8);
         if bit_len > available {
@@ -247,12 +200,8 @@ impl<'a> BitReader<'a> {
     #[inline]
     fn need(&self, bits: u64) -> Result<()> {
         if self.bits_remaining() < bits {
-            // Constructed inline on purpose. Hoisting this into a `#[cold]`
-            // out-of-line builder measured neutral at best on the reference
-            // replay: taking `&self` there made the reader address-taken and
-            // cost ~2%, and passing the three fields by value instead only got
-            // back to parity. The optimiser already sinks this into the
-            // unlikely branch, so the simpler code stays.
+            // Inline on purpose: a #[cold] builder taking &self cost ~2%; see
+            // docs/PERFORMANCE_NOTES.md#cold-path-builders-stay-free-functions.
             return Err(BitError::Eof {
                 position: self.pos,
                 length: self.len,
@@ -262,17 +211,8 @@ impl<'a> BitReader<'a> {
         Ok(())
     }
 
-    /// Load 64 bits starting at absolute byte `byte`, zero-padding past the end.
-    ///
-    /// Padding is safe because callers have already checked that the *bits* they
-    /// want are in range; the padding only ever covers bits that get masked off.
-    ///
-    /// The fast path must be spelled as a fixed-size chunk so the compiler sees
-    /// one unaligned 8-byte load. Copying a runtime-length slice into a stack
-    /// buffer instead compiled to a real `callq memcpy` -- plus zeroing the
-    /// buffer and spilling it -- on *every* bit read, which dominated the
-    /// reader's cost. Only the final seven bytes of `data` need padding, so that
-    /// case is out of line and out of the way.
+    /// The 8 bytes at `byte`, zero-padded past the end (bits callers mask off):
+    /// one unaligned load, not a memcpy (docs/PERFORMANCE_NOTES.md#load_u64-avoiding-a-memcpy).
     #[inline]
     fn load_u64(&self, byte: usize) -> u64 {
         match self.data.get(byte..).and_then(<[u8]>::first_chunk::<8>) {
@@ -286,11 +226,8 @@ impl<'a> BitReader<'a> {
     pub fn read_bit(&mut self) -> Result<bool> {
         self.need(1)?;
         let abs = self.start_bit + self.pos;
-        // Bounds: `need` guarantees this bit is inside the window, and the
-        // window is inside `data`, so the index cannot be out of range. It is
-        // still read fallibly, because indexing makes the compiler emit a
-        // panic path it cannot prove dead, and this is the hottest function in
-        // the crate -- the `unwrap_or` is unreachable, not a fallback.
+        // In range (`need`, and the window lies inside `data`). `get` only
+        // spares the hottest function a panic path: `unwrap_or` is unreachable.
         let byte = self.data.get((abs >> 3) as usize).copied().unwrap_or(0);
         let bit = (byte >> (abs & 7)) & 1;
         self.pos += 1;
@@ -309,16 +246,10 @@ impl<'a> BitReader<'a> {
         let byte = (abs >> 3) as usize;
         let off = (abs & 7) as u32;
 
-        // A single 8-byte window holds `64 - off` usable bits. When the request
-        // straddles past that, the remainder comes from the next byte -- one
-        // byte, not a second word: the shortfall is `count - got`, which is
-        // `count + off - 64 <= off <= 7`. A full second `load_u64` here was
-        // fetching eight bytes to use at most seven bits of the first one.
-        //
-        // `got` is 57..=63 in that branch, never 64, because `off == 0` makes
-        // `count <= got` hold for every legal `count`; the shift is in range.
-        // The byte is in bounds for the same reason `read_bit`'s is, and is
-        // read fallibly for the same reason.
+        // One load holds `64 - off` bits. A longer read is short by
+        // `count + off - 64 <= 7` bits, so one more byte completes it, not a
+        // second word; `got` is then 57..=63, so `high << got` is in range. That
+        // byte is in range, and read fallibly, as in `read_bit`.
         let low = self.load_u64(byte) >> off;
         let got = 64 - off;
         let value = if count <= got {
@@ -373,34 +304,12 @@ impl<'a> BitReader<'a> {
         Ok(f64::from_bits(self.read_u64()?))
     }
 
-    /// Read Unreal's `SerializeIntPacked` variable-length integer.
-    ///
-    /// Each byte carries 7 payload bits in its high bits; the low bit is set
-    /// when another byte follows. Chunks are little-endian, so byte `i`
-    /// contributes at shift `7 * i`.
-    ///
-    /// The byte loop stays a byte loop. Peeking 40 bits and locating the
-    /// terminator with a mask would be fewer instructions, but it would also
-    /// have to reproduce this loop's exact EOF report -- `requested: 8` at the
-    /// position after however many chunks were consumed -- and that error
-    /// decides which blocks a caller records as malformed.
-    ///
-    /// # The fifth chunk is peeled
-    ///
-    /// Only the last chunk can overrun a `u32`: it lands at shift 28, where
-    /// four payload bits fit and seven are on the wire. `16u32 << 28` is zero,
-    /// so folding it in unchecked returned `Ok(0)` for a value that is not
-    /// zero -- and zero is the terminator of every property loop above this
-    /// crate, so the wrong number ended the record rather than merely
-    /// mis-reporting one field.
-    ///
-    /// The check is *peeled out of the loop* rather than guarded inside it, so
-    /// the one-to-four byte path -- every value below 2^28, which is very
-    /// nearly all of them -- executes exactly the instructions it did before:
-    /// no added compare, no added branch, and no reliance on the optimiser
-    /// unrolling a five-trip loop to fold a constant comparison away. The
-    /// continuation bit is tested first so a runaway value still reports
-    /// [`BitError::MalformedIntPacked`] rather than the overflow.
+    /// Read Unreal's `SerializeIntPacked`: per byte, 7 payload bits above a
+    /// continuation bit, chunks little-endian. A byte loop: callers classify
+    /// malformed blocks by its `requested: 8` EOF. The fifth chunk's overflow
+    /// check (unchecked, `16u32 << 28 == 0` is `Ok(0)`, every property loop's
+    /// terminator) is peeled out of the loop after the continuation test, so a
+    /// runaway wins (docs/PERFORMANCE_NOTES.md#read_int_packed-peeling-the-overflow-check).
     #[inline]
     pub fn read_int_packed(&mut self) -> Result<u32> {
         let start = self.pos;
@@ -426,14 +335,9 @@ impl<'a> BitReader<'a> {
         Ok(value | (chunk << LAST_INT_PACKED_SHIFT))
     }
 
-    /// Read Unreal's bounded integer encoding (`FBitReader::SerializeInt`).
-    ///
-    /// Spends `floor(log2(max))` bits unconditionally, then one extra bit only
-    /// when the value read so far could still be raised to reach `max`. The
-    /// consumed width therefore depends on the *value*, not just on `max`.
-    ///
-    /// Inlined because `max` is very often a constant or loop-invariant at the
-    /// call site, which folds `ilog2` and the mask away entirely.
+    /// Read Unreal's `FBitReader::SerializeInt`: `floor(log2(max))` bits, plus
+    /// one more only when the value can still reach `max`, so the width depends
+    /// on the value. Inlined so a constant `max` folds `ilog2` and the mask away.
     #[inline]
     pub fn read_serialized_int(&mut self, max: u32) -> Result<u32> {
         if max == 0 {
@@ -446,8 +350,7 @@ impl<'a> BitReader<'a> {
             0
         };
         let bit_mask = 1u32 << value_bits;
-        // `value + bit_mask >= max` means raising the top bit would overshoot,
-        // so the encoder never wrote it and there is nothing more to read.
+        // The top bit would overshoot `max`, so the encoder did not write it.
         if value.saturating_add(bit_mask) >= max {
             return Ok(value);
         }
@@ -457,102 +360,124 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 
-    /// Read a length-prefixed Unreal string.
-    ///
-    /// A positive length counts UTF-8 bytes, a negative one counts UTF-16 code
-    /// units; both include a trailing null, which is stripped. `max_bytes` caps
-    /// the serialized size so a corrupt prefix cannot trigger a huge allocation.
-    ///
-    /// # Why a missing terminator is not rejected
-    ///
-    /// The null is stripped *when present* rather than required. A length of 3
-    /// followed by `abc` is not the encoding Unreal's writer would produce for
-    /// `"abc"` (that is 4 and `abc\0`), and it is accepted anyway, because
-    /// nothing downstream can be misled by it: the cursor advances by the
-    /// declared `32 + 8 * len` bits either way, so no later field moves, and
-    /// the returned string is exactly the bytes on the wire rather than a
-    /// different value. Requiring the terminator would buy a strictness
-    /// property that prevents no wrong number, at the cost of failing every
-    /// caller in the workspace -- schema path names, net-GUID paths, container
-    /// event metadata, decoded string fields -- on any replay whose writer ever
-    /// omitted it. That is not a trade this reader gets to make on its callers'
-    /// behalf.
-    ///
-    /// The only read that allocates, hence the `alloc` feature gate.
+    /// Read Unreal's `QuantizedVector`: a `SerializedInt(128)` header whose
+    /// bits 0-5 give a component width and bit 6 says "scaled". Width > 0:
+    /// three signed components, divided by `scale` when scaled (whole units
+    /// divide by 1.0, which is exact); width 0: 3 x f32 unscaled, else 3 x f64.
+    /// Movement matches an independent parser to 0.0005 through this
+    /// arithmetic: do not restyle it.
+    #[inline]
+    pub fn read_quantized_vector(&mut self, scale: u32) -> Result<[f64; 3]> {
+        let info = u64::from(self.read_serialized_int(128)?);
+        let component_bits = (info & 63) as u32;
+        let extra_info = info >> 6;
+
+        if component_bits > 0 {
+            let [x, y, z] = self.read_quantized_components(component_bits)?;
+            let divisor = f64::from(if extra_info > 0 { scale } else { 1 });
+            Ok([x as f64 / divisor, y as f64 / divisor, z as f64 / divisor])
+        } else if extra_info == 0 {
+            let mut f32_component = || self.read_f32().map(f64::from);
+            Ok([f32_component()?, f32_component()?, f32_component()?])
+        } else {
+            Ok([self.read_f64()?, self.read_f64()?, self.read_f64()?])
+        }
+    }
+
+    /// Three two's-complement components of `bits` bits each: one read when
+    /// all three fit in 64 bits, one read each otherwise. Panics outside
+    /// `1..=63`, the widths a header can declare: a real assert, since above
+    /// 64 the shift is out of range and release has no debug assertions.
+    #[inline]
+    fn read_quantized_components(&mut self, bits: u32) -> Result<[i64; 3]> {
+        assert!(
+            (1..=63).contains(&bits),
+            "component_bits must be 1..=63, got {bits}"
+        );
+        let sign_bit = 1u64 << (bits - 1);
+        let sign_extend = |raw: u64| (raw ^ sign_bit).wrapping_sub(sign_bit) as i64;
+
+        if bits * 3 <= 64 {
+            let raw = self.read_bits(bits * 3)?;
+            let mask = (1u64 << bits) - 1;
+            Ok([
+                sign_extend(raw & mask),
+                sign_extend((raw >> bits) & mask),
+                sign_extend((raw >> (bits * 2)) & mask),
+            ])
+        } else {
+            let mut component = || self.read_bits(bits).map(sign_extend);
+            Ok([component()?, component()?, component()?])
+        }
+    }
+
+    /// Read Unreal's compressed rotator: pitch, yaw and roll, each a presence
+    /// bit and then, if set, a `width`-bit value (16 short, 8 byte) scaled to
+    /// degrees. `360 / 2^width` divides by a power of two, so it is exact in `f32`.
+    #[inline]
+    pub fn read_compressed_rotator(&mut self, width: u32) -> Result<[f32; 3]> {
+        let scale = 360.0 / (1u32 << width) as f32;
+        let mut component = || -> Result<f32> {
+            Ok(if self.read_bit()? {
+                self.read_bits(width)? as f32 * scale
+            } else {
+                0.0
+            })
+        };
+        Ok([component()?, component()?, component()?])
+    }
+
+    /// Read an Unreal `FString`: a positive length counts UTF-8 bytes, a
+    /// negative one UTF-16 units; `max_bytes` caps the allocation. A trailing
+    /// null is stripped but not required: requiring it would prevent no wrong value.
     #[cfg(feature = "alloc")]
     pub fn read_fstring(&mut self, max_bytes: i64) -> Result<String> {
         let start = self.pos;
         let raw = i64::from(self.read_i32()?);
+        let invalid = || BitError::InvalidLength {
+            position: start,
+            length: raw,
+        };
         if max_bytes < 0 {
-            return Err(BitError::InvalidLength {
-                position: start,
-                length: raw,
-            });
+            return Err(invalid());
         }
         if raw == 0 {
             return Ok(String::new());
         }
         let utf16 = raw < 0;
+        // An i32 length is at most 2^31 units, so neither product overflows.
         let units = raw.unsigned_abs();
-        let byte_len = if utf16 {
-            units.checked_mul(2).ok_or(BitError::InvalidLength {
-                position: start,
-                length: raw,
-            })?
-        } else {
-            units
-        };
-        if byte_len > max_bytes as u64
-            || byte_len
-                .checked_mul(8)
-                .is_none_or(|bits| bits > self.bits_remaining())
-        {
-            return Err(BitError::InvalidLength {
-                position: start,
-                length: raw,
-            });
+        let byte_len = if utf16 { units * 2 } else { units };
+        if byte_len > max_bytes as u64 || byte_len * 8 > self.bits_remaining() {
+            return Err(invalid());
         }
-        let byte_len = usize::try_from(byte_len).map_err(|_| BitError::InvalidLength {
-            position: start,
-            length: raw,
-        })?;
-
+        // Fits `usize`: the bytes lie inside the remaining window, in `data`.
+        let mut bytes = alloc::vec![0; byte_len as usize];
+        self.copy_bits_to(&mut bytes, byte_len * 8)?;
+        let bad = BitError::InvalidString { position: start };
         if utf16 {
-            let mut units16 = Vec::with_capacity(byte_len / 2);
-            for _ in 0..byte_len / 2 {
-                units16.push(self.read_u16()?);
+            if bytes.ends_with(&[0, 0]) {
+                bytes.truncate(bytes.len() - 2);
             }
-            // Drop the trailing null before decoding so it never lands in the
-            // returned string.
-            if units16.last() == Some(&0) {
-                units16.pop();
-            }
-            String::from_utf16(&units16).map_err(|_| BitError::InvalidString { position: start })
+            let units = bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]));
+            char::decode_utf16(units)
+                .collect::<core::result::Result<_, _>>()
+                .map_err(|_| bad)
         } else {
-            let mut bytes = Vec::with_capacity(byte_len);
-            for _ in 0..byte_len {
-                bytes.push(self.read_u8()?);
-            }
             if bytes.last() == Some(&0) {
                 bytes.pop();
             }
-            String::from_utf8(bytes).map_err(|_| BitError::InvalidString { position: start })
+            String::from_utf8(bytes).map_err(|_| bad)
         }
     }
 
-    /// Copy `count` bits into `dst`, LSB-first, zero-filling the final byte's
-    /// padding, and advance past them.
-    ///
-    /// Zero-filling matters: the payload transform runs over whole bytes, so any
-    /// stale bits above `count` would be folded into the result and corrupt the
-    /// tail byte.
+    /// Copy `count` bits into `dst`, LSB-first, and advance past them. The final
+    /// byte's padding is zero-filled: vrf-net reuses one buffer across blocks and
+    /// hands the final byte on whole.
     pub fn copy_bits_to(&mut self, dst: &mut [u8], count: u64) -> Result<()> {
-        let byte_count =
-            usize::try_from(count.div_ceil(8)).map_err(|_| BitError::InvalidLength {
-                position: self.pos,
-                length: count as i64,
-            })?;
-        if dst.len() < byte_count {
+        if (dst.len() as u64) < count.div_ceil(8) {
             return Err(BitError::InvalidBitLength {
                 requested: count,
                 available: (dst.len() as u64).saturating_mul(8),
@@ -562,27 +487,19 @@ impl<'a> BitReader<'a> {
         if count == 0 {
             return Ok(());
         }
+        // Fits `usize`: `dst` holds that many bytes.
+        let byte_count = count.div_ceil(8) as usize;
 
         let abs = self.start_bit + self.pos;
         self.pos += count;
         let mut byte = (abs >> 3) as usize;
         let off = (abs & 7) as u32;
 
-        // Rolling window. Producing one output word needs the word at `byte`
-        // plus the low `off` bits of the word after it, and that second word is
-        // the next iteration's first -- so carrying it forward halves the loads.
-        // The previous shape called `read_bits(64)` per word, which repeated the
-        // bounds check, the window arithmetic and *both* loads every time.
-        //
-        // `next << (63 - off) << 1` is `next << (64 - off)` spelled so that
-        // `off == 0` stays defined; a single shift by 64 is not.
-        //
-        // A byte-aligned `copy_from_slice` fast path guarded on `off == 0` was
-        // tried alongside this and measured exactly neutral on the reference
-        // replay -- 1.224s/1.211s against 1.225s/1.211s over two interleaved
-        // best-of-7 runs. Payloads sit behind variable-bit headers, so alignment
-        // should be the exception rather than the rule; either way the second
-        // path did not pay for itself, so one loop is what is kept.
+        // Each output word needs this word and the low `off` bits of the next,
+        // which is the next iteration's first: carrying it halves the loads.
+        // `<< (63 - off) << 1` is `<< (64 - off)` kept defined at `off == 0`. A
+        // byte-aligned fast path measured neutral
+        // (docs/PERFORMANCE_NOTES.md#copy_bits_to-the-byte-aligned-path).
         let full_words = (count / 64) as usize;
         let (words, tail) = dst[..byte_count].split_at_mut(full_words * 8);
 
@@ -595,30 +512,20 @@ impl<'a> BitReader<'a> {
             carry = next;
         }
         if !tail.is_empty() {
-            // Masking to the leftover width is what zero-fills the final byte's
-            // padding; `tail.len()` is exactly `ceil(leftover / 8)`, so nothing
-            // past `byte_count` is written.
+            // The mask zero-fills the padding; `tail.len()` is
+            // `ceil(leftover / 8)`, so nothing past `byte_count` is written.
             let leftover = (count % 64) as u32;
             let next = self.load_u64(byte + 8);
             let word = ((carry >> off) | (next << (63 - off) << 1)) & mask_u64(leftover);
-            // This lowers to a `callq memcpy` of 1..=8 bytes, because the length
-            // is a runtime value; nearly every call reaches it, since only an
-            // exact multiple of 64 bits leaves no tail. Replacing it with a
-            // shift-and-peel loop does remove the call -- verified in the
-            // emitted asm -- but measured neutral on both `validate` and
-            // `export`, so the one-liner stays. A plain zip is not an option
-            // either way: LLVM's loop-idiom pass turns that straight back into
-            // the same memcpy.
+            // A runtime-length memcpy; a shift-and-peel loop measured neutral
+            // (docs/PERFORMANCE_NOTES.md#copy_bits_to-the-tail-write-stays-a-memcpy).
             tail.copy_from_slice(&word.to_le_bytes()[..tail.len()]);
         }
         Ok(())
     }
 
-    /// Carve out a view over the next `count` bits and advance past them.
-    ///
-    /// The child shares the parent's buffer, so framing is allocation-free.
-    /// Inlined so it stays that way at the call site too: this is four field
-    /// copies, and leaving it out of line made callers build the child in
+    /// A view over the next `count` bits, sharing the buffer; advances past
+    /// them. `#[inline]` because out of line, callers built the child in
     /// memory instead of in registers.
     #[inline]
     pub fn sub_reader(&mut self, count: u64) -> Result<BitReader<'a>> {
@@ -648,43 +555,21 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// Tail of [`BitReader::load_u64`]: fewer than 8 bytes remain, so the absent
-/// high bytes read as zero.
-///
-/// A free function taking the slice, not a method taking `&BitReader`. A cold
-/// method borrowing the reader makes it address-taken, so the optimiser has to
-/// keep the reader in memory across every read rather than in registers; that
-/// cost a measured ~2% when the same shape was tried on the EOF path. Here the
-/// two forms measured within noise of each other, so this is the form chosen on
-/// the grounds that it cannot provoke the problem, not on a measured win.
+/// [`BitReader::load_u64`] with fewer than 8 bytes left. It takes the slice so the
+/// reader is never address-taken: docs/PERFORMANCE_NOTES.md#cold-path-builders-stay-free-functions.
 #[cold]
 #[inline(never)]
 fn load_u64_padded(data: &[u8], byte: usize) -> u64 {
     let mut buf = [0u8; 8];
     if let Some(tail) = data.get(byte..) {
-        // Reached only when fewer than 8 bytes remain, but the clamp keeps this
-        // correct on its own terms rather than by caller convention; it is cold,
-        // so it costs nothing.
         let n = tail.len().min(8);
         buf[..n].copy_from_slice(&tail[..n]);
     }
     u64::from_le_bytes(buf)
 }
 
-/// Mask with the low `count` bits set, for `count` in `1..=64`.
-///
-/// Written as a right shift rather than `(1 << count) - 1` so the full width
-/// needs no special case: `1 << 64` overflows, but `u64::MAX >> 0` is already
-/// the wanted all-ones. That turns a compare-and-select on every multi-bit read
-/// into a single shift.
-///
-/// Note the narrowing: this is deliberately *partial* where the old form was
-/// total. `u64::MAX >> (64 - 0)` is an over-wide shift, so zero is excluded
-/// rather than handled, and both callers are checked. `read_bits` returns early
-/// on a zero-width read; `copy_bits_to` reaches its tail only when
-/// `!tail.is_empty()`, which holds exactly when `count % 64 != 0`. The
-/// `debug_assert` is the backstop, and it has teeth -- `profile.test` keeps
-/// debug assertions on while the corpus tests decode whole replays.
+/// The low `count` bits set, `count` in `1..=64`: a right shift is defined at 64,
+/// where `(1 << count) - 1` overflows. Neither caller passes 0.
 #[inline]
 const fn mask_u64(count: u32) -> u64 {
     debug_assert!(count >= 1 && count <= 64, "mask width must be 1..=64");
@@ -695,28 +580,25 @@ const fn mask_u64(count: u32) -> u64 {
 mod tests {
     use super::*;
 
-    /// A fixed pseudo-random buffer. Constant bytes hide shift and mask
-    /// mistakes, because most wrong answers still look like the right one.
+    /// Pseudo-random bytes: constant ones hide shift and mask mistakes.
     fn pattern(len: u32) -> Vec<u8> {
         (0..len)
-            .map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8)
-            .map(|b| b ^ 0xC3)
+            .map(|i| (i.wrapping_mul(97) as u8) ^ 0x99)
             .collect()
     }
 
-    /// Naive reference reader: one bit at a time, straight from the module doc's
-    /// definition of bit `i`.
-    ///
-    /// The fast reader folds several cases together -- aligned or not, one word
-    /// or two, inside the buffer or over its padded tail -- and a replay corpus
-    /// never exercises every `(offset, width)` pair. Differential tests against
-    /// a shape with none of that folding are what actually covers them.
+    /// Bit `i` of `data`, by the module doc's definition.
+    fn bit(data: &[u8], i: u64) -> u8 {
+        (data[(i >> 3) as usize] >> (i & 7)) & 1
+    }
+
+    /// One bit at a time: a reference with none of the fast reader's folding
+    /// (aligned or not, one word or two, padded tail), covering `(offset,
+    /// width)` pairs a replay corpus never hits.
     fn reference_bits(data: &[u8], start: u64, count: u32) -> u64 {
         let mut value = 0u64;
         for i in 0..count {
-            let abs = start + u64::from(i);
-            let bit = (data[(abs >> 3) as usize] >> (abs & 7)) & 1;
-            value |= u64::from(bit) << i;
+            value |= u64::from(bit(data, start + u64::from(i))) << i;
         }
         value
     }
@@ -740,8 +622,7 @@ mod tests {
 
     #[test]
     fn read_bits_is_exact_where_the_buffer_runs_out() {
-        // With fewer than 8 bytes left `load_u64` takes its padded path. The
-        // zero padding must never reach the returned value.
+        // The padded `load_u64` path: its zeros must never reach the value.
         let data = pattern(40);
         let total = (data.len() as u64) * 8;
         for count in 1..=64u32 {
@@ -759,8 +640,7 @@ mod tests {
 
     #[test]
     fn read_bits_is_exact_in_a_buffer_smaller_than_one_word() {
-        // Every load here is a padded one, and `with_bit_len` ends the window
-        // mid-byte so the trailing bits are not readable at all.
+        // Every load is padded, and the window ends mid-byte.
         let data = [0xBFu8, 0x5C, 0xE1];
         for bit_len in 1..=24u64 {
             for off in 0..8u64.min(bit_len) {
@@ -781,10 +661,8 @@ mod tests {
     fn copy_bits_to_matches_the_reference_and_stays_inside_byte_count() {
         let data = pattern(64);
         for off in 0..8u64 {
-            // Zero is a production input, not a degenerate one: a field can
-            // declare a zero-bit payload and still be emitted, so `decode_from`
-            // reaches `copy_bits_to(out, 0)`. It is also the only shape that
-            // must not touch `pos` or the window arithmetic at all.
+            // 0 is a production input (a zero-bit field payload), and the one
+            // count that must not touch `pos` or the window arithmetic.
             for count in [0u64, 1, 7, 8, 9, 63, 64, 65, 71, 72, 127, 128, 200] {
                 let byte_count = count.div_ceil(8) as usize;
                 // Guard bytes past `byte_count` catch a loop that overruns.
@@ -794,14 +672,14 @@ mod tests {
                 r.copy_bits_to(&mut dst, count).unwrap();
 
                 for i in 0..count {
-                    let src = off + i;
-                    let want = (data[(src >> 3) as usize] >> (src & 7)) & 1;
-                    let got = (dst[(i >> 3) as usize] >> (i & 7)) & 1;
-                    assert_eq!(got, want, "off={off} count={count} bit={i}");
+                    assert_eq!(
+                        bit(&dst, i),
+                        bit(&data, off + i),
+                        "off={off} count={count} bit={i}"
+                    );
                 }
 
-                // Padding above `count` must be zero: vrf-transform folds the
-                // tail byte over whole bytes, so stale bits corrupt it.
+                // Padding above `count` must be zero; see `copy_bits_to`.
                 let pad = (byte_count as u64) * 8 - count;
                 if pad > 0 {
                     assert_eq!(
@@ -832,10 +710,7 @@ mod tests {
             r.skip_bits(start).unwrap();
             r.copy_bits_to(&mut dst, count).unwrap();
             for i in 0..count {
-                let src = start + i;
-                let want = (data[(src >> 3) as usize] >> (src & 7)) & 1;
-                let got = (dst[(i >> 3) as usize] >> (i & 7)) & 1;
-                assert_eq!(got, want, "count={count} bit={i}");
+                assert_eq!(bit(&dst, i), bit(&data, start + i), "count={count} bit={i}");
             }
             assert!(
                 dst[byte_count..].iter().all(|&b| b == 0xAA),
@@ -846,9 +721,8 @@ mod tests {
 
     #[test]
     fn copy_bits_to_reports_a_small_destination_before_the_stream() {
-        // Order matters and is load-bearing: a caller that sized `dst` wrong has
-        // a bug at the call site and must hear about it, rather than getting a
-        // recoverable Eof back because the stream happened to be short too.
+        // A wrongly sized `dst` is a call-site bug: it must be reported ahead
+        // of the recoverable Eof the short stream would also give.
         let data = [0xFFu8];
         let mut r = BitReader::new(&data);
         let mut dst = [0u8; 1];
@@ -864,7 +738,6 @@ mod tests {
 
     #[test]
     fn reads_least_significant_bit_first() {
-        // 0b1010_0101 -> bit0 = 1, bit1 = 0, bit2 = 1, bit3 = 0 ...
         let data = [0b1010_0101u8];
         let mut r = BitReader::new(&data);
         let bits: Vec<bool> = (0..8).map(|_| r.read_bit().unwrap()).collect();
@@ -873,39 +746,6 @@ mod tests {
             vec![true, false, true, false, false, true, false, true]
         );
         assert!(r.at_end());
-    }
-
-    #[test]
-    fn read_bits_spans_byte_boundaries() {
-        // Two bytes little-endian = 0xBEEF; reading 16 bits must yield it whole.
-        let data = [0xEFu8, 0xBE];
-        let mut r = BitReader::new(&data);
-        assert_eq!(r.read_bits(16).unwrap(), 0xBEEF);
-
-        // Starting 4 bits in, the next 8 bits straddle the boundary.
-        let mut r = BitReader::new(&data);
-        r.skip_bits(4).unwrap();
-        assert_eq!(r.read_bits(8).unwrap(), 0xEE);
-    }
-
-    #[test]
-    fn read_bits_handles_full_width_at_offset() {
-        let data = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
-        let mut r = BitReader::new(&data);
-        r.skip_bits(4).unwrap();
-        let v = r.read_bits(64).unwrap();
-        // Expected: the 64 bits starting at bit 4 of the little-endian stream.
-        let lo = u64::from_le_bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
-        let expected = (lo >> 4) | (u64::from(0x99u8) << 60);
-        assert_eq!(v, expected);
-    }
-
-    #[test]
-    fn read_bits_zero_is_noop() {
-        let data = [0xFFu8];
-        let mut r = BitReader::new(&data);
-        assert_eq!(r.read_bits(0).unwrap(), 0);
-        assert_eq!(r.position(), 0);
     }
 
     #[test]
@@ -925,32 +765,24 @@ mod tests {
     }
 
     #[test]
-    fn int_packed_single_byte() {
-        // 7 payload bits, continuation clear: value 0x3F.
-        let data = [0x3F << 1];
-        let mut r = BitReader::new(&data);
-        assert_eq!(r.read_int_packed().unwrap(), 0x3F);
-        assert_eq!(r.position(), 8);
-    }
-
-    #[test]
-    fn int_packed_multi_byte_is_little_endian_in_chunks() {
-        // value 300 = 0b1_0010_1100 -> chunk0 = 0b010_1100 (44), chunk1 = 0b10 (2)
-        // byte0 = 44 << 1 | 1 (more), byte1 = 2 << 1 (last)
-        let data = [(44u8 << 1) | 1, 2u8 << 1];
-        let mut r = BitReader::new(&data);
-        assert_eq!(r.read_int_packed().unwrap(), 300);
-        assert_eq!(r.position(), 16);
+    fn int_packed_reads_7_bit_chunks_little_endian_from_the_bit_position() {
+        // (bytes, bits skipped, value, end). 300 is chunk 44 (with the
+        // continuation bit), then 2; the last row starts mid-byte.
+        for (data, skip, value, end) in [
+            (vec![0x3F << 1], 0, 0x3F, 8),
+            (vec![(44u8 << 1) | 1, 2 << 1], 0, 300, 16),
+            (vec![0x3F << 2, 0], 1, 0x3F, 9),
+        ] {
+            let mut r = BitReader::new(&data);
+            r.skip_bits(skip).unwrap();
+            assert_eq!(r.read_int_packed().unwrap(), value, "{data:?}");
+            assert_eq!(r.position(), end, "{data:?}");
+        }
     }
 
     #[test]
     fn int_packed_rejects_a_fifth_chunk_that_overflows_u32() {
-        // Four continuation bytes carrying zero payload, then a fifth chunk of
-        // 16. At shift 28 a u32 has exactly four payload bits left, so
-        // `16u32 << 28` is zero: the read returned `Ok(0)` for a value that is
-        // not zero. Zero is the TERMINATOR of every property loop in this
-        // project, so the wrong answer does not merely mis-report one field --
-        // it ends the record and drops every field after it.
+        // Four empty continuation chunks, then 16 at shift 28 (see the method).
         let data = [0x01u8, 0x01, 0x01, 0x01, 0x20];
         let mut r = BitReader::new(&data);
         assert_eq!(
@@ -961,11 +793,8 @@ mod tests {
 
     #[test]
     fn int_packed_runaway_outranks_overflow() {
-        // `[0xFF; 8]`'s fifth byte carries both a set continuation bit and a
-        // payload of 127. Which error it reports is not cosmetic: callers
-        // record malformed blocks by error shape, and this is the case
-        // `int_packed_rejects_runaway` has always pinned. Testing the
-        // continuation bit before the payload width is what keeps it.
+        // The fifth byte both continues and overflows; callers classify blocks
+        // by error shape, so the runaway must win.
         let data = [0xFFu8; 8];
         let mut r = BitReader::new(&data);
         assert_eq!(
@@ -977,10 +806,8 @@ mod tests {
 
     #[test]
     fn int_packed_accepts_the_largest_representable_fifth_chunk() {
-        // Regression guard on the other side of the same boundary: u32::MAX
-        // encodes as four full 0x7F chunks plus a fifth of 15, which is the
-        // widest fifth chunk a real encoder can emit. The overflow check must
-        // not touch it.
+        // u32::MAX: four 0x7F chunks and a fifth of 15, the widest a real
+        // encoder emits.
         let data = [0xFFu8, 0xFF, 0xFF, 0xFF, 15 << 1];
         let mut r = BitReader::new(&data);
         assert_eq!(r.read_int_packed().unwrap(), u32::MAX);
@@ -988,38 +815,14 @@ mod tests {
     }
 
     #[test]
-    fn int_packed_rejects_runaway() {
-        let data = [0xFFu8; 8];
-        let mut r = BitReader::new(&data);
-        assert_eq!(
-            r.read_int_packed().unwrap_err(),
-            BitError::MalformedIntPacked { position: 0 }
-        );
-    }
-
-    #[test]
-    fn int_packed_is_bit_aligned_not_byte_aligned() {
-        // Same value, but the stream starts one bit in: the reader must still
-        // consume 8 bits per chunk from the *bit* position.
-        let value = 0x3Fu8 << 1;
-        let shifted = [(value as u16) << 1].map(|v| v);
-        let data = [(shifted[0] & 0xFF) as u8, (shifted[0] >> 8) as u8];
-        let mut r = BitReader::new(&data);
-        r.skip_bits(1).unwrap();
-        assert_eq!(r.read_int_packed().unwrap(), 0x3F);
-    }
-
-    #[test]
     fn serialized_int_spends_log2_bits_then_maybe_one_more() {
-        // max = 4 -> value_bits = 2, bit_mask = 4. value 0..=3 all satisfy
-        // value + 4 >= 4, so exactly 2 bits are consumed and no extra bit.
+        // max 4: 2 bits, and every value + 4 >= 4, so no third bit.
         let data = [0b11u8];
         let mut r = BitReader::new(&data);
         assert_eq!(r.read_serialized_int(4).unwrap(), 3);
         assert_eq!(r.position(), 2);
 
-        // max = 5 -> value_bits = 2, bit_mask = 4. value 0 gives 0 + 4 < 5, so a
-        // third bit is read and can raise the value to 4.
+        // max 5: 2 bits read 0, and 0 + 4 < 5, so a third bit raises it to 4.
         let data = [0b100u8];
         let mut r = BitReader::new(&data);
         assert_eq!(r.read_serialized_int(5).unwrap(), 4);
@@ -1041,6 +844,45 @@ mod tests {
         assert_eq!(
             r.read_serialized_int(0).unwrap_err(),
             BitError::InvalidSerializedIntMax { max: 0 }
+        );
+    }
+
+    #[test]
+    fn component_bits_of_63_reads_all_189_declared_bits() {
+        // Header 63 (the widest width), then 1, -1 and -2^62 from bits 7, 70
+        // and 133, each 63 bits.
+        let mut data = [0u8; 25];
+        data[0] = 0xBF; // 0b011_1111, then bit 0 of the 1
+        data[8] = 0xC0; // the -1 from bit 70 ...
+        data[9..16].fill(0xFF);
+        data[16] = 0x1F; // ... to bit 132
+        data[24] = 0x08; // bit 195, the sign bit of -2^62
+        let mut r = BitReader::with_bit_len(&data, 196).unwrap();
+        let vector = r.read_quantized_vector(100).unwrap();
+        assert_eq!(vector, [1.0, -1.0, -(2f64.powi(62))]);
+        assert_eq!(r.position(), 7 + 189, "all three components must be read");
+    }
+
+    #[test]
+    #[should_panic(expected = "component_bits must be 1..=63")]
+    fn a_width_the_header_cannot_express_is_refused_even_without_debug_assertions() {
+        let data = [0xFFu8; 32];
+        let _ = BitReader::new(&data).read_quantized_components(64);
+    }
+
+    #[test]
+    fn a_truncated_63_bit_vector_reports_eof_rather_than_a_zero_vector() {
+        // Header 63, then 100 of the 189 component bits: the second one fails.
+        let mut data = [0u8; 14];
+        data[0] = 0x3F;
+        let mut r = BitReader::with_bit_len(&data, 107).unwrap();
+        assert_eq!(
+            r.read_quantized_vector(100).unwrap_err(),
+            BitError::Eof {
+                position: 70,
+                length: 107,
+                requested: 63
+            }
         );
     }
 
@@ -1117,36 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn copy_bits_masks_padding() {
-        // 0xBF = 0b1011_1111. Copying 1 bit must yield 0x01, not 0xBF: the
-        // transform runs over bytes, so padding has to be zero.
-        let data = [0xBFu8];
-        let mut r = BitReader::new(&data);
-        let mut dst = [0xAAu8; 1];
-        r.copy_bits_to(&mut dst, 1).unwrap();
-        assert_eq!(dst[0], 0x01);
-    }
-
-    #[test]
-    fn copy_bits_across_many_words() {
-        let data: Vec<u8> = (0..=20u8).collect();
-        let mut r = BitReader::new(&data);
-        let mut dst = vec![0u8; 21];
-        r.copy_bits_to(&mut dst, 21 * 8).unwrap();
-        assert_eq!(dst, data);
-    }
-
-    #[test]
-    fn copy_bits_from_unaligned_start() {
-        let data = [0b1111_0000u8, 0b0000_1111];
-        let mut r = BitReader::new(&data);
-        r.skip_bits(4).unwrap();
-        let mut dst = [0u8; 1];
-        r.copy_bits_to(&mut dst, 8).unwrap();
-        assert_eq!(dst[0], 0b1111_1111);
-    }
-
-    #[test]
     fn sub_reader_is_a_window_that_advances_the_parent() {
         let data = [0xFFu8, 0x00, 0xFF];
         let mut parent = BitReader::new(&data);
@@ -1167,15 +979,6 @@ mod tests {
         let mut child = parent.sub_reader(8).unwrap();
         let mut grandchild = child.sub_reader(4).unwrap();
         assert_eq!(grandchild.read_bits(4).unwrap(), 0xF);
-    }
-
-    #[test]
-    fn with_bit_len_hides_trailing_padding() {
-        let data = [0xFFu8, 0xFF];
-        let mut r = BitReader::with_bit_len(&data, 12).unwrap();
-        assert_eq!(r.bits_remaining(), 12);
-        r.skip_bits(12).unwrap();
-        assert!(r.read_bit().is_err());
     }
 
     #[test]

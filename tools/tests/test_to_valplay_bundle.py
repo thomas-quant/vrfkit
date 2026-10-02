@@ -1,89 +1,112 @@
+import base64
 import contextlib
 import io
 import json
+import math
+import os
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import NamedTuple
+from unittest import mock
 
+import numpy
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import to_valplay_bundle as bundle  # noqa: E402
+from support import TempDirTestCase
+import to_valplay_bundle as bundle
 
 
-def write_fields_parquet(path: Path, rows: list[dict]) -> None:
-    """Write a fields.parquet with the column set the bundle reads.
-
-    Module level so every test class can build an export; `rows` carries only
-    the columns a case cares about and the rest default to null.
-    """
-    def values(name, default=None):
-        return [row.get(name, default) for row in rows]
-
-    table = pa.table(
-        {
-            "time_ms": pa.array(values("time_ms"), type=pa.uint32()),
-            "packet_id": pa.array(values("packet_id"), type=pa.uint32()),
-            "channel_index": pa.array(values("channel_index", 7), type=pa.uint32()),
-            "actor_net_guid": pa.array(values("actor"), type=pa.uint32()),
-            "object_net_guid": pa.array(values("object"), type=pa.uint32()),
-            "group_path": pa.array(values("group_path"), type=pa.string()),
-            "handle": pa.array(values("handle", 0), type=pa.uint32()),
-            "field_name": pa.array(values("field_name"), type=pa.string()),
-            "bit_count": pa.array(values("bit_count"), type=pa.uint32()),
-            "raw_bits": pa.array(values("raw_bits"), type=pa.binary()),
-            "value_i64": pa.array(values("value_i64"), type=pa.int64()),
-            "value_f64": pa.array(values("value_f64"), type=pa.float64()),
-            "value_bool": pa.array(values("value_bool"), type=pa.bool_()),
-            "value_str": pa.array(values("value_str"), type=pa.string()),
-        }
-    )
-    pq.write_table(table, path)
+OLD_GUARDIAN = "/Game/Equippables/Guns/SniperRifles/Dmr/DMR.DMR_C"
+NEW_GUARDIAN = "/Game/Equippables/Guns/SniperRifles/DMR/DMR.DMR_C"
 
 
-def write_actors_parquet(path: Path, rows: list[dict]) -> None:
-    """Write an actors.parquet with the columns `_build_actor_events` reads.
+class EquippableResolutionTests(unittest.TestCase):
+    def test_guardian_directory_alias_resolves_at_firing_state_seam(self):
+        resolved = bundle._resolve_equippable(
+            41,
+            {41: 42},
+            {},
+            {42: NEW_GUARDIAN},
+        )
 
-    Column types follow `crates/vrf-export/src/schema.rs::actors_schema` --
-    `class_path`/`archetype_path` are dictionary-encoded there, and the adapter
-    has a separate code path for dictionary columns, so encoding them as plain
-    strings here would exercise the wrong branch.
-    """
-    def values(name, default=None):
-        return [row.get(name, default) for row in rows]
+        self.assertEqual(
+            resolved,
+            (42, "Guardian", "rifle", OLD_GUARDIAN),
+        )
 
-    def u32(name):
-        return pa.array([row.get(name, 0) for row in rows], type=pa.uint32())
+    def test_unmeasured_guardian_case_variant_stays_unresolved(self):
+        resolved = bundle._resolve_equippable(
+            41,
+            {41: 42},
+            {},
+            {42: NEW_GUARDIAN.replace("/DMR/", "/dMR/")},
+        )
 
-    def f32(name):
-        return pa.array(values(name), type=pa.float32())
+        self.assertIsNone(resolved)
 
-    dict_type = pa.dictionary(pa.int32(), pa.string())
-    table = pa.table(
-        {
-            "time_ms": u32("time_ms"),
-            "packet_id": u32("packet_id"),
-            "channel_index": u32("channel_index"),
-            "actor_net_guid": u32("actor"),
-            "event": pa.array(values("event"), type=pa.string()),
-            "class_path": pa.array(values("class_path"), type=pa.string()).dictionary_encode().cast(dict_type),
-            "archetype_path": pa.array(values("archetype_path"), type=pa.string()).dictionary_encode().cast(dict_type),
-            "spawn_x": f32("spawn_x"),
-            "spawn_y": f32("spawn_y"),
-            "spawn_z": f32("spawn_z"),
-            "spawn_pitch": f32("spawn_pitch"),
-            "spawn_yaw": f32("spawn_yaw"),
-            "spawn_roll": f32("spawn_roll"),
-        }
-    )
-    pq.write_table(table, path)
+    def test_every_key_shape_resolves_to_the_canonical_entry(self):
+        for key in (OLD_GUARDIAN, NEW_GUARDIAN, OLD_GUARDIAN.rpartition(".")[0],
+                    NEW_GUARDIAN.rpartition(".")[0], "Default__DMR_C"):
+            with self.subTest(key):
+                self.assertEqual(bundle.EQUIPPABLE_BY_PATH[key],
+                                 ("Guardian", "rifle", OLD_GUARDIAN))
 
 
-#: One innocuous replicated property, so `convert` has a fields.parquet to read
-#: when the case under test is about some other table.
+def col(kind, key=None, default=None) -> tuple:
+    """One column of a table spec: its type, the row key that fills it (the
+    column name unless given) and the value of a row without that key."""
+    return kind, key, default
+
+
+U32, F32, STR = pa.uint32(), pa.float32(), pa.string()
+#: vrf-export dictionary-encodes path columns, which the adapter reads on a
+#: separate path; a plain string column would exercise the wrong branch.
+PATHS = pa.dictionary(pa.int32(), pa.string())
+
+#: Every column the adapter reads from each table, keyed by table.
+SPECS = {
+    "fields": dict(
+        time_ms=col(U32), packet_id=col(U32), channel_index=col(U32, default=7),
+        actor_net_guid=col(U32, "actor"), object_net_guid=col(U32, "object"),
+        group_path=col(STR), handle=col(U32, default=0), field_name=col(STR),
+        bit_count=col(U32), raw_bits=col(pa.binary()), value_i64=col(pa.int64()),
+        value_f64=col(pa.float64()), value_bool=col(pa.bool_()), value_str=col(STR)),
+    "actors": dict(
+        time_ms=col(U32, default=0), packet_id=col(U32, default=0),
+        channel_index=col(U32, default=0), actor_net_guid=col(U32, "actor", 0),
+        event=col(STR), class_path=col(PATHS), archetype_path=col(PATHS),
+        **{f"spawn_{axis}": col(F32) for axis in ("x", "y", "z", "pitch", "yaw", "roll")}),
+    "movement": dict(
+        time_ms=col(U32, default=0), packet_id=col(U32, default=0),
+        character_net_guid=col(U32, "char", 0),
+        **{name: col(F32, default=0.0) for name in (
+            "pos_x", "pos_y", "pos_z", "yaw", "pitch", "vel_x", "vel_y", "vel_z")}),
+    "net_guids": dict(net_guid=col(U32), outer_net_guid=col(U32, "outer"), path=col(STR)),
+    # The private columns carry a marker, so a whole-row copy past the
+    # timeline allowlist fails loudly.
+    "events": dict(
+        id=col(STR, default="private-id"), group=col(STR),
+        metadata=col(STR, default="private-metadata"), time1=col(U32, default=0),
+        time2=col(U32, default=0), payload_size=col(pa.int32(), default=0),
+        raw_payload=col(pa.binary(), default=b"private-payload"), word0=col(U32),
+        word1=col(U32), payload_tag=col(U32), payload_name=col(STR),
+        payload_seconds=col(F32)),
+}
+
+
+def write_table(path: Path, rows, spec: dict) -> None:
+    pq.write_table(pa.table({
+        name: pa.array([row.get(key or name, default) for row in rows], type=kind)
+        for name, (kind, key, default) in spec.items()}), path)
+
+
+#: One innocuous replicated property, so a case about another table still
+#: has a fields.parquet to read.
 MINIMAL_FIELD_ROWS = [
     {
         "time_ms": 10,
@@ -96,126 +119,311 @@ MINIMAL_FIELD_ROWS = [
     },
 ]
 
+#: A PlayerState row the parser could not name, beside MINIMAL_FIELD_ROWS'
+#: one: a dropped row the loss tally must count.
+UNNAMED_PROPERTY_ROW = {
+    "time_ms": 10, "packet_id": 1, "actor": 101, "group_path": "PlayerState",
+    "field_name": None, "bit_count": 3, "raw_bits": b"\x05",
+}
 
-def write_movement_parquet(path: Path, rows: list[dict]) -> None:
-    """Write a movement.parquet with the columns `_write_movement` reads."""
-    def values(name, default=0.0):
-        return [row.get(name, default) for row in rows]
+MANIFEST = {"replay_version": "5.3.2"}
+RPC_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
+SHOT_RPC = "/Script/ShooterGame.ShooterCharacter_ClassNetCache"
 
-    def u32(name):
-        return pa.array([row.get(name, 0) for row in rows], type=pa.uint32())
 
-    table = pa.table(
-        {
-            "time_ms": u32("time_ms"),
-            "packet_id": u32("packet_id"),
-            "character_net_guid": u32("char"),
-            "pos_x": pa.array(values("pos_x"), type=pa.float32()),
-            "pos_y": pa.array(values("pos_y"), type=pa.float32()),
-            "pos_z": pa.array(values("pos_z"), type=pa.float32()),
-            "yaw": pa.array(values("yaw"), type=pa.float32()),
-            "pitch": pa.array(values("pitch"), type=pa.float32()),
-            "vel_x": pa.array(values("vel_x"), type=pa.float32()),
-            "vel_y": pa.array(values("vel_y"), type=pa.float32()),
-            "vel_z": pa.array(values("vel_z"), type=pa.float32()),
-        }
-    )
-    pq.write_table(table, path)
+def write_export(path: Path, fields=MINIMAL_FIELD_ROWS, *, actors=(), movement=(),
+                 net_guids=(), timeline=(), manifest=MANIFEST) -> Path:
+    """An export as `vrfkit export` writes one: every table (empty unless
+    given; `timeline` is events.parquet) and the manifest."""
+    path.mkdir(parents=True)
+    for name, rows in (("fields", fields), ("actors", actors), ("movement", movement),
+                       ("net_guids", net_guids), ("events", timeline)):
+        write_table(path / f"{name}.parquet", list(rows), SPECS[name])
+    (path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+class Converted(NamedTuple):
+    """One conversion: `convert`'s result, each bundle file's bytes and what
+    it printed."""
+
+    summary: dict
+    files: dict
+    printed: str
+
+    @property
+    def tally(self):
+        return self.summary["tally"]
+
+    @property
+    def manifest(self) -> dict:
+        return json.loads(self.files["manifest.json"])
+
+    def events(self, event_type=None) -> list[dict]:
+        events = [json.loads(line) for line in self.files["events.ndjson"].splitlines()]
+        return [e for e in events if event_type in (None, e["type"])]
+
+    def movement(self) -> list[str]:
+        return self.files["movement.ndjson"].decode("utf-8").splitlines()
+
+
+def run(fields=MINIMAL_FIELD_ROWS, *, verbose=False, **tables) -> Converted:
+    """Convert a fresh `write_export` of `fields` and `tables`."""
+    printed = io.StringIO()
+    with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(printed):
+        export = write_export(Path(tmp) / "export", fields, **tables)
+        out = Path(tmp) / "bundle"
+        summary = bundle.convert(export, out, verbose=verbose)
+        files = {path.name: path.read_bytes() for path in out.iterdir()}
+    return Converted(summary, files, printed.getvalue())
+
+
+class RequiredInputTests(unittest.TestCase):
+    """`vrfkit export` writes every table and the manifest in one transaction;
+    an export missing one is refused, naming it, before anything is written."""
+
+    def test_each_missing_input_is_named_and_nothing_is_written(self):
+        for name in ("manifest.json", "fields.parquet", "actors.parquet",
+                     "net_guids.parquet", "events.parquet", "movement.parquet"):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                export = write_export(Path(tmp) / "export")
+                (export / name).unlink()
+                with self.assertRaisesRegex(FileNotFoundError, f"^{re.escape(name)} not found"):
+                    bundle.convert(export, Path(tmp) / "out" / "bundle")
+                self.assertFalse((Path(tmp) / "out").exists())
 
 
 class MovementCollapseTests(unittest.TestCase):
-    """The bundle keeps the final move PER PACKET, which is what the reference has.
-
-    Every sub-move decoded out of one movement RPC is stamped with the
-    time_ms and packet_id the sink hoisted before the loop
-    (vrfkit/src/sink/stream.rs, decode_movement_rpc), so all sub-moves of one
-    packet share both. Collapsing on the millisecond therefore also merges
-    two DIFFERENT packets that land in the same millisecond, and the earlier
-    packet's final move -- a real, distinct sample -- disappears.
-    """
-
-    @staticmethod
-    def convert_movement(root: Path, rows: list[dict]) -> list[str]:
-        export = root / "export"
-        out = root / "bundle"
-        export.mkdir()
-        write_fields_parquet(export / "fields.parquet", MINIMAL_FIELD_ROWS)
-        write_movement_parquet(export / "movement.parquet", rows)
-        bundle.convert(export, out)
-        text = (out / "movement.ndjson").read_text(encoding="utf-8")
-        return text.splitlines()
+    """The final move per PACKET is kept, never per millisecond (the reason is
+    `_write_movement`'s)."""
 
     def test_two_packets_in_one_millisecond_each_keep_their_final_move(self):
         rows = [
             # Packet 1: two sub-moves, only the second survives.
             {"time_ms": 100, "packet_id": 1, "char": 42, "pos_x": 1.0},
             {"time_ms": 100, "packet_id": 1, "char": 42, "pos_x": 2.0},
-            # Packet 2, same millisecond, same character: a separate final
-            # move that must NOT be treated as packet 1's sub-move.
+            # Packet 2, same ms and character: its own final move.
             {"time_ms": 100, "packet_id": 2, "char": 42, "pos_x": 3.0},
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            lines = self.convert_movement(Path(tmp), rows)
+        lines = run(movement=rows).movement()
 
         self.assertEqual(len(lines), 2, lines)
         self.assertIn('"x":2', lines[0])
         self.assertIn('"x":3', lines[1])
 
-    def test_sub_moves_within_one_packet_are_still_collapsed(self):
-        rows = [
-            {"time_ms": 100, "packet_id": 1, "char": 42, "pos_x": 1.0},
-            {"time_ms": 100, "packet_id": 1, "char": 42, "pos_x": 2.0},
-            {"time_ms": 100, "packet_id": 1, "char": 43, "pos_x": 9.0},
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            lines = self.convert_movement(Path(tmp), rows)
 
-        self.assertEqual(len(lines), 2, lines)
-        self.assertIn('"x":2', lines[0])
-        self.assertIn('"x":9', lines[1])
+#: float32 values where a vectorised shortcut and the per-value encoder can
+#: disagree, compared with the per-value rule, never with a literal, so the
+#: test pins the contract and not today's spelling of it.
+TEXT_RULE_EDGES = (
+    float("inf"), float("-inf"), float("nan"),
+    # >= 2**24 every float32 is an integer, but not every one prints as its
+    # exact integer: 123456792 round-trips as 123456790.
+    123456792.0, 1e16, 1e20,
+    3.4028234663852886e38, -3.4028234663852886e38,        # +/- FLT_MAX
+    16777216.0, 16777215.0, -16777215.0, 33554436.0,
+    8388608.0, 12345670.0,
+    # numpy writes non-integral values from 1e6 up in scientific notation;
+    # the rule writes them positional. 999999.94 is the last one both agree on.
+    8388607.5, 1234567.5, -1234567.5, 1000000.0625, 999999.94,
+    # float32(1e-4) is 9.99999975e-05: numpy judges the binary value and
+    # writes '1e-04', repr judges the decimal and writes '0.0001'.
+    1e-4, -1e-4, 1.0000000474974513e-04, 9.9e-05,
+    1e-05, 1e-07, 1e-45, 1.1754943508222875e-38,          # exponent form,
+    #                                                       subnormal, min normal
+    2382.2, 349.99, -349.99, 253.289794921875, 0.1, 1.5,
+    0.0, -0.0,
+)
 
 
-class MovementTruncationTests(unittest.TestCase):
-    """A replay with no movement table must not inherit the previous one's.
+def column_text(values, *, shorten):
+    """Per-row text of `_json_scalar_column` for `values` as float32, fanned
+    back out through its inverse as the writer does."""
+    arr = numpy.array(values, dtype=numpy.float32)
+    texts, inverse = bundle._json_scalar_column(arr, shorten=shorten)
+    return texts.take(inverse).to_pylist()
 
-    `convert` reuses an existing output directory, so converting replay B over
-    replay A's bundle left A's movement.ndjson sitting beside B's events while
-    the run reported success.
-    """
 
-    def test_missing_movement_table_truncates_a_reused_bundle_directory(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with_mv = root / "with_movement"
-            without_mv = root / "without_movement"
-            out = root / "bundle"
-            with_mv.mkdir()
-            without_mv.mkdir()
-            write_fields_parquet(with_mv / "fields.parquet", MINIMAL_FIELD_ROWS)
-            write_fields_parquet(without_mv / "fields.parquet", MINIMAL_FIELD_ROWS)
-            write_movement_parquet(
-                with_mv / "movement.parquet",
-                [{"time_ms": 100, "packet_id": 1, "char": 42, "pos_x": 1.0}],
-            )
+def per_value_text(values, *, shorten):
+    """The oracle: one encoder call per row, the rule before vectorisation."""
+    encode = bundle._JSON.encode
+    widened = [float(v) for v in numpy.array(values, dtype=numpy.float32)]
+    if shorten:
+        return [encode(bundle._f32_shortest(v)) for v in widened]
+    return [encode(v) for v in widened]
 
-            bundle.convert(with_mv, out)
-            self.assertNotEqual(
-                (out / "movement.ndjson").read_text(encoding="utf-8"), ""
-            )
 
-            summary = bundle.convert(without_mv, out)
+class MovementTextRuleTests(unittest.TestCase):
+    """Each distinct value's text is the per-value encoder's, the contract of
+    `_json_scalar_column`."""
 
-            self.assertEqual(summary["movement_written"], 0)
-            self.assertTrue(
-                (out / "movement.ndjson").exists(),
-                "movement.ndjson was neither written nor truncated",
-            )
+    def test_shortened_columns_match_the_per_value_encoder(self):
+        self.assertEqual(
+            column_text(TEXT_RULE_EDGES, shorten=True),
+            per_value_text(TEXT_RULE_EDGES, shorten=True),
+        )
+
+    def test_unshortened_columns_match_the_per_value_encoder(self):
+        self.assertEqual(
+            column_text(TEXT_RULE_EDGES, shorten=False),
+            per_value_text(TEXT_RULE_EDGES, shorten=False),
+        )
+
+    def test_a_candidate_rounded_past_float32_is_skipped_on_every_python(self):
+        # struct.pack("f", x) past FLT_MAX returns inf on 3.12 and raises
+        # OverflowError on 3.13, and shortening FLT_MAX tries 3.403e+38.
+        # Emulate 3.13, so the property is checked whichever Python runs.
+        real = bundle._struct
+
+        class Strict:
+            unpack = staticmethod(real.unpack)
+
+            @staticmethod
+            def pack(fmt, *values):
+                out = real.pack(fmt, *values)
+                if fmt.endswith("f") and any(
+                        math.isfinite(v) and math.isinf(real.unpack(fmt, real.pack(fmt, v))[0])
+                        for v in values):
+                    raise OverflowError("float too large to pack with f format")
+                return out
+
+        flt_max = 3.4028234663852886e38
+        with mock.patch.object(bundle, "_struct", Strict):
+            self.assertEqual(bundle._f32_shortest(flt_max), 3.4028235e38)
+            self.assertEqual(bundle._f32_shortest(-flt_max), -3.4028235e38)
             self.assertEqual(
-                (out / "movement.ndjson").read_text(encoding="utf-8"), ""
+                column_text(TEXT_RULE_EDGES, shorten=True),
+                per_value_text(TEXT_RULE_EDGES, shorten=True),
             )
 
+    def test_each_zero_keeps_its_own_sign(self):
+        """-0.0 == 0.0; both orders, since which sign a value-level unique
+        keeps depends on the sort's tie-break."""
+        for values in ([0.0, -0.0, 5.0, -0.0], [-0.0, 0.0, 5.0, 0.0]):
+            with self.subTest(values=values):
+                self.assertEqual(column_text(values, shorten=False),
+                                 per_value_text(values, shorten=False))
+                self.assertEqual(column_text(values, shorten=True),
+                                 per_value_text(values, shorten=True))
 
-class TransactionalConversionTests(unittest.TestCase):
+
+#: The movement line as the per-row writer spelled it: a COPY, not
+#: `_MOVEMENT_LINE`, so a change to the constant or to how the writer derives
+#: its fragments turns the oracle red instead of moving both sides at once.
+ORACLE_MOVEMENT_LINE = (
+    '{"time_ms":%s,"shooter_character_net_guid":%s,'
+    '"position":{"x":%s,"y":%s,"z":%s},'
+    '"velocity":{"x":%s,"y":%s,"z":%s},'
+    '"yaw":%s,"pitch":%s}\n'
+)
+
+
+def oracle_movement_bytes(rows: list[dict]) -> bytes:
+    """movement.ndjson as the per-row writer produced it: the last row per
+    (packet_id, character), one encoder call per value, os.linesep endings."""
+    last = {}
+    for i, row in enumerate(rows):
+        last[(row.get("packet_id", 0), row.get("char", 0))] = i
+    encode = bundle._JSON.encode
+
+    def f32(row, name):
+        return float(numpy.float32(row.get(name, 0.0)))
+
+    lines = []
+    for i in sorted(last.values()):
+        row = rows[i]
+        lines.append(ORACLE_MOVEMENT_LINE % (
+            row.get("time_ms", 0), row.get("char", 0),
+            *(encode(bundle._f32_shortest(f32(row, n)))
+              for n in ("pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z")),
+            encode(f32(row, "yaw")), encode(f32(row, "pitch")),
+        ))
+    return "".join(lines).replace("\n", os.linesep).encode("ascii")
+
+
+def oracle_rows() -> list[dict]:
+    """Integral, -0.0, exponent-form, large, non-finite and ordinary values,
+    sub-moves to collapse, two characters, and large ids -- enough rows to
+    span several write blocks at the block sizes the test patches in."""
+    values = [0.0, -0.0, 1.0, -3.0, 1e-05, 1e-07, 2382.2, 349.99, -349.99,
+              0.1, 1234567.5, 123456792.0, 16777215.0, 1e-4, 51292.77,
+              float("inf"), float("-inf"), float("nan"), 253.289794921875]
+    rows = []
+    for i in range(61):
+        v = values[i % len(values)]
+        w = values[(i * 7 + 3) % len(values)]
+        rows.append({
+            "time_ms": 1000 + i // 3, "packet_id": 1 + i // 3,
+            "char": (40, 4294967295)[i % 2],
+            "pos_x": v, "pos_y": w, "pos_z": -v,
+            "vel_x": w, "vel_y": v * 0.5, "vel_z": 0.0 if i % 5 else -0.0,
+            "yaw": (0.0, -0.0, 359.9945068359375, 253.289794921875)[i % 4],
+            "pitch": (-0.0, 0.0, 1e-05, 90.5)[i % 4],
+        })
+    return rows
+
+
+class MovementLineAssemblyTests(TempDirTestCase):
+    """movement.ndjson, assembled in Arrow, is the per-row oracle's bytes."""
+
+    def write(self, rows: list[dict], block_rows: int) -> bytes:
+        root = self.tmp()
+        write_table(root / "movement.parquet", rows, SPECS["movement"])
+        out = root / "out"
+        out.mkdir()
+        with mock.patch.object(bundle, "_MOVEMENT_BLOCK_ROWS", block_rows):
+            bundle._write_movement(root / "movement.parquet", out, False)
+        return (out / "movement.ndjson").read_bytes()
+
+    def test_bytes_equal_the_per_row_writer(self):
+        rows = oracle_rows()
+        expected = oracle_movement_bytes(rows)
+        # Guards on the oracle itself: sub-moves were collapsed, and the kept
+        # lines span several of the 7-row blocks below with a partial last one.
+        lines = expected.count(os.linesep.encode())
+        self.assertLess(lines, len(rows))
+        self.assertGreater(lines, 14)
+        self.assertNotEqual(lines % 7, 0)
+        # One block, full blocks plus a partial last one, one row per block.
+        for block_rows in (1 << 18, 7, 1):
+            with self.subTest(block_rows=block_rows):
+                self.assertEqual(self.write(rows, block_rows), expected)
+
+    def test_lines_end_the_way_the_text_mode_file_ended_them(self):
+        data = self.write(oracle_rows(), 7)
+        self.assertEqual(data.count(os.linesep.encode()), data.count(b"\n"))
+        self.assertTrue(data.endswith(os.linesep.encode()))
+
+    def test_an_empty_table_writes_an_empty_file(self):
+        self.assertEqual(self.write([], 7), b"")
+
+    def test_a_null_in_a_movement_column_stops_the_conversion(self):
+        """A null would reach `to_numpy` as float64 NaN: float-spelled times."""
+        for column in ("time_ms", "pos_x"):
+            with self.subTest(column=column):
+                root = self.tmp()
+                path = root / "movement.parquet"
+                write_table(path, oracle_rows()[:3], SPECS["movement"])
+                table = pq.read_table(path)
+                index = table.schema.get_field_index(column)
+                values = table.column(column).to_pylist()
+                values[1] = None
+                table = table.set_column(index, column, pa.array(
+                    values, type=table.schema.field(column).type))
+                pq.write_table(table, path)
+                out = root / "out"
+                out.mkdir()
+                with self.assertRaisesRegex(ValueError, column):
+                    bundle._write_movement(path, out, False)
+
+    def test_only_the_arrays_own_bytes_are_written(self):
+        """A slice shares its parent's data buffer, so the buffer holds bytes
+        before and after the slice's values; only the values are the text."""
+        sliced = pa.array(["a", "bb", "ccc", "dddd"], type=pa.string()).slice(1, 2)
+        self.assertEqual(bytes(bundle._string_bytes(sliced)), b"bbccc")
+
+
+class TransactionalConversionTests(TempDirTestCase):
     @staticmethod
     def snapshot(path: Path) -> dict[str, bytes]:
         return {
@@ -226,123 +434,123 @@ class TransactionalConversionTests(unittest.TestCase):
 
     @staticmethod
     def make_export(path: Path) -> bytes:
-        path.mkdir(parents=True)
-        write_fields_parquet(path / "fields.parquet", MINIMAL_FIELD_ROWS)
-        manifest = b'{"replay_version":"source","source_file":"match.vrf"}\n'
-        (path / "manifest.json").write_bytes(manifest)
-        return manifest
+        return (write_export(path) / "manifest.json").read_bytes()
 
-    def test_input_and_output_may_not_be_the_same_directory(self):
-        with tempfile.TemporaryDirectory() as temp:
-            export = Path(temp) / "export"
-            source_manifest = self.make_export(export)
-            before = self.snapshot(export)
+    def test_overlapping_trees_are_rejected_before_writing(self):
+        # The same directory, the output inside the input, the input inside
+        # the output.
+        for export, output in (("export", "export"), ("export", "export/bundle"),
+                               ("output/export", "output")):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self.make_export(root / export)
+                before = (sorted(root.rglob("*")), self.snapshot(root))
 
-            with self.assertRaises(ValueError):
-                bundle.convert(export, export)
+                with self.assertRaises(ValueError):
+                    bundle.convert(root / export, root / output)
 
-            self.assertEqual(self.snapshot(export), before)
-            self.assertEqual((export / "manifest.json").read_bytes(), source_manifest)
-
-    def test_output_nested_inside_input_is_rejected_before_writing(self):
-        with tempfile.TemporaryDirectory() as temp:
-            export = Path(temp) / "export"
-            self.make_export(export)
-            output = export / "bundle"
-
-            with self.assertRaises(ValueError):
-                bundle.convert(export, output)
-
-            self.assertFalse(output.exists())
-
-    def test_input_nested_inside_output_is_rejected_before_writing(self):
-        with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp) / "output"
-            export = output / "export"
-            self.make_export(export)
-            before = self.snapshot(output)
-
-            with self.assertRaises(ValueError):
-                bundle.convert(export, output)
-
-            self.assertEqual(self.snapshot(output), before)
+                self.assertEqual((sorted(root.rglob("*")), self.snapshot(root)), before)
 
     def test_conversion_failure_preserves_an_existing_complete_bundle(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            export = root / "export"
-            export.mkdir()
-            (export / "fields.parquet").write_bytes(b"not parquet")
-            (export / "manifest.json").write_text(
-                '{"replay_version":"new"}', encoding="utf-8"
-            )
-            output = root / "bundle"
-            output.mkdir()
-            for name, content in {
-                "manifest.json": "{\"replay_version\":\"old\"}",
-                "events.ndjson": "{\"type\":\"old\"}\n",
-                "movement.ndjson": "",
-                ".complete": "old marker",
-            }.items():
-                (output / name).write_text(content, encoding="utf-8")
-            before = self.snapshot(output)
+        root = self.tmp()
+        export = write_export(root / "export")
+        (export / "fields.parquet").write_bytes(b"not parquet")
+        output = root / "bundle"
+        output.mkdir()
+        for name, content in {
+            "manifest.json": "{\"replay_version\":\"old\"}",
+            "events.ndjson": "{\"type\":\"old\"}\n",
+            "movement.ndjson": "",
+            ".complete": "old marker",
+        }.items():
+            (output / name).write_text(content, encoding="utf-8")
+        before = self.snapshot(output)
 
-            with self.assertRaises(Exception):
-                bundle.convert(export, output)
+        with self.assertRaises(Exception):
+            bundle.convert(export, output)
 
-            self.assertEqual(self.snapshot(output), before)
-            self.assertEqual(
-                [p for p in root.iterdir() if p.name.startswith(".bundle.")], []
-            )
+        self.assertEqual(self.snapshot(output), before)
+        self.assertEqual(
+            [p for p in root.iterdir() if p.name.startswith(".bundle.")], []
+        )
 
     def test_success_never_modifies_the_source_manifest(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            export = root / "export"
-            original = self.make_export(export)
+        root = self.tmp()
+        export = root / "export"
+        original = self.make_export(export)
 
-            bundle.convert(export, root / "bundle")
+        bundle.convert(export, root / "bundle")
 
-            self.assertEqual((export / "manifest.json").read_bytes(), original)
+        self.assertEqual((export / "manifest.json").read_bytes(), original)
+
+    def test_the_summary_names_the_published_bundle(self):
+        """Not the `.bundle.*` staging directory the publish renames away."""
+        root = self.tmp()
+        self.make_export(root / "export")
+        output = root / "bundle"
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            bundle.convert(root / "export", output)
+        summary = [ln for ln in printed.getvalue().splitlines()
+                   if ln.startswith("Conversion ")]
+        self.assertEqual(len(summary), 1, printed.getvalue())
+        self.assertTrue(summary[0].endswith(": " + str(output.resolve())), summary)
+        self.assertTrue(output.is_dir())
+
+    def test_a_failed_publish_prints_no_completion_claim(self):
+        root = self.tmp()
+        self.make_export(root / "export")
+        printed = io.StringIO()
+        with (mock.patch.object(bundle, "_publish_bundle",
+                                side_effect=OSError("disk full")),
+              contextlib.redirect_stdout(printed),
+              self.assertRaises(OSError)):
+            bundle.convert(root / "export", root / "bundle")
+        self.assertNotIn("Conversion ", printed.getvalue())
 
     def test_backup_cleanup_failure_does_not_turn_a_committed_publish_into_failure(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            staging = root / ".bundle.staging"
-            output = root / "bundle"
-            staging.mkdir()
-            output.mkdir()
-            (staging / "manifest.json").write_text("new", encoding="utf-8")
-            (output / "manifest.json").write_text("old", encoding="utf-8")
+        root = self.tmp()
+        staging = root / ".bundle.staging"
+        output = root / "bundle"
+        staging.mkdir()
+        output.mkdir()
+        (staging / "manifest.json").write_text("new", encoding="utf-8")
+        (output / "manifest.json").write_text("old", encoding="utf-8")
 
-            real_remove_tree = bundle.remove_tree
+        def fail_cleanup(path, parent):
+            raise OSError(f"cannot remove {path} under {parent}")
 
-            def fail_cleanup(path, parent):
-                raise OSError(f"cannot remove {path} under {parent}")
+        stderr = io.StringIO()
+        with mock.patch.object(bundle, "remove_tree", fail_cleanup), contextlib.redirect_stderr(stderr):
+            bundle._publish_bundle(staging, output)
 
-            bundle.remove_tree = fail_cleanup
-            stderr = io.StringIO()
-            try:
-                with contextlib.redirect_stderr(stderr):
-                    bundle._publish_bundle(staging, output)
-            finally:
-                bundle.remove_tree = real_remove_tree
+        self.assertEqual(
+            (output / "manifest.json").read_text(encoding="utf-8"), "new"
+        )
+        backups = list(root.glob(".bundle.backup.*"))
+        self.assertEqual(len(backups), 1, backups)
+        self.assertEqual(
+            (backups[0] / "manifest.json").read_text(encoding="utf-8"), "old"
+        )
+        self.assertIn("backup", stderr.getvalue().lower())
 
-            self.assertEqual(
-                (output / "manifest.json").read_text(encoding="utf-8"), "new"
-            )
-            backups = list(root.glob(".bundle.backup.*"))
-            self.assertEqual(len(backups), 1, backups)
-            self.assertEqual(
-                (backups[0] / "manifest.json").read_text(encoding="utf-8"), "old"
-            )
-            self.assertIn("backup", stderr.getvalue().lower())
+
+class DefaultOutputTests(TempDirTestCase):
+    def test_a_windows_source_file_names_the_bundle_directory_on_any_os(self):
+        tmp = self.tmp()
+        (tmp / "manifest.json").write_text(
+            json.dumps({"source_file": "D:\\replays\\match.vrf"}), encoding="utf-8")
+        with (mock.patch.object(sys, "argv", ["to_valplay_bundle.py", str(tmp)]),
+              mock.patch.object(bundle.gc, "disable"),
+              mock.patch.object(bundle, "convert") as convert):
+            bundle.main()
+        self.assertEqual(convert.call_args.args[1].name, "match")
 
 
 class ShotEventTests(unittest.TestCase):
     def build_shot(self, scalar_params: dict) -> dict:
         return bundle._build_shot_event(
-            bundle._ShotContext(tag_table={}),
+            bundle._ShotContext({}),
             12788,
             4368,
             2,
@@ -384,25 +592,39 @@ class ShotEventTests(unittest.TestCase):
             },
         )
 
+    def test_the_firing_state_chain_names_the_weapon_and_fire_mode(self):
+        def decoded(blob, spec, tag_table, tally=None):
+            return {"FiringState.FiringState": 41} if spec is bundle._EFFECT_OBJECTS else {}
+
+        ctx = bundle._ShotContext({}, {41: 42}, {41: "ZoomedFiringState"}, {42: NEW_GUARDIAN})
+        with mock.patch.object(bundle, "_decode_effect_blob", decoded):
+            shot = bundle._build_shot_event(ctx, 1, 2, 3, 4, 5, {}, bundle._EffectBlobs())["shot"]
+        self.assertEqual(shot["equippable"], {"net_guid": 42, "name": "Guardian",
+                                              "category": "rifle", "class_path": OLD_GUARDIAN})
+        self.assertEqual((shot["fire_mode"], shot["fire_mode_evidence"]),
+                         ("alternate", "firing-state:ZoomedFiringState"))
+
+    def test_wire_booleans_are_published_as_sent(self):
+        shot = self.build_shot({"bTransient": False, "bLocalEffect": True})
+        self.assertEqual((shot["is_transient"], shot["is_local_effect"]), (False, True))
+        self.assertIs(self.build_shot({})["is_transient"], True)
+
+    def test_an_undecoded_alliance_filter_passes_through_unchanged(self):
+        """An untyped AllianceFilter's raw blob passes through, never a repr."""
+        blob = {"BitCount": 3, "Data": "Aw=="}
+        self.assertEqual(self.build_shot({"AllianceFilter": blob})["alliance_filter"], blob)
+        self.assertIsNone(self.build_shot({})["alliance_filter"])
+
 
 class EffectBlobBitLengthTests(unittest.TestCase):
-    """The bit length must come from the parser, not from the byte length.
-
-    Parquet stores whole bytes, so a payload of N bits arrives as ceil(N/8)
-    bytes with up to 7 padding bits in the last one. Deriving the length as
-    `len(data) * 8` hands those padding bits to the decoder as data.
-
-    Every effect blob measured -- 692,840 across the 11 cross-validated
-    replays -- has `bit_count == len(raw_bits) * 8`, so the two readings agree
-    on all real data and no corpus check can tell them apart. That is exactly
-    why this needs a test: the wrong reading is currently invisible.
-    """
+    """The bit length comes from the parser, not the byte length; no corpus
+    blob tells the two apart (see `_EffectBlob`)."""
 
     SPEC = bundle._EFFECT_FLOATS
 
     # A real FloatValues payload lifted from 02d4d478's fields.parquet: 50
     # bytes, declared 400 bits, four complete tag/value pairs. It is also the
-    # first of the eight vectors pinned in crates/vrf-decode/src/effect.rs.
+    # first of the vectors pinned in crates/vrf-decode/src/effect/tests.rs.
     BLOB = bytes.fromhex(
         "08021020390412400000803f000410200f0412400000a040"
         "000610203d0412400000803f000810203b04124015f9b3ce0000"
@@ -416,78 +638,195 @@ class EffectBlobBitLengthTests(unittest.TestCase):
         )
 
     def test_declared_length_is_used_rather_than_the_byte_length(self):
-        # Same 50 bytes of storage both times. Only the declared length
-        # differs, and it is the declared length that must win: at 350 bits the
-        # fourth pair is cut off and must not be decoded.
-        #
-        # This shape does not occur in the corpus -- every measured blob has
-        # bit_count == len(data) * 8 -- so no corpus check can catch the wrong
-        # reading. That is what makes it worth a test rather than a comment.
+        # The same 50 bytes; at a declared 350 bits the fourth pair is cut off.
         self.assertEqual(self.decode(self.BLOB, 400), self.FOUR_PAIRS)
         self.assertEqual(self.decode(self.BLOB, 350), self.THREE_PAIRS)
 
-    def test_byte_length_would_have_given_the_wrong_answer(self):
-        # Spelled out as its own case so the regression is unmistakable: the
-        # old code derived the length as len(data) * 8, which is 400 here, and
-        # would have returned four pairs for a payload declaring 350 bits.
-        self.assertEqual(len(self.BLOB) * 8, 400)
-        self.assertNotEqual(self.decode(self.BLOB, 350), self.decode(self.BLOB, 400))
+    def test_a_declared_length_past_the_bytes_stops_the_conversion(self):
+        # 400 bits declared over 45 bytes: the fourth value runs off the end.
+        # The per-bit reader raised IndexError there, as the bulk one must; a
+        # bare slice would read the missing bytes as zeros, a plausible value.
+        with self.assertRaises(IndexError):
+            self.decode(self.BLOB[:45], 400)
+
+    def test_a_short_read_leaves_the_position_at_the_declared_end(self):
+        # As the per-bit reader left it; the decoder's consumed/skip_bits
+        # resync after a failed value read counts on it.
+        reader = bundle._BitReader(b"\xff\xff", 12)
+        reader.read_bits(4)
+        with self.assertRaises(EOFError):
+            reader.read_bits(16)
+        self.assertEqual(reader.tell(), 12)
+
+    def test_a_shot_row_is_decoded_to_its_declared_length(self):
+        tags = {"path": "NetworkGameplayTagNodeIndex",
+                "fields": [{"handle": 285, "name": "FiringState.AmmoRemaining"}]}
+        row = {"time_ms": 1, "packet_id": 1, "actor": 2, "group_path": SHOT_RPC,
+               "field_name": "ReplayPlayContinuousEffectAtLocation.FloatValues",
+               "raw_bits": self.BLOB}
+        for bits, ammo in ((400, -1509722752), (350, None)):
+            with self.subTest(bits=bits):
+                (shot,) = run([{**row, "bit_count": bits}],
+                              manifest={"net_field_export_groups": [tags]},
+                              ).events("valorant_shot_received")
+                self.assertEqual(shot["shot"]["ammo_remaining"], ammo)
 
     def test_absent_blob_decodes_to_an_empty_mapping(self):
         self.assertEqual(bundle._decode_effect_blob(None, self.SPEC, {}), {})
 
-    def test_blob_carries_its_own_bit_count(self):
-        # The container must not let the two drift apart silently: a caller
-        # that builds one has to supply both.
-        blob = bundle._EffectBlob(b"\x00\x01", 9)
-        self.assertEqual(blob.data, b"\x00\x01")
-        self.assertEqual(blob.bit_count, 9)
-        with self.assertRaises(TypeError):
-            bundle._EffectBlob(b"\x00\x01")  # bit_count is not optional
+
+class EffectFramingTallyTests(unittest.TestCase):
+    """Bits a blob's framing leaves unaccounted for reach
+    `effect_array_residual_bits`, including after an unreadable or oversized
+    element count."""
+
+    SPEC = bundle._EFFECT_FLOATS
+    # One float element (tag 284, value 1.0), element and array terminators.
+    ONE_ELEMENT = bytes.fromhex("02021020390412400000803f0000")
+
+    def residual(self, data: bytes, bit_count: int | None = None):
+        tally = bundle._Tally()
+        elements = bundle._decode_effect_elements(
+            data, len(data) * 8 if bit_count is None else bit_count, self.SPEC, tally)
+        return elements, tally["effect_array_residual_bits"]
+
+    def test_a_well_formed_array_leaves_nothing(self):
+        self.assertEqual(self.residual(self.ONE_ELEMENT), ([(284, 1.0)], 0))
+
+    def test_a_tail_after_the_terminator_is_counted(self):
+        self.assertEqual(self.residual(self.ONE_ELEMENT + bytes(6)), ([(284, 1.0)], 1))
+
+    def test_a_sub_byte_tail_is_counted(self):
+        # Rust rejects any leftover bit: ResidualBits { remaining: 4 }.
+        self.assertEqual(self.residual(self.ONE_ELEMENT + b"\x00", len(self.ONE_ELEMENT) * 8 + 4),
+                         ([(284, 1.0)], 1))
+
+    def test_an_oversized_count_is_counted(self):
+        # IntPacked 383, past Rust's MAX_ARRAY_COUNT of 256, then 40 bytes.
+        self.assertEqual(self.residual(bytes([0xFF, 0x04]) + bytes(40), 336), ([], 1))
+
+    def test_an_unreadable_count_with_bits_left_is_counted(self):
+        # Six continuation bytes overflow IntPacked's 35-bit limit.
+        self.assertEqual(self.residual(bytes([0xFF] * 6) + bytes(10)), ([], 1))
+
+    def test_an_empty_array_is_not_counted(self):
+        # Count 0 is the whole blob, or is followed by the array terminator
+        # the Rust decoder also accepts.
+        self.assertEqual(self.residual(b"\x00"), ([], 0))
+        self.assertEqual(self.residual(b"\x00\x00"), ([], 0))
+
+    def test_a_declared_element_that_never_arrives_is_a_half_read_pair(self):
+        # Count 2, but only element 0 arrives before the array terminator.
+        tally = bundle._Tally()
+        blob = bytes.fromhex("04" + self.ONE_ELEMENT.hex()[2:])
+        elements = bundle._decode_effect_elements(blob, len(blob) * 8, self.SPEC, tally)
+        self.assertEqual(elements, [(284, 1.0), (None, None)])
+        self.assertEqual(tally["effect_half_read_pairs"], 1)
+        self.assertEqual(tally["effect_array_residual_bits"], 0)
+
+
+class ShotEffectRawSourceTests(unittest.TestCase):
+    """An additive Rust JSON overlay must not replace the shot wire source."""
+
+    def rows(self, typed_json: bool = False, **typed) -> list[dict]:
+        values = (
+            ("FloatValues", EffectBlobBitLengthTests.BLOB),
+            ("ObjectValues", b"\x00"),
+            ("VectorValues", b"\x00"),
+        )
+        return [{
+            "time_ms": 30, "packet_id": 3, "actor": 2, "object": 22,
+            "channel_index": 1, "group_path": SHOT_RPC, "handle": 9,
+            "field_name": f"ReplayPlayContinuousEffectAtLocation.{name}",
+            "bit_count": len(raw) * 8, "raw_bits": raw,
+            **({"value_str": "[]"} if typed_json else {}), **typed,
+        } for name, raw in values]
+
+    def shot_and_rpc(self, rows: list[dict]) -> tuple[dict, dict, dict]:
+        result = run(rows)
+        (shot,) = result.events("valorant_shot_received")
+        (rpc,) = result.events("rpc_received")
+        return result.summary, shot, rpc
+
+    def test_typed_json_overlay_keeps_raw_shot_and_rpc_payload(self):
+        raw_summary, raw_shot, raw_rpc = self.shot_and_rpc(self.rows())
+        typed_summary, typed_shot, typed_rpc = self.shot_and_rpc(
+            self.rows(typed_json=True)
+        )
+        self.assertEqual(typed_shot, raw_shot)
+        self.assertEqual(typed_rpc, raw_rpc)
+        for name, raw, bits in (("FloatValues", EffectBlobBitLengthTests.BLOB, 400),
+                                ("ObjectValues", b"\x00", 8), ("VectorValues", b"\x00", 8)):
+            with self.subTest(name=name):
+                self.assertEqual(typed_rpc["payload"][name], raw_rpc["payload"][name])
+                self.assertEqual(typed_rpc["payload"][name], {
+                    "BitCount": bits,
+                    "Data": base64.b64encode(raw).decode("ascii"),
+                })
+        self.assertEqual(typed_summary["tally"]["multi_typed_rows"], raw_summary["tally"]["multi_typed_rows"])
+
+    def test_malformed_typed_overlay_still_uses_raw_and_keeps_counter(self):
+        _raw_summary, raw_shot, raw_rpc = self.shot_and_rpc(self.rows())
+        summary, shot, rpc = self.shot_and_rpc(
+            self.rows(value_i64=7, value_str="not-json")
+        )
+        self.assertEqual(shot, raw_shot)
+        self.assertEqual(rpc, raw_rpc)
+        self.assertEqual(summary["tally"]["multi_typed_rows"], 3)
+
+
+class DeathMontageBlobTests(unittest.TestCase):
+    """The death-montage pair, typed ObjectNetGuid, keeps the reference's
+    {BitCount, Data, TypeName} blob shape, not a bare integer."""
+
+    # 16-bit IntPacked 5055 (an FXC finisher class) and 8-bit 0 (null).
+    OVERRIDE = (b"\x7f\x4e", 16, 5055)
+    CONTEXT = (b"\x00", 8, 0)
+
+    def payload(self, typed: bool) -> dict:
+        rows = []
+        for param, (raw, bits, guid) in (
+            ("DeathMontageEffectOverride", self.OVERRIDE),
+            ("DeathMontageEffectOverrideContext", self.CONTEXT),
+        ):
+            rows.append({
+                "time_ms": 40, "packet_id": 4, "actor": 2, "object": 22,
+                "group_path": RPC_GROUP, "handle": 2,
+                "field_name": f"MulticastNotifyDamage_Point.{param}",
+                "bit_count": bits, "raw_bits": raw,
+                **({"value_i64": guid} if typed else {}),
+            })
+        rows.append({
+            "time_ms": 40, "packet_id": 4, "actor": 2, "object": 22,
+            "group_path": RPC_GROUP, "handle": 2,
+            "field_name": "MulticastNotifyDamage_Point.bDeathMontageEffectOverrideIsQueued",
+            "bit_count": 1, "raw_bits": b"\x00", "value_bool": False,
+        })
+        (rpc,) = run(rows).events("rpc_received")
+        return rpc["payload"]
+
+    def test_typed_rows_keep_the_reference_blob(self):
+        typed = self.payload(typed=True)
+        self.assertEqual(typed, self.payload(typed=False))
+        for param, (raw, bits, _guid) in (
+            ("DeathMontageEffectOverride", self.OVERRIDE),
+            ("DeathMontageEffectOverrideContext", self.CONTEXT),
+        ):
+            self.assertEqual(typed[param], {
+                "BitCount": bits,
+                "Data": base64.b64encode(raw).decode("ascii"),
+                "TypeName": param,
+            })
+        # The Bool sibling is not swept into the blob branch.
+        self.assertIs(typed["bDeathMontageEffectOverrideIsQueued"], False)
+
 
 class BlockPayloadExclusionTests(unittest.TestCase):
     marker = "__vrfkit_unresolved_class_net_cache_payload__"
 
-    @staticmethod
-    def write_fields(path: Path, rows: list[dict]) -> None:
-        def values(name, default=None):
-            return [row.get(name, default) for row in rows]
-
-        table = pa.table(
-            {
-                "time_ms": pa.array(values("time_ms"), type=pa.uint32()),
-                "packet_id": pa.array(values("packet_id"), type=pa.uint32()),
-                "channel_index": pa.array(values("channel_index", 7), type=pa.uint32()),
-                "actor_net_guid": pa.array(values("actor"), type=pa.uint32()),
-                "object_net_guid": pa.array(values("object"), type=pa.uint32()),
-                "group_path": pa.array(values("group_path"), type=pa.string()),
-                "handle": pa.array(values("handle", 0), type=pa.uint32()),
-                "field_name": pa.array(values("field_name"), type=pa.string()),
-                "bit_count": pa.array(values("bit_count"), type=pa.uint32()),
-                "raw_bits": pa.array(values("raw_bits"), type=pa.binary()),
-                "value_i64": pa.array(values("value_i64"), type=pa.int64()),
-                "value_f64": pa.array(values("value_f64"), type=pa.float64()),
-                "value_bool": pa.array(values("value_bool"), type=pa.bool_()),
-                "value_str": pa.array(values("value_str"), type=pa.string()),
-            }
-        )
-        pq.write_table(table, path)
-
-    @staticmethod
-    def bundle_files(path: Path) -> dict[str, bytes]:
-        return {item.name: item.read_bytes() for item in sorted(path.iterdir())}
-
-    def test_block_payload_row_is_excluded_before_grouping_and_lifetimes(self):
+    def test_block_payload_row_is_excluded_before_grouping(self):
         ordinary = [
-            {
-                "time_ms": 10,
-                "packet_id": 1,
-                "actor": 101,
-                "group_path": "PlayerState",
-                "field_name": "Health",
-                "bit_count": 32,
-                "value_i64": 100,
-            },
+            *MINIMAL_FIELD_ROWS,
             {
                 "time_ms": 20,
                 "packet_id": 2,
@@ -508,60 +847,29 @@ class BlockPayloadExclusionTests(unittest.TestCase):
             "bit_count": 5,
             "raw_bits": b"\x15",
         }
+        base, marked = run(ordinary), run(ordinary + [marker_row])
 
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            base_export = root / "base_export"
-            marked_export = root / "marked_export"
-            base_bundle = root / "base_bundle"
-            marked_bundle = root / "marked_bundle"
-            base_export.mkdir()
-            marked_export.mkdir()
-            self.write_fields(base_export / "fields.parquet", ordinary)
-            self.write_fields(marked_export / "fields.parquet", ordinary + [marker_row])
-
-            base_summary = bundle.convert(base_export, base_bundle)
-            marked_summary = bundle.convert(marked_export, marked_bundle)
-
-            self.assertEqual(marked_summary, base_summary)
-            # The DATA files must be byte-identical: the marker row changes
-            # nothing a consumer reads as an event or a position.
-            for name in ("events.ndjson", "movement.ndjson"):
-                self.assertEqual(
-                    (marked_bundle / name).read_bytes(),
-                    (base_bundle / name).read_bytes(),
-                    name,
-                )
-            # The manifest must NOT be identical. The row was on disk and was
-            # deliberately skipped; a manifest that read the same either way
-            # would be a bundle that cannot say how much preservation data its
-            # export carried.
-            base_manifest = json.loads(
-                (base_bundle / "manifest.json").read_text(encoding="utf-8")
-            )["adapter"]
-            marked_manifest = json.loads(
-                (marked_bundle / "manifest.json").read_text(encoding="utf-8")
-            )["adapter"]
-            self.assertEqual(base_manifest["field_rows_read"], 2)
-            self.assertEqual(base_manifest["field_rows_unresolved_class_net_cache"], 0)
-            self.assertEqual(marked_manifest["field_rows_read"], 3)
-            self.assertEqual(marked_manifest["field_rows_unresolved_class_net_cache"], 1)
-            events = (marked_bundle / "events.ndjson").read_bytes()
-            self.assertIn(b'"actor_net_guid":202', events)
-            self.assertNotIn(b'"actor_net_guid":303', events)
-            self.assertNotIn(self.marker.encode(), events)
+        self.assertEqual(marked.summary, base.summary)
+        # The data files are byte-identical: the marker changes no event
+        # or position.
+        for name in ("events.ndjson", "movement.ndjson"):
+            self.assertEqual(marked.files[name], base.files[name], name)
+        # The manifest is NOT: it counts the skipped preservation row.
+        base_manifest = base.manifest["adapter"]
+        marked_manifest = marked.manifest["adapter"]
+        self.assertEqual(base_manifest["field_rows_read"], 2)
+        self.assertEqual(base_manifest["field_rows_unresolved_class_net_cache"], 0)
+        self.assertEqual(marked_manifest["field_rows_read"], 3)
+        self.assertEqual(marked_manifest["field_rows_unresolved_class_net_cache"], 1)
+        events = marked.files["events.ndjson"]
+        self.assertIn(b'"actor_net_guid":202', events)
+        self.assertNotIn(b'"actor_net_guid":303', events)
+        self.assertNotIn(self.marker.encode(), events)
 
 
 class CombatReportLeafNameTests(unittest.TestCase):
-    """The bundle keys combat-report leaves on the handle, not on the wire name.
-
-    The parser labels each leaf with the name the replay declares. Two of those
-    declarations would break this bundle if they reached it: Riot's own typos
-    and 'b'-prefixed booleans are not what compute_metrics.py reads, and the
-    quartet HUDConfig/StateRemainingTime/GameTime/GamePhase is declared at
-    several handles in the SAME flattened element, so keying on the name would
-    merge distinct values into one JSON key.
-    """
+    """Combat-report leaves are keyed on the handle, not the wire name (see
+    "Combat report leaf labels" in the adapter)."""
 
     GROUP = ("/Game/GameModes/Bomb/Bomb_CombatReportComponent"
              ".Bomb_CombatReportComponent_C")
@@ -636,168 +944,86 @@ class CombatReportLeafNameTests(unittest.TestCase):
         )
 
 
-class TallyTestCase(unittest.TestCase):
-    """Shared plumbing for the cases that read the conversion's loss counters."""
-
-    RPC_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
-
-    def convert_rows(self, tmp: str, rows: list[dict], **files) -> dict:
-        root = Path(tmp)
-        export = root / "export"
-        export.mkdir()
-        write_fields_parquet(export / "fields.parquet", rows)
-        for name, text in files.items():
-            (export / name.replace("_", ".")).write_text(text, encoding="utf-8")
-        return bundle.convert(export, root / "bundle")
-
-    def tally_of(self, tmp: str, rows: list[dict], **files) -> dict:
-        return self.convert_rows(tmp, rows, **files)["tally"]
-
-    def events_of(self, tmp: str, event_type: str) -> list[dict]:
-        """Every event of one type from the bundle `convert_rows` just wrote.
-
-        The bundle also carries actor_spawned/actor_closed for each actor it
-        saw, so a bare line count says nothing about the events under test.
-        """
-        text = (Path(tmp) / "bundle" / "events.ndjson").read_text(encoding="utf-8")
-        events = [json.loads(line) for line in text.splitlines()]
-        return [e for e in events if e["type"] == event_type]
-
-
-class UnnamedRowTallyTests(TallyTestCase):
-    """A row the parser could not name is a dropped row, and must be counted.
-
-    Both drop sites are silent today: a property group containing one becomes
-    an empty but valid-looking event, and an RPC whose rows are ALL unnamed is
-    dropped whole because no field_name ever supplies the function name. The
-    documented reference export carries 1,996 such rows and the bundle never
-    said so.
-    """
+class UnnamedRowTallyTests(unittest.TestCase):
+    """A row the parser could not name is dropped and counted, as is an RPC
+    whose rows are all unnamed (no row names its function)."""
 
     def test_an_unnamed_property_row_is_counted(self):
-        rows = [
-            {
-                "time_ms": 10, "packet_id": 1, "actor": 101,
-                "group_path": "PlayerState", "field_name": "Health",
-                "bit_count": 32, "value_i64": 100,
-            },
-            {
-                "time_ms": 10, "packet_id": 1, "actor": 101,
-                "group_path": "PlayerState", "field_name": None,
-                "bit_count": 3, "raw_bits": b"\x05",
-            },
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            tally = self.tally_of(tmp, rows)
+        tally = run(MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW]).tally
         self.assertEqual(tally["unnamed_property_rows"], 1)
 
     def test_an_rpc_of_only_unnamed_rows_counts_the_rows_and_the_invocation(self):
         rows = [
             {
                 "time_ms": 20, "packet_id": 2, "actor": 202,
-                "group_path": self.RPC_GROUP, "handle": 5,
+                "group_path": RPC_GROUP, "handle": 5,
                 "field_name": None, "bit_count": 3, "raw_bits": b"\x05",
             },
             {
                 "time_ms": 20, "packet_id": 2, "actor": 202,
-                "group_path": self.RPC_GROUP, "handle": 5,
+                "group_path": RPC_GROUP, "handle": 5,
                 "field_name": None, "bit_count": 4, "raw_bits": b"\x06",
             },
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            summary = self.convert_rows(tmp, rows)
-            # The invocation really is gone -- the count is its only trace.
-            self.assertEqual(self.events_of(tmp, "rpc_received"), [])
-        self.assertEqual(summary["tally"]["unnamed_rpc_rows"], 2)
-        self.assertEqual(summary["tally"]["unnamed_rpc_invocations"], 1)
+        result = run(rows)
+        # The invocation really is gone -- the count is its only trace.
+        self.assertEqual(result.events("rpc_received"), [])
+        self.assertEqual(result.tally["unnamed_rpc_rows"], 2)
+        self.assertEqual(result.tally["unnamed_rpc_invocations"], 1)
 
 
-class ManifestTallyTests(TallyTestCase):
-    """A substituted manifest must not read as a real one.
+class TagTableTallyTests(unittest.TestCase):
+    """Shots decoded without the manifest's gameplay-tag table are counted."""
 
-    With no manifest the gameplay-tag table is empty, so every effect blob is
-    keyed by its numeric tag index instead of a name like
-    'FiringState.AmmoRemaining' -- and every shot then reports null ammo,
-    firing state, player and attack vectors while the run says SUCCESS.
-    """
-
-    SHOT_RPC = "/Script/ShooterGame.ShooterCharacter_ClassNetCache"
-
-    def shot_rows(self) -> list[dict]:
-        return [
-            {
-                "time_ms": 30, "packet_id": 3, "actor": 2, "object": 22,
-                "channel_index": 1, "group_path": self.SHOT_RPC, "handle": 9,
-                "field_name": "ReplayPlayContinuousEffectAtLocation.FloatValues",
-                "bit_count": len(EffectBlobBitLengthTests.BLOB) * 8,
-                "raw_bits": EffectBlobBitLengthTests.BLOB,
-            },
-        ]
-
-    def test_a_missing_manifest_is_counted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tally = self.tally_of(tmp, MINIMAL_FIELD_ROWS)
-        self.assertEqual(tally["missing_manifest"], 1)
-
-    def test_a_present_manifest_is_not_counted(self):
-        manifest = '{"replay_version": "x", "duration_ms": 5}'
-        with tempfile.TemporaryDirectory() as tmp:
-            tally = self.tally_of(tmp, MINIMAL_FIELD_ROWS, manifest_json=manifest)
-        self.assertEqual(tally["missing_manifest"], 0)
+    SHOT_ROWS = [
+        {
+            "time_ms": 30, "packet_id": 3, "actor": 2, "object": 22,
+            "channel_index": 1, "group_path": SHOT_RPC, "handle": 9,
+            "field_name": "ReplayPlayContinuousEffectAtLocation.FloatValues",
+            "bit_count": len(EffectBlobBitLengthTests.BLOB) * 8,
+            "raw_bits": EffectBlobBitLengthTests.BLOB,
+        },
+    ]
 
     def test_shots_decoded_with_no_tag_table_are_counted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tally = self.tally_of(tmp, self.shot_rows())
-        self.assertEqual(tally["empty_gameplay_tag_table"], 1)
+        self.assertEqual(run(self.SHOT_ROWS).tally["empty_gameplay_tag_table"], 1)
 
     def test_a_tag_table_from_the_manifest_clears_the_count(self):
-        manifest = json.dumps({
+        manifest = {
             "net_field_export_groups": [
                 {
                     "path": "NetworkGameplayTagNodeIndex",
                     "fields": [{"handle": 263, "name": "FiringState.AmmoRemaining"}],
                 }
             ]
-        })
-        with tempfile.TemporaryDirectory() as tmp:
-            tally = self.tally_of(tmp, self.shot_rows(), manifest_json=manifest)
+        }
+        tally = run(self.SHOT_ROWS, manifest=manifest).tally
         self.assertEqual(tally["empty_gameplay_tag_table"], 0)
 
 
-class RpcCollisionTallyTests(TallyTestCase):
-    """Two invocations of one function by one actor in one packet collide.
-
-    The RPC group key is (packet_id, actor, group_path, handle), so both calls
-    land in one group, the second call's parameters overwrite the first's, and
-    a single rpc_received comes out. Nothing can un-interleave them from the
-    export, so the fix is to say it happened, not to guess a boundary.
-    """
-
-    def collided_rows(self) -> list[dict]:
-        common = {
-            "time_ms": 40, "packet_id": 4, "actor": 404,
-            "group_path": self.RPC_GROUP, "handle": 12,
-            "field_name": "MulticastNotifyKilledEnemy.MultikillLevel",
-        }
-        return [
-            {**common, "bit_count": 8, "value_i64": 1},
-            {**common, "bit_count": 8, "value_i64": 2},
-        ]
+class RpcCollisionTallyTests(unittest.TestCase):
+    """Two same-packet invocations of one function by one actor collide into
+    one group; the overwrite is counted, never split."""
 
     def test_a_repeated_parameter_in_one_group_is_counted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            summary = self.convert_rows(tmp, self.collided_rows())
-            # One rpc_received for what were two calls, carrying only the
-            # second call's value -- the loss the count names.
-            rpcs = self.events_of(tmp, "rpc_received")
-        self.assertEqual(summary["tally"]["rpc_param_collisions"], 1)
+        common = {
+            "time_ms": 40, "packet_id": 4, "actor": 404,
+            "group_path": RPC_GROUP, "handle": 12,
+            "field_name": "MulticastNotifyKilledEnemy.MultikillLevel",
+        }
+        result = run([{**common, "bit_count": 8, "value_i64": 1},
+                      {**common, "bit_count": 8, "value_i64": 2}])
+        # One rpc_received for what were two calls, carrying only the
+        # second call's value -- the loss the count names.
+        rpcs = result.events("rpc_received")
+        self.assertEqual(result.tally["rpc_param_collisions"], 1)
         self.assertEqual(len(rpcs), 1, rpcs)
         self.assertEqual(rpcs[0]["payload"], {"MultikillLevel": 2})
 
     def test_distinct_parameters_in_one_group_are_not_counted(self):
         common = {
             "time_ms": 40, "packet_id": 4, "actor": 404,
-            "group_path": self.RPC_GROUP, "handle": 12, "bit_count": 8,
+            "group_path": RPC_GROUP, "handle": 12, "bit_count": 8,
         }
         rows = [
             {**common, "field_name": "MulticastNotifyKilledEnemy.KillerCharacter",
@@ -805,41 +1031,132 @@ class RpcCollisionTallyTests(TallyTestCase):
             {**common, "field_name": "MulticastNotifyKilledEnemy.KilledCharacter",
              "value_i64": 2},
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            tally = self.tally_of(tmp, rows)
-        self.assertEqual(tally["rpc_param_collisions"], 0)
+        self.assertEqual(run(rows).tally["rpc_param_collisions"], 0)
+
+
+class PropertyKeyCollisionTallyTests(unittest.TestCase):
+    """Same-named rows in one property event (struct members or array
+    elements only `handle` tells apart, like the crosshair profile's
+    LineLength at 63/75/110): the last wins, and each overwrite is counted."""
+
+    GROUP = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"
+
+    def row(self, name, handle, value, column="value_f64", **extra):
+        return {"time_ms": 25, "packet_id": 25, "actor": 7, "group_path": self.GROUP,
+                "handle": handle, "field_name": name, "bit_count": 32,
+                column: value, **extra}
+
+    @staticmethod
+    def convert(rows) -> tuple[dict, dict]:
+        result = run(rows)
+        (event,) = result.events("export_group_received")
+        return event["payload"], result.tally
+
+    def test_a_repeated_name_in_one_event_is_counted(self):
+        payload, tally = self.convert(
+            [self.row("LineLength", 63, 10.0), self.row("LineLength", 75, 2.0)])
+        # Still last-wins: the count is what makes the loss visible.
+        self.assertEqual(payload, {"LineLength": 2.0})
+        self.assertEqual(tally["property_key_collisions"], 1)
+        self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_distinct_names_and_separate_events_are_not_counted(self):
+        rows = [self.row("LineLength", 63, 10.0), self.row("Opacity", 70, 0.5),
+                self.row("LineLength", 63, 2.0, packet_id=26, time_ms=26)]
+        self.assertEqual(run(rows).tally["property_key_collisions"], 0)
+
+    def test_a_top_level_row_replacing_a_nested_value_is_a_shape_conflict(self):
+        """'Foo' after 'Foo.Bar' is assigned directly, never by `_set_nested`."""
+        payload, tally = self.convert([self.row("Foo.Bar", 1, 2.0), self.row("Foo", 2, 1.0)])
+        self.assertEqual(payload, {"Foo": 1.0})
+        self.assertEqual(tally["payload_shape_conflicts"], 1)
+        self.assertEqual(tally["property_key_collisions"], 0)
+
+    def test_a_repeated_blob_is_a_key_collision_not_a_shape_conflict(self):
+        """Handles 23/24 of TrackedRewards[i].Rewards and 25/29 of A on
+        02d4d478: two raw blobs under one name, nested or not, are one value
+        overwriting another."""
+        payload, tally = self.convert([
+            self.row("TrackedRewards[0].Rewards", 23, b"\x01", "raw_bits", bit_count=8),
+            self.row("TrackedRewards[0].Rewards", 24, b"\x02", "raw_bits", bit_count=8),
+            self.row("A", 25, b"\x03", "raw_bits", bit_count=8),
+            self.row("A", 29, b"\x04", "raw_bits", bit_count=8)])
+        self.assertEqual(payload, {
+            "TrackedRewards": [{"Index": 0, "Rewards": {"BitCount": 8, "Data": "Ag=="}}],
+            "A": {"BitCount": 8, "Data": "BA=="}})
+        self.assertEqual(tally["property_key_collisions"], 2)
+        self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_an_array_element_is_a_value_a_structure_or_a_filler(self):
+        """A value replacing a blob element collides, one replacing an element
+        with members is a shape conflict, one landing on a filler is neither."""
+        blob = self.row("Arr[0]", 1, b"\x01", "raw_bits", bit_count=8)
+        last = self.row("Arr[0]", 9, 3.0)
+        cases = (
+            ("blob", [blob, last], [3.0], 1, 0),
+            ("members", [self.row("Arr[0].X", 1, 1.0), last], [3.0], 0, 1),
+            ("filler", [self.row("Arr[1].X", 1, 1.0), last],
+             [3.0, {"Index": 1, "X": 1.0}], 0, 0),
+            ("members over a filler", [self.row("Arr[1]", 1, 5.0),
+                                       self.row("Arr[0].X", 2, 1.0), last],
+             [3.0, 5.0], 0, 1),
+        )
+        for label, rows, array, collisions, conflicts in cases:
+            with self.subTest(label):
+                payload, tally = self.convert(rows)
+                self.assertEqual(payload, {"Arr": array})
+                self.assertEqual(tally["property_key_collisions"], collisions)
+                self.assertEqual(tally["payload_shape_conflicts"], conflicts)
+
+    def test_a_nested_leaf_replacing_members_is_a_shape_conflict(self):
+        payload, tally = self.convert(
+            [self.row("Foo.Bar.Baz", 1, 1.0), self.row("Foo.Bar", 2, 2.0)])
+        self.assertEqual(payload, {"Foo": {"Bar": 2.0}})
+        self.assertEqual(tally["payload_shape_conflicts"], 1)
+        self.assertEqual(tally["property_key_collisions"], 0)
+
+    def test_a_repeated_nested_leaf_is_counted(self):
+        payload, tally = self.convert([self.row("Foo.Bar", 1, 1.0), self.row("Foo.Bar", 2, 2.0),
+                                       self.row("Arr[0]", 3, 3.0), self.row("Arr[0]", 4, 4.0)])
+        self.assertEqual(payload, {"Foo": {"Bar": 2.0}, "Arr": [4.0]})
+        self.assertEqual(tally["property_key_collisions"], 2)
+        self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_a_nested_container_row_is_skipped_before_or_after_its_elements(self):
+        """`Sel[1].Att` carries the blob of `Sel[1].Att[i]`; the elements win."""
+        container = self.row("Sel[1].Att", 1, b"\x01", "raw_bits", bit_count=8)
+        elements = [self.row("Sel[1].Att[0]", 2, 5.0), self.row("Sel[1].Att[1]", 3, 6.0)]
+        for label, rows in (("first", [container, *elements]), ("last", [*elements, container])):
+            with self.subTest(label):
+                payload, tally = self.convert(rows)
+                self.assertEqual(payload, {"Sel": [{"Index": 1, "Att": [5.0, 6.0]}]})
+                self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_a_real_index_member_replacing_the_injected_one_is_not_counted(self):
+        """13.01, 12.05 and 11.06 exports carry real `TeamEconomy[i].Index`
+        rows; replacing the injected Index loses nothing."""
+        payload, tally = self.convert([self.row("TeamEconomy[0].Index", 1, 0, "value_i64"),
+                                       self.row("TeamEconomy[0].Money", 2, 800, "value_i64"),
+                                       self.row("TeamEconomy[1].Money", 3, 900, "value_i64"),
+                                       self.row("TeamEconomy[1].Index", 4, 1, "value_i64")])
+        self.assertEqual(payload, {"TeamEconomy": [
+            {"Index": 0, "Money": 800}, {"Index": 1, "Money": 900}]})
+        self.assertEqual(tally["property_key_collisions"], 0)
 
 
 class FlatPathTallyTests(unittest.TestCase):
-    """A path segment the parser cannot read becomes a literal key, silently.
-
-    'Rounds[0][1].Damage' yields the literal object key 'Rounds[0][1]', and
-    two rows whose shapes disagree ('Foo' and 'Foo.Bar') destroy each other
-    depending on arrival order. Both produce valid JSON and a successful
-    count, so a counter is the only thing that can report them.
-    """
-
-    def test_an_unparsable_segment_is_counted(self):
-        tally = bundle._Tally()
-        parts = bundle._parse_field_path("Rounds[0][1].Damage", tally)
-        self.assertEqual(parts[0], ("Rounds[0][1]", None))
-        self.assertEqual(tally["unparsable_path_segments"], 1)
+    """Unread subscripts ('Rounds[0][1]') and shape conflicts ('Foo' vs
+    'Foo.Bar') are counted; non-identifier leaves are not."""
 
     def test_a_bare_numeric_segment_is_not_counted(self):
-        # '248' is the documented spelling of an unnamed handle, not a parse
-        # failure; counting it would drown the real ones.
+        # '248' is an unnamed handle's spelling, not a parse failure.
         tally = bundle._Tally()
         self.assertEqual(bundle._parse_field_path("248", tally), [("248", None)])
         self.assertEqual(tally["unparsable_path_segments"], 0)
 
     def test_a_blueprint_name_with_spaces_is_not_counted(self):
-        # Measured on out/baseline: 449 rows carry a segment that is neither
-        # an identifier nor a number, and all 41 distinct spellings are
-        # Blueprint display names like these -- none has a bracket in it. A
-        # name with a space is a leaf, and a literal key is the RIGHT
-        # representation of a leaf, so counting these would put a
-        # three-figure number in every clean conversion's summary and teach
-        # the reader to skip the block.
+        # A leaf, correctly a literal key (the corpus spellings are in
+        # `_parse_field_path_cached`).
         tally = bundle._Tally()
         for name in ("Victim FXC", "Set skeletal Collision", "Socket Name"):
             self.assertEqual(bundle._parse_field_path(name, tally),
@@ -847,11 +1164,10 @@ class FlatPathTallyTests(unittest.TestCase):
         self.assertEqual(tally["unparsable_path_segments"], 0)
 
     def test_a_segment_whose_subscripts_did_not_parse_is_counted(self):
-        # The real failure: bracket structure the parser could not read. The
-        # nesting it describes is silently flattened into one literal key.
+        # Unread brackets flatten their nesting into one literal key.
         tally = bundle._Tally()
-        parts = bundle._parse_field_path("Rounds[0][1]", tally)
-        self.assertEqual(parts, [("Rounds[0][1]", None)])
+        parts = bundle._parse_field_path("Rounds[0][1].Damage", tally)
+        self.assertEqual(parts, [("Rounds[0][1]", None), ("Damage", None)])
         self.assertEqual(tally["unparsable_path_segments"], 1)
 
     def test_a_scalar_overwritten_by_a_nested_value_is_counted(self):
@@ -870,6 +1186,16 @@ class FlatPathTallyTests(unittest.TestCase):
         self.assertEqual(payload, {"Foo": 1})
         self.assertEqual(tally["payload_shape_conflicts"], 1)
 
+    def test_members_rebuilt_after_a_conflict_are_still_members(self):
+        """'Foo', 'Foo.Bar', 'Foo': both replacements restructure the key."""
+        tally = bundle._Tally()
+        payload = {}
+        for path, value in (("Foo", 1), ("Foo.Bar", 2), ("Foo", 3)):
+            bundle._set_nested(payload, bundle._parse_field_path(path), value, tally)
+        self.assertEqual(payload, {"Foo": 3})
+        self.assertEqual(tally["payload_shape_conflicts"], 2)
+        self.assertEqual(tally["property_key_collisions"], 0)
+
     def test_ordinary_nesting_is_not_counted(self):
         tally = bundle._Tally()
         payload = {}
@@ -878,10 +1204,10 @@ class FlatPathTallyTests(unittest.TestCase):
             bundle._set_nested(payload, bundle._parse_field_path(path), value, tally)
         self.assertEqual(tally["payload_shape_conflicts"], 0)
         self.assertEqual(tally["unparsable_path_segments"], 0)
+        self.assertEqual(tally["property_key_collisions"], 0)
 
     def test_life_change_child_rows_are_still_dropped(self):
-        # Guard, not a new claim: these children arrive spelled with '[0]'
-        # and must never reach the payload as flat keys.
+        # Members spelled with '[0]' never reach the payload as flat keys.
         for param in ("LifeChangeEvents[0].LifeResult",
                       "LifeChangeBySection[1].Amount"):
             self.assertIsNone(
@@ -892,12 +1218,8 @@ class FlatPathTallyTests(unittest.TestCase):
 
 
 class TypedColumnTallyTests(unittest.TestCase):
-    """More than one typed column set is a writer regression, not a value.
-
-    _get_value picks i64, then f64, then bool, then string. If a regression
-    filled value_i64=1 and value_bool=False, the bundle emits 1, discards the
-    boolean and completes normally.
-    """
+    """More than one typed column set is counted as `multi_typed_rows`;
+    raw_bits beside one typed value is not."""
 
     def test_two_populated_typed_columns_are_counted(self):
         tally = bundle._Tally()
@@ -916,101 +1238,345 @@ class TypedColumnTallyTests(unittest.TestCase):
         self.assertEqual(tally["multi_typed_rows"], 0)
 
     def test_a_typed_value_beside_raw_bits_is_not_counted(self):
-        # raw_bits travels alongside decoded values by design; only the four
-        # TYPED columns are meant to be mutually exclusive.
         tally = bundle._Tally()
         bundle._get_value(1, None, None, None, b"\x01", 8, tally)
         self.assertEqual(tally["multi_typed_rows"], 0)
 
 
-class FabricatedLocationTests(TallyTestCase):
-    """A shot with no readable location gets the world origin -- say so.
+class FabricatedShotGeometryTests(unittest.TestCase):
+    """A shot with no readable location or rotation gets zeros, counted; a
+    parsed (0,0,0) is real and not counted."""
 
-    _parse_vector_or_zero's docstring claimed an upstream filter guarantees a
-    location is present. There is no such filter: _build_rpc_events emits
-    every ReplayPlayContinuousEffectAtLocation invocation and says so in its
-    own comment ('No blob guard'), so the fabricated origin is reachable.
-    """
+    #: RotationShort pitch and yaw set; 17 declared bits hold only the pitch.
+    ROTATION = "l/pPkgE="
 
-    def build_shot(self, scalar_params: dict, tally):
-        return bundle._build_shot_event(
-            bundle._ShotContext(tag_table={}), 1, 2, 3, 4, 5,
-            scalar_params, bundle._EffectBlobs(), tally=tally,
-        )["shot"]
+    def test_only_a_fabricated_value_is_counted(self):
+        origin = {"x": 0, "y": 0, "z": 0}
+        zero = {"pitch": 0, "yaw": 0, "roll": 0}
+        pitch_yaw = {"pitch": 356.1932373046875, "yaw": 141.4324951171875, "roll": 0.0}
+        for key, value, published, fabricated in (
+            ("248", None, origin, 1),
+            ("248", "(1,2)", origin, 1),
+            ("248", "(1,2,3)", {"x": 1, "y": 2, "z": 3}, 0),
+            ("248", "(0,0,0)", origin, 0),
+            ("249", {"BitCount": 35, "Data": self.ROTATION}, pitch_yaw, 0),
+            ("249", {"BitCount": 17, "Data": self.ROTATION}, zero, 1),
+        ):
+            with self.subTest(key=key, value=value):
+                tally = bundle._Tally()
+                params = {} if value is None else {key: value}
+                shot = bundle._build_shot_event(
+                    bundle._ShotContext({}), 1, 2, 3, 4, 5, params,
+                    bundle._EffectBlobs(), tally=tally)["shot"]
+                field, counter = (("location", "fabricated_shot_locations") if key == "248"
+                                  else ("rotation", "fabricated_shot_rotations"))
+                self.assertEqual(shot[field], published)
+                self.assertEqual(tally[counter], fabricated)
 
-    def test_a_shot_with_no_location_counts_a_fabricated_origin(self):
-        tally = bundle._Tally()
-        shot = self.build_shot({}, tally)
-        self.assertEqual(shot["location"], {"x": 0, "y": 0, "z": 0})
-        self.assertEqual(tally["fabricated_shot_locations"], 1)
 
-    def test_an_unparsable_location_counts_a_fabricated_origin(self):
-        tally = bundle._Tally()
+class RawSourcedFieldTests(unittest.TestCase):
+    """A field whose consumer decodes the raw wire blob gets the blob, typed
+    or not, and a blob that cannot be built is counted (RAW_BLOB_PREFERRED)."""
+
+    OEPI = "/Script/ShooterGame.OwnerExclusivePlayerInfo"
+    RI_RAW = bytes.fromhex("0102030405")
+    RI_BLOB = {
+        "BitCount": 40,
+        "Data": base64.b64encode(RI_RAW).decode("ascii"),
+        "TypeName": "TArray<FAresPlayerRoundInfo>",
+    }
+
+    def roundinfos(self, **overrides) -> dict:
+        row = {
+            "time_ms": 10, "packet_id": 1, "actor": 5, "object": 5,
+            "group_path": self.OEPI, "handle": 39, "field_name": "RoundInfos",
+            "bit_count": 40, "raw_bits": self.RI_RAW,
+        }
+        row.update(overrides)
+        return row
+
+    def roundinfos_child(self) -> dict:
+        return {
+            "time_ms": 10, "packet_id": 1, "actor": 5, "object": 5,
+            "group_path": self.OEPI, "handle": 43,
+            "field_name": "RoundInfos[0].EndOfRoundMoney",
+            "bit_count": 32, "value_i64": 900,
+        }
+
+    @staticmethod
+    def payload(rows, event_type="export_group_received") -> tuple[dict, dict]:
+        result = run(rows)
+        (event,) = result.events(event_type)
+        return event["payload"], result.tally
+
+    def test_an_untyped_roundinfos_row_publishes_its_blob(self):
+        """Children first, then the parent row, as stream.rs writes them."""
+        payload, tally = self.payload([self.roundinfos_child(), self.roundinfos()])
+        self.assertEqual(payload, {"RoundInfos": self.RI_BLOB})
+        self.assertEqual(tally["raw_blobs_unavailable"], 0)
+        self.assertEqual(tally["property_key_collisions"], 0)
+
+    def test_a_repeated_roundinfos_row_in_one_event_is_counted(self):
+        """Two RoundInfos rows in one event: only the last blob survives."""
+        second = bytes.fromhex("0a0b0c0d0e")
+        payload, tally = self.payload([self.roundinfos(), self.roundinfos(raw_bits=second)])
+        self.assertEqual(payload["RoundInfos"]["Data"],
+                         base64.b64encode(second).decode("ascii"))
+        self.assertEqual(tally["property_key_collisions"], 1)
+
+    def test_a_typed_roundinfos_row_still_publishes_its_raw_blob(self):
+        """The defect: a value_str beside raw_bits made the payload `{}`."""
+        payload, tally = self.payload(
+            [self.roundinfos_child(), self.roundinfos(value_str="[]")])
+        self.assertEqual(payload, {"RoundInfos": self.RI_BLOB})
+        self.assertEqual(tally["raw_blobs_unavailable"], 0)
+
+    def test_a_roundinfos_row_without_raw_bits_is_counted(self):
+        """No raw bits, no blob: counted, and the typed value is not thrown away."""
+        payload, tally = self.payload(
+            [self.roundinfos(raw_bits=None, bit_count=None, value_str="[]")])
+        self.assertEqual(tally["raw_blobs_unavailable"], 1)
+        self.assertEqual(payload, {"RoundInfos": "[]"})
+
+    def test_roundinfos_children_without_their_blob_are_counted(self):
+        """Children are dropped (the blob carries them): without it, a loss."""
+        payload, tally = self.payload([self.roundinfos_child()])
+        self.assertEqual(payload, {})
+        self.assertEqual(tally["raw_blobs_unavailable"], 1)
+
+    DAMAGE = "MulticastNotifyDamage_Point"
+    LCE_RAW = bytes.fromhex("02021620772418400000ce421a400000b0c11c02010000")
+    LCE_BLOB = {
+        "BitCount": 177,
+        "Data": base64.b64encode(LCE_RAW).decode("ascii"),
+        "TypeName": "LifeChangeEvents",
+    }
+
+    def damage_payload(self, with_blob=True, **parent) -> tuple[dict, dict]:
+        """One damage invocation shaped like the corpus: every row carries the
+        function's handle; decoded members precede the parent blob row."""
+        common = {"time_ms": 20, "packet_id": 2, "actor": 7,
+                  "group_path": RPC_GROUP, "handle": 1}
+        lce = {**common, "field_name": f"{self.DAMAGE}.LifeChangeEvents",
+               "bit_count": 177, "raw_bits": self.LCE_RAW, **parent}
+        rows = [
+            {**common, "field_name": f"{self.DAMAGE}.DamageTaken",
+             "bit_count": 32, "value_f64": 30.0},
+            {**common,
+             "field_name": f"{self.DAMAGE}.LifeChangeEvents[0].LifeResult",
+             "bit_count": 32, "value_f64": 70.0, "raw_bits": b"\x00\x00\x8cB"},
+        ]
+        return self.payload(rows + [lce] * with_blob, "rpc_received")
+
+    def test_an_untyped_life_change_blob_is_unchanged(self):
+        payload, tally = self.damage_payload()
+        self.assertEqual(payload, {"DamageTaken": 30.0,
+                                   "LifeChangeEvents": self.LCE_BLOB})
+        self.assertEqual(tally["raw_blobs_unavailable"], 0)
+
+    def test_a_typed_life_change_row_still_publishes_its_raw_blob(self):
+        """valplay's HP decoder reads the blob, never the typed value."""
+        payload, tally = self.damage_payload(value_str="[{}]")
+        self.assertEqual(payload["LifeChangeEvents"], self.LCE_BLOB)
+        self.assertEqual(tally["raw_blobs_unavailable"], 0)
+
+    def test_a_life_change_row_without_raw_bits_is_counted(self):
+        payload, tally = self.damage_payload(raw_bits=None, bit_count=None,
+                                             value_str="[{}]")
+        self.assertEqual(tally["raw_blobs_unavailable"], 1)
+        self.assertEqual(payload["LifeChangeEvents"], "[{}]")
+
+    def test_life_change_members_without_their_blob_are_counted(self):
+        payload, tally = self.damage_payload(with_blob=False)
+        self.assertNotIn("LifeChangeEvents", payload)
+        self.assertEqual(tally["raw_blobs_unavailable"], 1)
+
+    def test_shot_arrays_without_raw_bits_are_counted(self):
+        """Their consumer is this file's own effect decoder; it gets nothing."""
+        rows = [{
+            "time_ms": 30, "packet_id": 3, "actor": 2, "object": 22,
+            "channel_index": 1, "group_path": SHOT_RPC,
+            "handle": 9,
+            "field_name": f"ReplayPlayContinuousEffectAtLocation.{name}",
+            "value_str": "[]",
+        } for name in ("FloatValues", "ObjectValues", "VectorValues")]
+        self.assertEqual(run(rows).tally["raw_blobs_unavailable"], 3)
+
+
+class DamagedBoneTests(unittest.TestCase):
+    """A decoded DamagedBone passes through; an undecoded one is null and
+    counted, never rendered from the bytes."""
+
+    FIELD = "MulticastNotifyDamage_Point.DamagedBone"
+    # An FName "Head" as it sits in the corpus (105 bits).
+    HEAD_RAW = bytes.fromhex("0a00000090cac2c8aa00000000")
+
+    def bone_payload(self, **row) -> tuple[dict, dict]:
+        return RawSourcedFieldTests.payload([{
+            "time_ms": 20, "packet_id": 2, "actor": 7, "group_path": RPC_GROUP,
+            "handle": 1, "field_name": self.FIELD, "bit_count": 105,
+            "raw_bits": self.HEAD_RAW, **row}], "rpc_received")
+
+    def test_a_decoded_bone_is_passed_through(self):
+        payload, tally = self.bone_payload(value_str="Head")
+        self.assertEqual(payload, {"DamagedBone": "Head"})
+        self.assertEqual(tally["damaged_bone_undecoded"], 0)
+
+    def test_an_undecoded_bone_is_null_and_counted(self):
+        payload, tally = self.bone_payload()
+        self.assertEqual(payload, {"DamagedBone": None})
+        self.assertEqual(tally["damaged_bone_undecoded"], 1)
+
+
+class RawGateHardeningTests(unittest.TestCase):
+    """A typed row keeps its value through the `is_raw` gates."""
+
+    def test_a_typed_container_row_does_not_replace_its_decoded_elements(self):
+        """Element rows first, then the container, as stream.rs writes them."""
+        common = {"time_ms": 10, "packet_id": 1, "actor": 5,
+                  "group_path": "/Game/Test/Holder.Holder_C"}
+        payload, tally = RawSourcedFieldTests.payload([
+            {**common, "field_name": "Items[0].Count", "bit_count": 32,
+             "value_i64": 3},
+            {**common, "field_name": "Items", "bit_count": 40,
+             "raw_bits": b"\x01\x02\x03\x04\x05", "value_str": "[3]"},
+        ])
+        self.assertEqual(payload, {"Items": [{"Index": 0, "Count": 3}]})
+        self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_a_typed_function_row_is_carried(self):
+        """A row that IS the function carries its value, typed or raw."""
+        payload, _ = RawSourcedFieldTests.payload([{
+            "time_ms": 20, "packet_id": 2, "actor": 7, "group_path": RPC_GROUP,
+            "handle": 4, "field_name": "MulticastSomething", "bit_count": 8,
+            "value_i64": 5}], "rpc_received")
+        self.assertEqual(payload, {"MulticastSomething": 5})
+
+
+class AdapterMappingTests(unittest.TestCase):
+    """The mappings to the reference's shape, each pinned."""
+
+    GROUP = "/Game/Test/Holder.Holder_C"
+    DAMAGE = "MulticastNotifyDamage_Point"
+
+    def property_payload(self, rows: list[dict]) -> dict:
+        common = {"time_ms": 10, "packet_id": 1, "actor": 5,
+                  "group_path": self.GROUP, "bit_count": 8}
+        return RawSourcedFieldTests.payload([{**common, **row} for row in rows])[0]
+
+    def test_regional_damage_ordinals_follow_the_enum(self):
+        for ordinal, name in ((0, "regional_damage__normal"),
+                              (1, "regional_damage__headshot"),
+                              (2, "regional_damage__legshot"),
+                              (5, "regional_damage__invalid"),
+                              (9, "regional_damage__unknown_9")):
+            with self.subTest(ordinal=ordinal):
+                self.assertEqual(
+                    bundle._normalize_rpc_param(self.DAMAGE, "RegionalDamage", ordinal, False),
+                    {"RegionalDamage": name})
+
+    def test_alliance_ordinals_follow_the_enum(self):
+        for ordinal, name in ((0, "alliance_ally"), (1, "alliance_enemy"),
+                              (3, "alliance_any"), (9, "alliance_unknown_9")):
+            with self.subTest(ordinal=ordinal):
+                shot = bundle._build_shot_event(
+                    bundle._ShotContext({}), 1, 2, 3, 4, 5,
+                    {"AllianceFilter": ordinal}, bundle._EffectBlobs())["shot"]
+                self.assertEqual(shot["alliance_filter"], name)
+
+    def test_damage_booleans_lose_their_b_prefix(self):
+        for wire in ("bDamageKilledTarget", "bAliveAfterDamage", "bIsWallPenetration",
+                     "bEquippableUsedZoomed", "bEquippableUsedInFocusMode"):
+            with self.subTest(param=wire):
+                self.assertEqual(bundle._normalize_rpc_param(self.DAMAGE, wire, True, False),
+                                 {wire[1:]: True})
+
+    def test_equippable_used_takes_the_reference_shape(self):
         self.assertEqual(
-            self.build_shot({"Location": "(1,2)"}, tally)["location"],
-            {"x": 0, "y": 0, "z": 0},
-        )
-        self.assertEqual(tally["fabricated_shot_locations"], 1)
-
-    def test_a_real_location_counts_nothing(self):
-        tally = bundle._Tally()
+            bundle._normalize_rpc_param(self.DAMAGE, "EquippableUsed", 1234, False),
+            {"EquippableUsed": {"NetGuid": 1234, "Name": None, "ClassPath": None,
+                                "Category": "unknown"}})
+        blob = {"BitCount": 16, "Data": "fwE="}
         self.assertEqual(
-            self.build_shot({"Location": "(1,2,3)"}, tally)["location"],
-            {"x": 1, "y": 2, "z": 3},
-        )
-        self.assertEqual(tally["fabricated_shot_locations"], 0)
+            bundle._normalize_rpc_param(self.DAMAGE, "EquippableUsed", blob, True),
+            {"EquippableUsed": blob})
 
-    def test_a_genuine_origin_shot_counts_nothing(self):
-        # (0,0,0) parsed from the wire is a real position, not a fabrication.
-        tally = bundle._Tally()
+    def test_fire_mode_comes_from_the_firing_state_name(self):
+        def mode(path, source_id=None):
+            return bundle._resolve_fire_mode(41, source_id, {}, {41: path} if path else {})
+        self.assertEqual(mode("FiringState"), ("primary", "firing-state:FiringState"))
+        self.assertEqual(mode("ZoomedFiringState"),
+                         ("alternate", "firing-state:ZoomedFiringState"))
+        self.assertEqual(mode("FiringState", "Gun_AltFire_1"),
+                         ("alternate", "source:Gun_AltFire_1"))
+        self.assertEqual(mode(None), ("unknown", None))
+
+    def test_package_path_drops_only_the_class_suffix(self):
         self.assertEqual(
-            self.build_shot({"Location": "(0,0,0)"}, tally)["location"],
-            {"x": 0, "y": 0, "z": 0},
-        )
-        self.assertEqual(tally["fabricated_shot_locations"], 0)
+            bundle._to_package_path("/Game/Characters/Hunter/Hunter_PC.Hunter_PC_C"),
+            "/Game/Characters/Hunter/Hunter_PC")
+        self.assertEqual(bundle._to_package_path("/Game/A.B/Thing"), "/Game/A.B/Thing")
+
+    def test_property_values_are_reshaped_by_name(self):
+        payload = self.property_payload([
+            {"handle": 1, "field_name": "ReplicatedGravityDirection", "value_str": "(0,0,-1)"},
+            {"handle": 2, "field_name": "ReplicatedMovement",
+             "value_str": '{"location":{"x":1,"y":2,"z":3}}'},
+            {"handle": 3, "field_name": "bUltimateActive", "value_bool": True},
+            {"handle": 4, "field_name": "bottomless", "value_bool": True},
+            {"handle": 5, "field_name": "bIsCounted", "value_i64": 2},
+        ])
+        self.assertEqual(payload, {
+            "ReplicatedGravityDirection": {"x": 0, "y": 0, "z": -1},
+            "ReplicatedMovement": {"location": {"x": 1, "y": 2, "z": 3}},
+            "UltimateActive": True,
+            "bottomless": True,
+            "bIsCounted": 2,
+        })
+
+    def test_array_fillers_are_dropped_but_scalar_positions_are_kept(self):
+        """Element [1] without [0]: the `{}` filler goes, a scalar None stays."""
+        payload = self.property_payload([
+            {"handle": 1, "field_name": "Teams[1].Score", "value_i64": 5},
+            {"handle": 2, "field_name": "Scores[1]", "value_i64": 7},
+        ])
+        self.assertEqual(payload, {"Teams": [{"Index": 1, "Score": 5}],
+                                   "Scores": [None, 7]})
 
 
-class SummaryReportingTests(TallyTestCase):
+class SummaryReportingTests(unittest.TestCase):
     """The summary must not say 'complete' about a conversion that lost rows."""
 
-    def test_a_clean_conversion_reports_no_losses(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            manifest = '{"replay_version": "x"}'
-            summary = self.convert_rows(
-                tmp, MINIMAL_FIELD_ROWS, manifest_json=manifest
-            )
-        self.assertEqual(summary["tally"].total, 0)
-
     def test_a_lossy_conversion_names_every_loss_in_its_summary(self):
-        rows = MINIMAL_FIELD_ROWS + [
-            {
-                "time_ms": 10, "packet_id": 1, "actor": 101,
-                "group_path": "PlayerState", "field_name": None,
-                "bit_count": 3, "raw_bits": b"\x05",
-            },
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            summary = self.convert_rows(tmp, rows)
-        lines = summary["tally"].lines()
-        self.assertTrue(any("unnamed_property_rows" in ln for ln in lines), lines)
-        self.assertTrue(any("missing_manifest" in ln for ln in lines), lines)
-        # Only the non-zero counters are printed.
-        self.assertEqual(len(lines), 2, lines)
+        tally = run(MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW]).tally
+        counts = self.printed_counts(tally.lines())
+        self.assertEqual(list(counts), list(bundle._Tally.REASONS))
+        self.assertEqual(counts["unnamed_property_rows"], "1")
+        self.assertEqual(counts["rpc_param_collisions"], "0")
+
+    def test_a_clean_conversion_prints_every_counter_as_zero(self):
+        """A line printed only when non-zero could not tell "nothing was lost"
+        from "this counter stopped running"."""
+        result = run()
+        self.assertEqual(result.tally.total, 0)
+        counts = self.printed_counts(result.printed.splitlines())
+        self.assertEqual(list(counts), list(bundle._Tally.REASONS))
+        self.assertEqual(set(counts.values()), {"0"})
+
+    @staticmethod
+    def printed_counts(lines) -> dict:
+        """{counter: its count as printed} from the summary's loss lines."""
+        return dict(match.groups() for match in map(
+            re.compile(r"  (\w+): ([\d,]+) -- ").match, lines) if match)
 
 
 # ---------------------------------------------------------------------------
-# The seam
-#
-# Everything below tests the contract between this repository and valplay:
-# what the bundle manifest carries, what it deliberately does not, and the
-# order events.ndjson is written in. valplay reads all of it and has no way to
-# check any of it -- these are the assertions that fail HERE when a change
-# would have broken it silently over there.
+# The seam: what the bundle manifest carries and omits, and the order of
+# events.ndjson. valplay cannot check any of it, so it fails here instead.
 # ---------------------------------------------------------------------------
 
-#: A quality object shaped like the one crates/vrfkit/src/manifest.rs emits.
-#: Trimmed to the members the seam actually reads plus enough of the rest to
-#: prove the forwarding is verbatim and not a hand-picked subset.
+#: Shaped like crates/vrfkit/src/manifest.rs's quality object, with enough
+#: members to prove the forwarding verbatim rather than a hand-picked subset.
 UPSTREAM_QUALITY = {
     "content_blocks_lost": 0,
     "chunks_processed": 19,
@@ -1045,9 +1611,8 @@ UPSTREAM_LEVELS = [
     {"name": "/Game/Maps/Infinity/Infinity", "time_ms": 0},
 ]
 
-#: Two account UUIDs, shaped like the ones vrfkit's manifest `players` array
-#: carries. Present in the EXPORT manifest so the omission test has something
-#: real to prove is absent from the bundle.
+#: An account UUID shaped like the manifest's `players` entries, present in
+#: the EXPORT manifest so the omission test proves something absent.
 UPSTREAM_PLAYERS = [
     {
         "actor_net_guid": 101,
@@ -1057,109 +1622,28 @@ UPSTREAM_PLAYERS = [
 ]
 
 
-def write_net_guids_parquet(path: Path, rows: list[dict]) -> None:
-    """Write a net_guids.parquet with the columns `_load_net_guids` reads."""
-    table = pa.table(
-        {
-            "net_guid": pa.array([r["net_guid"] for r in rows], type=pa.uint32()),
-            "outer_net_guid": pa.array(
-                [r.get("outer") for r in rows], type=pa.uint32()
-            ),
-            "path": pa.array([r.get("path") for r in rows], type=pa.string()),
-        }
-    )
-    pq.write_table(table, path)
+def full_manifest(**overrides) -> dict:
+    manifest = {
+        "source_file": "02d4d478.vrf",
+        "source_size_bytes": 55297993,
+        "replay_version": "5.3.2",
+        "replay_build": "++Ares-Core+release-13.02",
+        "replay_changelist": 2152699011,
+        "duration_ms": 2296000,
+        "quality": json.loads(json.dumps(UPSTREAM_QUALITY)),
+        "players": json.loads(json.dumps(UPSTREAM_PLAYERS)),
+        "net_field_export_groups": json.loads(json.dumps(UPSTREAM_GROUPS)),
+        "level_names_and_times": json.loads(json.dumps(UPSTREAM_LEVELS)),
+        "game_specific_data": [
+            '{"subject":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}',
+        ],
+    }
+    manifest.update(overrides)
+    return manifest
 
 
-def write_events_parquet(path: Path, rows: list[dict]) -> None:
-    """Write the privacy-sensitive source timeline table.
-
-    ``id``, ``metadata`` and ``raw_payload`` deliberately contain a marker in
-    the seam tests below.  If the adapter ever copies a whole row instead of
-    applying its explicit allowlist, the marker makes that leak fail loudly.
-    """
-    def values(name, default=None):
-        return [row.get(name, default) for row in rows]
-
-    table = pa.table(
-        {
-            "id": pa.array(values("id", "private-id"), type=pa.string()),
-            "group": pa.array(values("group"), type=pa.string()),
-            "metadata": pa.array(
-                values("metadata", "private-metadata"), type=pa.string()
-            ),
-            "time1": pa.array(values("time1", 0), type=pa.uint32()),
-            "time2": pa.array(values("time2", 0), type=pa.uint32()),
-            "payload_size": pa.array(
-                values("payload_size", 0), type=pa.int32()
-            ),
-            "raw_payload": pa.array(
-                values("raw_payload", b"private-payload"), type=pa.binary()
-            ),
-            "word0": pa.array(values("word0"), type=pa.uint32()),
-            "word1": pa.array(values("word1"), type=pa.uint32()),
-            "payload_tag": pa.array(values("payload_tag"), type=pa.uint32()),
-            "payload_name": pa.array(values("payload_name"), type=pa.string()),
-            "payload_seconds": pa.array(
-                values("payload_seconds"), type=pa.float32()
-            ),
-        }
-    )
-    pq.write_table(table, path)
-
-
-class SeamTestCase(unittest.TestCase):
-    """Build an export with every table the adapter reads, then convert it."""
-
-    def build(self, tmp, *, field_rows=None, movement_rows=(), guid_rows=(),
-              actor_rows=(), timeline_rows=(), manifest=None):
-        root = Path(tmp)
-        export = root / "export"
-        export.mkdir()
-        write_fields_parquet(
-            export / "fields.parquet",
-            list(MINIMAL_FIELD_ROWS if field_rows is None else field_rows),
-        )
-        if actor_rows:
-            write_actors_parquet(export / "actors.parquet", list(actor_rows))
-        if movement_rows:
-            write_movement_parquet(export / "movement.parquet", list(movement_rows))
-        if guid_rows:
-            write_net_guids_parquet(export / "net_guids.parquet", list(guid_rows))
-        if timeline_rows:
-            write_events_parquet(export / "events.parquet", list(timeline_rows))
-        if manifest is not None:
-            (export / "manifest.json").write_text(
-                json.dumps(manifest), encoding="utf-8"
-            )
-        out = root / "bundle"
-        summary = bundle.convert(export, out)
-        published = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
-        return out, published, summary
-
-    def full_manifest(self, **overrides):
-        manifest = {
-            "source_file": "02d4d478.vrf",
-            "source_size_bytes": 55297993,
-            "replay_version": "5.3.2",
-            "replay_build": "++Ares-Core+release-13.02",
-            "replay_changelist": 2152699011,
-            "duration_ms": 2296000,
-            "quality": json.loads(json.dumps(UPSTREAM_QUALITY)),
-            "players": json.loads(json.dumps(UPSTREAM_PLAYERS)),
-            "net_field_export_groups": json.loads(json.dumps(UPSTREAM_GROUPS)),
-            "level_names_and_times": json.loads(json.dumps(UPSTREAM_LEVELS)),
-            "game_specific_data": [
-                '{"subject":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}',
-            ],
-        }
-        manifest.update(overrides)
-        return manifest
-
-
-#: A settled Sage wall: it opens, then goes DORMANT (the server stops
-#: replicating an actor that is still standing). `dormant` is the third value
-#: of `actors.event`; there is no `close` here, because nothing destroyed it.
+#: A settled Sage wall opens, then goes DORMANT, still standing: no `close`,
+#: because nothing destroyed it. A second wall is destroyed early.
 SAGE_WALL_CLASS = "/Game/Characters/Sage/S0/Ability_Barrier/BarrierProjectile_C"
 
 DORMANCY_ACTOR_ROWS = [
@@ -1176,123 +1660,53 @@ DORMANCY_ACTOR_ROWS = [
 ]
 
 
-class ActorLifecycleEventTests(SeamTestCase):
-    """`actors.event` has THREE values and this file used to publish two.
+class ActorLifecycleEventTests(unittest.TestCase):
+    """The three `actors.event` values: dormant is its own event, never a
+    despawn (see `_ACTOR_EVENT_TYPES`)."""
 
-    The branch was `if event == "open": spawn else: closed`, so every `dormant`
-    row -- the server suspending replication of an actor that is STILL ALIVE --
-    published as `actor_closed`. valplay reads `actor_closed` as a despawn
-    (`pipeline/metrics/ability_detail.py` pairs spawn/close into a lifetime), so
-    a settled smoke, wall or trap read as destroyed with its lifetime truncated
-    to the moment it stopped moving.
+    @staticmethod
+    def lifecycle(result: Converted) -> list[dict]:
+        return [e for e in result.events() if e["type"].startswith("actor_")]
 
-    CLAUDE.md names this trap outright, and `tools/extract_active_effects.py`
-    in this same directory already honours it on the same column.
-    """
-
-    def read_events(self, out):
-        text = (out / "events.ndjson").read_text(encoding="utf-8")
-        return [json.loads(line) for line in text.splitlines()]
-
-    def convert(self, actor_rows):
-        with tempfile.TemporaryDirectory() as tmp:
-            out, published, _ = self.build(
-                tmp, actor_rows=actor_rows, manifest=self.full_manifest()
-            )
-            return self.read_events(out), published
-
-    def test_a_dormant_row_is_not_published_as_a_despawn(self):
-        """The defect itself. `dormant` must not become `actor_closed`."""
-        events, _ = self.convert(DORMANCY_ACTOR_ROWS)
-        closed = [e for e in events if e["type"] == "actor_closed"]
-        self.assertEqual(
-            [e["actor_net_guid"] for e in closed], [502],
-            "a dormant actor was published as a despawn: "
-            f"{[(e['type'], e['actor_net_guid']) for e in events]}",
-        )
-
-    def test_a_dormant_row_is_published_under_its_own_type(self):
-        """Not dropped either: the row and its timestamp are real data."""
-        events, _ = self.convert(DORMANCY_ACTOR_ROWS)
-        dormant = [e for e in events if e["type"] == "actor_dormant"]
-        self.assertEqual(len(dormant), 1, events)
-        self.assertEqual(dormant[0]["actor_net_guid"], 501)
-        self.assertEqual(dormant[0]["time_ms"], 40100)
-
-    def test_every_actors_row_still_becomes_exactly_one_event(self):
-        """No row is lost and none is duplicated by the re-labelling."""
-        events, _ = self.convert(DORMANCY_ACTOR_ROWS)
-        lifecycle = [
-            e for e in events
-            if e["type"] in {"actor_spawned", "actor_closed", "actor_dormant",
-                             "actor_lifecycle_unknown"}
-        ]
-        self.assertEqual(len(lifecycle), len(DORMANCY_ACTOR_ROWS))
-
-    def test_the_raw_wire_value_is_carried_on_the_event(self):
-        """A consumer can audit the mapping instead of trusting the type name."""
-        events, _ = self.convert(DORMANCY_ACTOR_ROWS)
-        by_type = {
-            e["type"]: e.get("actor_event")
-            for e in events if e["type"] in {"actor_closed", "actor_dormant"}
-        }
-        self.assertEqual(by_type, {"actor_closed": "close",
-                                   "actor_dormant": "dormant"})
+    def test_each_row_is_one_event_and_dormant_is_not_a_despawn(self):
+        """Nor dropped; each carries its wire value, and spawns keep their
+        class, archetype and location."""
+        result = run(actors=DORMANCY_ACTOR_ROWS)
+        spawn = {"type": "actor_spawned", "channel": 0,
+                 "replication_class_path": SAGE_WALL_CLASS,
+                 "archetype_path": "Default__Barrier", "rotation": None}
+        self.assertEqual(self.lifecycle(result), [
+            {**spawn, "time_ms": 100, "actor_net_guid": 501,
+             "location": {"x": 1, "y": 2, "z": 3}},
+            {**spawn, "time_ms": 200, "actor_net_guid": 502,
+             "location": {"x": 4, "y": 5, "z": 6}},
+            {"type": "actor_closed", "time_ms": 3200, "actor_net_guid": 502,
+             "channel": 0, "actor_event": "close"},
+            {"type": "actor_dormant", "time_ms": 40100, "actor_net_guid": 501,
+             "channel": 0, "actor_event": "dormant"},
+        ])
+        self.assertEqual(result.manifest["adapter"]["losses"]["unknown_actor_lifecycle_events"], 0)
 
     def test_an_unknown_event_value_is_not_folded_into_a_close(self):
-        """A fourth value must be a visible unknown, never a plausible despawn.
-
-        This is the same drift one step ahead: `dormant` WAS such a value once,
-        and the `else` turned it into a despawn silently.
-        """
+        """A fourth value must be a visible unknown, never a plausible despawn."""
         rows = [
             {"time_ms": 100, "packet_id": 1, "actor": 601, "event": "open",
              "class_path": SAGE_WALL_CLASS, "archetype_path": "Default__X"},
             {"time_ms": 200, "packet_id": 2, "actor": 601,
              "event": "torn_off_in_a_future_build"},
         ]
-        events, published = self.convert(rows)
-        lifecycle = [
-            e["type"] for e in events if e["type"].startswith("actor_")
-        ]
+        result = run(actors=rows, verbose=True)
+        events = self.lifecycle(result)
+        self.assertEqual([e["type"] for e in events],
+                         ["actor_spawned", "actor_lifecycle_unknown"], events)
+        self.assertEqual(events[1]["actor_event"], "torn_off_in_a_future_build")
         self.assertEqual(
-            lifecycle, ["actor_spawned", "actor_lifecycle_unknown"], events)
-        self.assertNotIn("actor_closed", lifecycle)
-        unknown = [e for e in events if e["type"] == "actor_lifecycle_unknown"][0]
-        self.assertEqual(unknown["actor_event"], "torn_off_in_a_future_build")
-        self.assertEqual(
-            published["adapter"]["losses"]["unknown_actor_lifecycle_events"], 1,
+            result.manifest["adapter"]["losses"]["unknown_actor_lifecycle_events"], 1,
             "an unrecognised lifecycle value was published without a count",
         )
-
-    def test_the_known_values_do_not_touch_the_unknown_counter(self):
-        """The counter must not cry wolf on the three values that are known."""
-        _, published = self.convert(DORMANCY_ACTOR_ROWS)
-        self.assertEqual(
-            published["adapter"]["losses"]["unknown_actor_lifecycle_events"], 0)
-
-    def test_the_event_type_map_covers_the_values_claude_md_documents(self):
-        """`open` is handled by the branch above the map; `close`/`dormant` in it.
-
-        Pins the three-value fact itself, so a map that quietly lost `dormant`
-        again is a red test rather than a silent despawn.
-        """
-        self.assertEqual(set(bundle._ACTOR_EVENT_TYPES),
-                         {"close", "dormant"})
-        self.assertEqual(bundle._ACTOR_EVENT_TYPES["close"], "actor_closed")
-        self.assertNotEqual(bundle._ACTOR_EVENT_TYPES["dormant"],
-                            bundle._ACTOR_EVENT_TYPES["close"])
-
-    def test_spawns_are_unchanged_by_the_dormancy_split(self):
-        """The open branch must keep its class path, archetype and location."""
-        events, _ = self.convert(DORMANCY_ACTOR_ROWS)
-        spawns = [e for e in events if e["type"] == "actor_spawned"]
-        self.assertEqual(len(spawns), 2)
-        first = [e for e in spawns if e["actor_net_guid"] == 501][0]
-        self.assertEqual(first["archetype_path"], "Default__Barrier")
-        self.assertEqual(first["location"], {"x": 1.0, "y": 2.0, "z": 3.0})
-        self.assertTrue(first["replication_class_path"].endswith(
-            "BarrierProjectile_C"))
+        # The verbose breakdown prints the types that did not occur, as zeros.
+        for line in ("actor_closed: 0", "actor_dormant: 0", "actor_lifecycle_unknown: 1"):
+            self.assertIn(f"    {line}\n", result.printed)
 
     def test_spawn_channel_and_rotation_cross_without_fabrication(self):
         rows = [
@@ -1315,7 +1729,7 @@ class ActorLifecycleEventTests(SeamTestCase):
                 "actor": 701, "event": "close",
             },
         ]
-        events, _ = self.convert(rows)
+        events = run(actors=rows).events()
         rotated = next(e for e in events if e.get("actor_net_guid") == 701
                        and e["type"] == "actor_spawned")
         static = next(e for e in events if e.get("actor_net_guid") == 702)
@@ -1327,99 +1741,24 @@ class ActorLifecycleEventTests(SeamTestCase):
         self.assertIsNone(static["rotation"])
         self.assertEqual(closed["channel"], 17)
 
-    def test_the_fallback_path_does_not_claim_a_close_reason_it_cannot_know(self):
-        """With no actors.parquet there is no `event` column at all.
 
-        The inferred close comes from the last field row, which says nothing
-        about WHY the actor stopped appearing. `actor_event` is null there --
-        a visible absence rather than a fabricated "close".
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            out, _, _ = self.build(tmp, manifest=self.full_manifest())
-            events = self.read_events(out)
-        closed = [e for e in events if e["type"] == "actor_closed"]
-        self.assertTrue(closed)
-        for event in closed:
-            self.assertIsNone(event["actor_event"])
-            self.assertIn("actor_event", event)
+class UpstreamAccountingForwardingTests(unittest.TestCase):
+    """vrfkit's own accounting reaches the bundle manifest; private data does
+    not."""
 
-
-class UpstreamAccountingForwardingTests(SeamTestCase):
-    """vrfkit counts the losses; the bundle has to carry the count.
-
-    Before this, `_write_manifest` emitted six header scalars and dropped the
-    entire `quality` object, so valplay's only way to judge completeness was
-    to recount the NDJSON it had just been handed -- which cannot detect
-    anything that never reached the NDJSON in the first place.
-    """
-
-    def test_quality_is_forwarded_verbatim(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, _ = self.build(
-                tmp,
-                movement_rows=[{"time_ms": 1, "packet_id": 1, "char": 5}] * 3,
-                guid_rows=[{"net_guid": 1, "outer": 2, "path": "a"},
-                           {"net_guid": 2, "outer": 3, "path": "b"}],
-                manifest=self.full_manifest(),
-            )
+    def test_accounting_crosses_verbatim_and_the_shape_is_pinned(self):
+        result = run(manifest=full_manifest())
+        published, raw = result.manifest, result.files["manifest.json"]
         self.assertEqual(published["quality"], UPSTREAM_QUALITY)
-
-    def test_net_field_export_groups_are_forwarded_verbatim(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, _ = self.build(tmp, manifest=self.full_manifest())
         self.assertEqual(published["net_field_export_groups"], UPSTREAM_GROUPS)
-
-    def test_public_level_names_are_forwarded_without_private_header_data(self):
-        """The level root identifies the map; the adjacent header blob may identify players."""
-        manifest = self.full_manifest()
-        manifest["level_names_and_times"][0]["account_subject"] = (
-            "99999999-8888-7777-6666-555555555555"
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            out, published, _ = self.build(tmp, manifest=manifest)
-            raw = (out / "manifest.json").read_text(encoding="utf-8")
-        self.assertEqual(published["level_names_and_times"], UPSTREAM_LEVELS)
-        self.assertNotIn("game_specific_data", published)
-        self.assertNotIn("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", raw)
-        self.assertNotIn("99999999-8888-7777-6666-555555555555", raw)
-
-    def test_an_export_without_quality_publishes_null_not_zeroes(self):
-        """A missing value renders as a visible absence, never as a number.
-
-        `{}` or a zero-filled object here would tell a consumer the export was
-        complete on the strength of nobody having counted.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, summary = self.build(
-                tmp, manifest={"replay_version": "5.3.2"}
-            )
-        self.assertIsNone(published["quality"])
-        self.assertIsNone(published["net_field_export_groups"])
-        self.assertIsNone(published["level_names_and_times"])
-        self.assertIn("quality", published)
-        # Nothing was dropped, so this must NOT read as a lossy conversion.
-        self.assertEqual(summary["tally"].total, 0)
-
-    def test_account_subjects_are_not_forwarded(self):
-        """`players` is deliberately left behind; prove it stays behind.
-
-        vrfkit's manifest bridges actor guid -> account subject -> character
-        guid. valplay derives the same table from the same BombPlayerState
-        rows, and its version is strictly richer (a SET of characters, which is
-        what keeps a resurrected player's kills attributed). Forwarding a
-        poorer copy would add account UUIDs to a second file while offering a
-        tempting alternative that silently loses those kills.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            out, published, _ = self.build(tmp, manifest=self.full_manifest())
-            raw = (out / "manifest.json").read_text(encoding="utf-8")
+        # `players` stays behind (why: docs/USAGE.md, "What the bundle
+        # manifest carries").
         self.assertNotIn("players", published)
-        self.assertNotIn("11111111-2222-3333-4444-555555555555", raw)
-
-    def test_the_manifest_key_set_is_pinned(self):
-        """The bundle's shape is a contract, so it is spelled out once."""
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, _ = self.build(tmp, manifest=self.full_manifest())
+        self.assertNotIn(b"11111111-2222-3333-4444-555555555555", raw)
+        # LF on every platform, like the extractors' receipts.
+        self.assertIn(b"\n", raw)
+        self.assertNotIn(b"\r\n", raw)
+        # The bundle's shape is a contract, so it is spelled out once.
         self.assertEqual(
             sorted(published),
             sorted([
@@ -1438,39 +1777,49 @@ class UpstreamAccountingForwardingTests(SeamTestCase):
             ]),
         )
 
+    def test_public_level_names_are_forwarded_without_private_header_data(self):
+        """The level root identifies the map; the adjacent header blob may identify players."""
+        manifest = full_manifest()
+        manifest["level_names_and_times"][0]["account_subject"] = (
+            "99999999-8888-7777-6666-555555555555"
+        )
+        result = run(manifest=manifest)
+        raw = result.files["manifest.json"]
+        self.assertEqual(result.manifest["level_names_and_times"], UPSTREAM_LEVELS)
+        self.assertNotIn("game_specific_data", result.manifest)
+        self.assertNotIn(b"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", raw)
+        self.assertNotIn(b"99999999-8888-7777-6666-555555555555", raw)
 
-class AdapterAccountingTests(SeamTestCase):
+    def test_an_export_without_quality_publishes_null_not_zeroes(self):
+        """A visible absence, never zeroes that claim nothing was lost."""
+        result = run(manifest={"replay_version": "5.3.2"})
+        published = result.manifest
+        self.assertIsNone(published["quality"])
+        self.assertIsNone(published["net_field_export_groups"])
+        self.assertIsNone(published["level_names_and_times"])
+        self.assertIn("quality", published)
+        # Nothing was dropped, so this must NOT read as a lossy conversion.
+        self.assertEqual(result.tally.total, 0)
+
+
+class AdapterAccountingTests(unittest.TestCase):
     """What this adapter measured, kept apart from what vrfkit declared."""
 
     def test_events_written_equals_the_lines_on_disk(self):
-        """The one identity a consumer can re-verify exactly.
-
-        valplay recounts events.ndjson; this is the number it recounts
-        against. If they ever differ, the bundle was truncated after it was
-        written, and no metric computed from it is worth publishing.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            out, published, _ = self.build(tmp, manifest=self.full_manifest())
-            lines = (out / "events.ndjson").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(published["adapter"]["events_written"], len(lines))
+        """The identity valplay recounts: a difference means truncation."""
+        result = run(manifest=full_manifest())
+        lines = result.files["events.ndjson"].splitlines()
+        self.assertEqual(result.manifest["adapter"]["events_written"], len(lines))
         self.assertGreater(len(lines), 0)
 
     def test_movement_rows_read_is_the_table_height_not_the_written_count(self):
-        """They differ by the intra-packet collapse, and both are published.
-
-        Comparing the WRITTEN count with `quality.movement_rows` would report
-        every healthy replay as lossy, because the collapse is intentional.
-        """
+        """Both are published; only rows read compares with the declaration."""
         movement = [
             {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": 1.0},
             {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": 2.0},
             {"time_ms": 2, "packet_id": 2, "char": 5, "pos_x": 3.0},
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, _ = self.build(
-                tmp, movement_rows=movement, manifest=self.full_manifest()
-            )
-        adapter = published["adapter"]
+        adapter = run(movement=movement, manifest=full_manifest()).manifest["adapter"]
         self.assertEqual(adapter["movement_rows_read"], 3)
         self.assertEqual(adapter["movement_rows_written"], 2)
         self.assertTrue(adapter["upstream_row_counts"]["movement_rows"]["agrees"])
@@ -1483,12 +1832,8 @@ class AdapterAccountingTests(SeamTestCase):
              "word0": 7},
             {"group": "spikePlanted", "time1": 200, "time2": 200},
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, _ = self.build(
-                tmp, timeline_rows=timeline,
-                manifest=self.full_manifest(quality=quality),
-            )
-        adapter = published["adapter"]
+        adapter = run(timeline=timeline,
+                      manifest=full_manifest(quality=quality)).manifest["adapter"]
         self.assertEqual(adapter["server_timeline_rows_read"], 2)
         self.assertEqual(adapter["server_timeline_events_written"], 2)
         self.assertEqual(
@@ -1497,28 +1842,20 @@ class AdapterAccountingTests(SeamTestCase):
         )
 
     def test_a_declared_count_its_own_table_contradicts_is_reported(self):
-        """The producer disagreeing with itself is a signal, not a crash.
-
-        The adapter counts it and publishes both numbers. It does not repair
-        either -- which of the two is wrong is not knowable here -- and it does
-        not refuse: refusing is the consumer's call, at the point of
-        publication.
-        """
+        """Counted with both numbers published; never repaired or refused."""
         quality = json.loads(json.dumps(UPSTREAM_QUALITY))
         quality["movement_rows"] = 999
         quality["event_rows"] = 1
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, summary = self.build(
-                tmp,
-                movement_rows=[{"time_ms": 1, "packet_id": 1, "char": 5}],
-                guid_rows=[{"net_guid": 1, "outer": 2, "path": "a"},
-                           {"net_guid": 2, "outer": 3, "path": "b"}],
-                timeline_rows=[{
-                    "group": "spikePlanted", "time1": 1, "time2": 1,
-                }],
-                manifest=self.full_manifest(quality=quality),
-            )
-        counts = published["adapter"]["upstream_row_counts"]
+        result = run(
+            movement=[{"time_ms": 1, "packet_id": 1, "char": 5}],
+            net_guids=[{"net_guid": 1, "outer": 2, "path": "a"},
+                       {"net_guid": 2, "outer": 3, "path": "b"}],
+            timeline=[{
+                "group": "spikePlanted", "time1": 1, "time2": 1,
+            }],
+            manifest=full_manifest(quality=quality),
+        )
+        counts = result.manifest["adapter"]["upstream_row_counts"]
         self.assertEqual(
             counts["movement_rows"],
             {"declared": 999, "observed": 1, "agrees": False},
@@ -1533,91 +1870,122 @@ class AdapterAccountingTests(SeamTestCase):
             counts["event_rows"],
             {"declared": 1, "observed": 1, "agrees": True},
         )
-        self.assertEqual(summary["tally"]["upstream_row_count_disagreement"], 1)
-        self.assertGreater(summary["tally"].total, 0)
-
-    def test_a_declared_table_that_is_absent_is_a_disagreement(self):
-        """"vrfkit wrote 2 rows" and "the file is not there" cannot both hold.
-
-        An absent table used to convert silently -- weapon identity simply
-        went unresolved -- which is right when nothing claimed the table
-        existed. Once the export declares a row count, its absence is a
-        contradiction and has to be said out loud.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, summary = self.build(tmp, manifest=self.full_manifest())
-        check = published["adapter"]["upstream_row_counts"]["net_guid_rows"]
-        self.assertEqual(check, {"declared": 2, "observed": None, "agrees": False})
-        self.assertGreaterEqual(
-            summary["tally"]["upstream_row_count_disagreement"], 1
-        )
+        self.assertEqual(result.tally["upstream_row_count_disagreement"], 1)
+        self.assertGreater(result.tally.total, 0)
 
     def test_nothing_declared_reads_as_unknown_not_as_agreement(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, summary = self.build(
-                tmp, manifest={"replay_version": "5.3.2"}
-            )
+        result = run(manifest={"replay_version": "5.3.2"})
         for name in ("movement_rows", "net_guid_rows", "event_rows"):
-            check = published["adapter"]["upstream_row_counts"][name]
+            check = result.manifest["adapter"]["upstream_row_counts"][name]
             self.assertIsNone(check["declared"], name)
             self.assertIsNone(
                 check["agrees"],
                 "an export that declared nothing must not certify itself",
             )
-        self.assertEqual(summary["tally"]["upstream_row_count_disagreement"], 0)
+        self.assertEqual(result.tally["upstream_row_count_disagreement"], 0)
 
     def test_the_loss_tally_reaches_the_manifest(self):
-        rows = list(MINIMAL_FIELD_ROWS) + [
-            {
-                "time_ms": 10, "packet_id": 1, "actor": 101,
-                "group_path": "PlayerState", "field_name": None,
-                "bit_count": 3, "raw_bits": b"\x05",
-            },
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            _, published, _ = self.build(
-                tmp, field_rows=rows, manifest=self.full_manifest()
-            )
-        losses = published["adapter"]["losses"]
+        rows = MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW]
+        losses = run(rows, manifest=full_manifest()).manifest["adapter"]["losses"]
         self.assertEqual(losses["unnamed_property_rows"], 1)
         # Present and zero, not absent: a key that appears only when non-zero
         # cannot distinguish "clean" from "this counter stopped running".
         self.assertEqual(losses["unnamed_rpc_rows"], 0)
 
+    def test_the_loss_counter_set_is_pinned(self):
+        """Every counter reaches the manifest, zero or not. Spelled out rather
+        than read from `_Tally.REASONS`: comparing the manifest with its own
+        source could not fail."""
+        self.assertEqual(
+            sorted(run(manifest=full_manifest()).manifest["adapter"]["losses"]),
+            sorted([
+                "unnamed_property_rows",
+                "unnamed_rpc_rows",
+                "unnamed_rpc_invocations",
+                "rpc_param_collisions",
+                "property_key_collisions",
+                "unparsable_path_segments",
+                "payload_shape_conflicts",
+                "multi_typed_rows",
+                "fabricated_shot_locations",
+                "fabricated_shot_rotations",
+                "effect_half_read_pairs",
+                "effect_array_residual_bits",
+                "empty_gameplay_tag_table",
+                "events_time_ms_regressions",
+                "upstream_row_count_disagreement",
+                "unknown_actor_lifecycle_events",
+                "non_finite_movement_rows",
+                "raw_blobs_unavailable",
+                "damaged_bone_undecoded",
+            ]),
+        )
 
-class ServerTimelineEventTests(SeamTestCase):
+
+class NonFiniteMovementTests(unittest.TestCase):
+    """A non-finite movement value is spelled as the encoder spells it and its
+    row counted (see `_write_movement`)."""
+
+    def test_non_finite_values_are_encoded_and_counted(self):
+        inf, nan = float("inf"), float("nan")
+        movement = [
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": inf},
+            {"time_ms": 2, "packet_id": 2, "char": 5, "vel_z": nan},
+            {"time_ms": 3, "packet_id": 3, "char": 5, "yaw": -inf},
+            {"time_ms": 4, "packet_id": 4, "char": 5, "pos_x": 1.5},
+        ]
+        result = run(movement=movement)
+        lines = result.movement()
+        rows = [json.loads(line) for line in lines]  # stdlib: non-strict
+        self.assertEqual(len(rows), 4)
+        self.assertIn('"position":{"x":Infinity,', lines[0])
+        self.assertEqual(rows[0]["position"]["x"], inf)
+        self.assertTrue(math.isnan(rows[1]["velocity"]["z"]))
+        self.assertEqual(rows[2]["yaw"], -inf)
+        self.assertEqual(rows[3]["position"]["x"], 1.5)
+        # Rows, not values: three rows carry one non-finite value each.
+        self.assertEqual(result.tally["non_finite_movement_rows"], 3)
+        self.assertEqual(
+            result.manifest["adapter"]["losses"]["non_finite_movement_rows"], 3)
+        self.assertTrue(any(line.startswith("  non_finite_movement_rows: 3 -- ")
+                            for line in result.tally.lines()))
+
+    def test_a_row_is_counted_once_however_many_of_its_values_are_bad(self):
+        inf = float("inf")
+        movement = [{"time_ms": 1, "packet_id": 1, "char": 5,
+                     "pos_x": inf, "pos_y": -inf, "pitch": float("nan")}]
+        self.assertEqual(run(movement=movement).tally["non_finite_movement_rows"], 1)
+
+    def test_a_collapsed_sub_move_is_not_counted(self):
+        """Only rows the bundle writes are counted; movement.parquet keeps the rest."""
+        movement = [
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": float("inf")},
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": 2.0},
+        ]
+        result = run(movement=movement)
+        self.assertEqual(len(result.movement()), 1)
+        self.assertEqual(result.tally["non_finite_movement_rows"], 0)
+        self.assertEqual(
+            result.manifest["adapter"]["losses"]["non_finite_movement_rows"], 0)
+
+    def test_finite_movement_counts_nothing(self):
+        movement = [{"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": 1e-05}]
+        result = run(movement=movement)
+        self.assertEqual(result.tally["non_finite_movement_rows"], 0)
+        self.assertIn("non_finite_movement_rows", result.manifest["adapter"]["losses"])
+
+
+class ServerTimelineEventTests(unittest.TestCase):
     """Only non-private, structurally validated Event-chunk fields cross."""
 
     PRIVATE_MARKER = "DO-NOT-PUBLISH-ACCOUNT-SUBJECT"
 
     def convert_timeline(self, rows):
-        with tempfile.TemporaryDirectory() as tmp:
-            marked = []
-            for row in rows:
-                marked.append({
-                    "id": self.PRIVATE_MARKER,
-                    "metadata": self.PRIVATE_MARKER,
-                    "raw_payload": self.PRIVATE_MARKER.encode(),
-                    **row,
-                })
-            out, published, _ = self.build(
-                tmp,
-                # Use the authoritative actor table so this fixture does not
-                # synthesize the legacy `last field + one packet` close after
-                # every timeline row.  The ordering under test is the Event
-                # table, not that old-table fallback.
-                actor_rows=[{
-                    "time_ms": 10, "packet_id": 1, "actor": 101,
-                    "event": "open", "class_path": "/Game/Test/Test_C",
-                    "archetype_path": "Default__Test_C",
-                }],
-                timeline_rows=marked,
-                manifest=self.full_manifest(),
-            )
-            raw = (out / "events.ndjson").read_bytes()
-            events = [json.loads(line) for line in raw.splitlines()]
-            timeline = [e for e in events if e["type"] == "server_timeline_event"]
-            return raw, timeline, published
+        marked = [{"id": self.PRIVATE_MARKER, "metadata": self.PRIVATE_MARKER,
+                   "raw_payload": self.PRIVATE_MARKER.encode(), **row} for row in rows]
+        result = run(timeline=marked, manifest=full_manifest())
+        return (result.files["events.ndjson"], result.events("server_timeline_event"),
+                result.manifest)
 
     def test_private_event_columns_never_cross_the_allowlist(self):
         raw, timeline, _ = self.convert_timeline([
@@ -1697,14 +2065,15 @@ class ServerTimelineEventTests(SeamTestCase):
         self.assertEqual([e["time_ms"] for e in timeline], [100, 200, 300])
         self.assertEqual(published["adapter"]["events_time_ms_regressions"], 0)
 
+    def test_the_packet_key_is_the_greatest_packet_at_or_before_the_time(self):
+        # Packet 3 arrives at 30 ms after packet 5 at 20 ms: the key stays 5.
+        cols = mock.Mock(time_ms=[20, 10, 30, 20], packet_id=[5, 1, 3, 2])
+        self.assertEqual(bundle._packets_at_or_before(cols, [5, 10, 15, 20, 30, 99]),
+                         [0, 1, 1, 5, 5, 5])
 
-class EventOrderingContractTests(SeamTestCase):
-    """The order events.ndjson is written in, pinned at the layer that sets it.
 
-    valplay orders same-millisecond events by (time_ms, line index), which is
-    only a total order if this file's output is in wire order and its time_ms
-    column is non-decreasing. Neither was asserted anywhere, at any layer.
-    """
+class EventOrderingContractTests(unittest.TestCase):
+    """events.ndjson's order (see `_write_events`), pinned where it is set."""
 
     #: Two actors, three packets, deliberately supplied out of packet order in
     #: the parquet so a test that merely echoed input order would pass by luck.
@@ -1719,50 +2088,30 @@ class EventOrderingContractTests(SeamTestCase):
          "group_path": "PlayerState", "field_name": "Health",
          "bit_count": 32, "value_i64": 2},
     ]
-
-    def read_events(self, out):
-        text = (out / "events.ndjson").read_text(encoding="utf-8")
-        return [json.loads(line) for line in text.splitlines()]
+    #: Each actor opens in the packet and millisecond of its property row.
+    SPAWNS = [{**row, "event": "open", "class_path": "/Game/Test/Test_C"}
+              for row in SHUFFLED]
 
     def test_events_are_written_in_non_decreasing_time_order(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out, published, _ = self.build(
-                tmp, field_rows=self.SHUFFLED, manifest=self.full_manifest()
-            )
-            events = self.read_events(out)
-        times = [e["time_ms"] for e in events]
-        self.assertEqual(times, sorted(times), events)
-        self.assertEqual(published["adapter"]["events_time_ms_regressions"], 0)
+        result = run(self.SHUFFLED, actors=self.SPAWNS)
+        times = [e["time_ms"] for e in result.events()]
+        self.assertEqual(times, sorted(times), result.events())
+        self.assertEqual(result.manifest["adapter"]["events_time_ms_regressions"], 0)
 
     def test_a_spawn_precedes_the_property_event_at_the_same_millisecond(self):
-        """The phase order (actors, properties, RPCs) is the tie-break.
-
-        A property event for an actor that has not spawned yet is a document
-        the consumer cannot read in one pass, so the stable sort's tie
-        behaviour is a contract, not an implementation detail.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            out, _, _ = self.build(
-                tmp, field_rows=self.SHUFFLED, manifest=self.full_manifest()
-            )
-            events = self.read_events(out)
+        """The phase order is the tie-break: no actor is described before it
+        exists, so the bundle reads in one pass."""
+        events = run(self.SHUFFLED, actors=self.SPAWNS).events()
         for actor in (101, 202, 303):
-            same = [e for e in events if e.get("actor_net_guid") == actor]
-            types = [e["type"] for e in same]
+            types = [e["type"] for e in events if e.get("actor_net_guid") == actor]
             self.assertEqual(
-                types[0], "actor_spawned",
+                types, ["actor_spawned", "export_group_received"],
                 f"actor {actor} is described before it exists: {types}",
             )
 
     def test_a_time_ms_regression_is_counted_and_published(self):
-        """A frame whose time is not finite exports time_ms = 0.
-
-        vrf-frame reads it with a bare read_f32 and substitutes 0 for anything
-        non-finite, so one bad frame mid-replay makes time_ms non-monotonic
-        while packet order stays correct. The adapter keeps packet order --
-        that is the wire -- and reports the regression instead of hiding it by
-        sorting on a value the replay does not guarantee.
-        """
+        """A non-finite frame time exports as 0: packet order is kept and the
+        regression reported, not sorted away."""
         rows = [
             {"time_ms": 10, "packet_id": 1, "actor": 101,
              "group_path": "PlayerState", "field_name": "Health",
@@ -1771,19 +2120,11 @@ class EventOrderingContractTests(SeamTestCase):
              "group_path": "PlayerState", "field_name": "Health",
              "bit_count": 32, "value_i64": 2},
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            out, published, summary = self.build(
-                tmp, field_rows=rows, manifest=self.full_manifest()
-            )
-            events = self.read_events(out)
-        self.assertGreater(published["adapter"]["events_time_ms_regressions"], 0)
-        self.assertGreater(summary["tally"]["events_time_ms_regressions"], 0)
+        result = run(rows)
+        self.assertGreater(result.manifest["adapter"]["events_time_ms_regressions"], 0)
+        self.assertGreater(result.tally["events_time_ms_regressions"], 0)
         # Packet order is preserved: the regression is reported, not repaired.
         self.assertEqual(
-            [e["time_ms"] for e in events if e["type"] == "export_group_received"],
+            [e["time_ms"] for e in result.events("export_group_received")],
             [10, 0],
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

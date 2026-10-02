@@ -1,29 +1,12 @@
 //! Payload transforms for VALORANT replay content blocks.
 //!
-//! # What is transformed, and when
+//! Only a content block's payload is transformed; block headers and their
+//! declared bit lengths are plaintext, so a replay is framed sequentially and
+//! each block's transform is independent of the others. The key comes from the stream:
+//! `seed = (bit_count as u32) ^ actor_net_guid` ([`seed_for`]).
 //!
-//! The obfuscation is applied per **content block payload**, not to the file, a
-//! chunk, or a packet. Content block *headers* and their declared bit lengths are
-//! plaintext; only the field data that follows is transformed. That split has a
-//! useful consequence: a replay can be framed into blocks without decoding any
-//! of them, so framing stays sequential while the expensive per-block decode can
-//! be spread across threads.
-//!
-//! # Seed derivation
-//!
-//! ```text
-//! seed = (bit_count as u32) ^ actor_net_guid
-//! ```
-//!
-//! Both inputs come from the surrounding stream, so nothing is stored in the file
-//! that identifies the key. See [`seed_for`].
-//!
-//! # Per-build variation
-//!
-//! The algorithm skeleton has been stable from release-12.10 to release-13.04.
-//! What changes per build is two constants and the order of a handful of bit
-//! primitives; see [`versions`]. Adding a build means writing one `impl` with
-//! two constants and three word functions.
+//! The skeleton is shared from release-11.06 to release-13.06; a build is one
+//! line of the `transforms!` registry at the end of this file.
 //!
 //! # Example
 //!
@@ -40,55 +23,68 @@
 //! version.decode_from(&mut reader, bit_count, seed_for(bit_count, 2), &mut out).unwrap();
 //! ```
 //!
-//! # Module map
-//!
-//! | Module | Responsibility |
-//! |--------|----------------|
-//! | `lib` | [`seed_for`], [`TransformVersion`] dispatch, the staging driver |
-//! | [`helpers`] | PRNG and bit primitives shared by every build |
-//! | [`versions`] | One file per build, plus the [`versions::SeededTransform`] trait |
-//! | [`sbox`] | Generated substitution tables (`tools/extract_sboxes.py`) |
-//!
-//! # Cargo features
-//!
-//! **None, deliberately.** [`ALL_VERSIONS`] is a length-independent slice and
-//! [`TransformVersion`] is non-exhaustive, so adding a build does not change the
-//! registry's public type and external callers cannot match every future variant.
-//! Per-build gating would still remove existing, publicly named variants and is
-//! therefore not offered. The cost is small: the six `impl`s are branch-free
-//! arithmetic, and the only sizeable data is the three S-box tables (used by
-//! release-13.00 and release-13.02 alone).
+//! No Cargo features: gating a build would remove a public [`TransformVersion`]
+//! variant, and the only sizeable data is the three shared S-box tables.
 
 #![forbid(unsafe_code)]
 
 pub mod helpers;
 pub mod sbox;
-pub mod versions;
 
-use versions::{SeededTransform, V12_10, V12_11, V13_00, V13_01, V13_02, V13_04};
 use vrf_bitio::{BitError, BitReader, Result as BitResult};
 
-/// Derive the transform seed for a content block.
-///
-/// `bit_count` is the block's declared payload length and `actor_net_guid` the
-/// network GUID of the actor channel carrying it. Both are read from plaintext
-/// parts of the stream.
+/// The transform seed for a content block: its declared payload length in
+/// bits, XOR the network GUID of the actor channel carrying it.
 #[must_use]
 #[inline]
 pub const fn seed_for(bit_count: usize, actor_net_guid: u32) -> u32 {
     (bit_count as u32) ^ actor_net_guid
 }
 
-/// Run a build's transform over `buf` in place.
+/// One build's payload transform.
+pub trait SeededTransform {
+    /// Replay branch string this transform decodes, e.g. `++Ares-Core+release-13.01`.
+    const BRANCH: &'static str;
+    /// Added to the seed when deriving the first PRNG lane.
+    const SEED_ADDEND: u32;
+    /// Offset applied to the raw seed when deriving the first PRNG lane.
+    const INIT_A_OFFSET: u32;
+    /// Whether the offset is added (`true`) or subtracted (`false`).
+    const ADD_OFFSET: bool = false;
+    /// XORed into the final partial byte alongside the keystream byte. Equals
+    /// `SEED_ADDEND as u8` in all 24 builds; a build that broke that would
+    /// fail its 1- and 7-bit vectors.
+    const TAIL_XOR: u8 = Self::SEED_ADDEND as u8;
+
+    /// Seed the first PRNG lane.
+    #[must_use]
+    fn initial_prng_a(seed: u32) -> u64 {
+        helpers::initial_prng_a(
+            seed,
+            Self::SEED_ADDEND,
+            Self::INIT_A_OFFSET,
+            Self::ADD_OFFSET,
+        )
+    }
+
+    /// Transform one aligned 64-bit word.
+    #[must_use]
+    fn word64(value: u64, state: u32) -> u64;
+    /// Transform one aligned 32-bit word.
+    #[must_use]
+    fn word32(value: u32, state: u32) -> u32;
+    /// Transform one byte.
+    #[must_use]
+    fn byte(value: u8, state: u32) -> u8;
+}
+
+/// Run a build's transform over `buf`, which holds the payload's bits
+/// LSB-first as [`BitReader::copy_bits_to`] writes them. The final byte's
+/// padding is left as found (the tail XOR is masked); callers that hand that
+/// byte on whole rely on `copy_bits_to` having zeroed it.
 ///
-/// `buf` must already hold the payload's bits, LSB-first, with the final byte's
-/// padding zeroed -- [`BitReader::copy_bits_to`] guarantees both. Stale padding
-/// would be folded into the tail byte and corrupt it.
-///
-/// Processing is staged 64 bits at a time, then 32, then 8, then the remaining
-/// 1..7 bits, advancing the PRNG once per stage iteration. The staging order is
-/// part of the format: the keystream position depends on how many words of each
-/// width came before.
+/// Staged 64 bits at a time, then 32, then 8, then the last 1..7, with one PRNG
+/// advance per stage iteration. The staging order is part of the format.
 pub fn transform_in_place<T: SeededTransform>(
     buf: &mut [u8],
     bit_count: usize,
@@ -106,9 +102,7 @@ pub fn transform_in_place<T: SeededTransform>(
     }
 
     let mut state = seed;
-    // Before the first PRNG advance the keystream byte is just the low seed byte.
-    // A payload shorter than 8 bits never advances, so the tail XOR below relies
-    // on this initial value.
+    // A payload under 8 bits never advances, so its keystream byte is the seed's low byte.
     let mut stream_byte = seed as u8;
     let mut prng_a = T::initial_prng_a(seed);
     let mut prng_b = helpers::initial_prng_b(seed);
@@ -136,56 +130,14 @@ pub fn transform_in_place<T: SeededTransform>(
         left -= 8;
     }
     if left != 0 {
-        // Only the bits that are actually part of the payload are touched; the
-        // mask keeps the padding at zero so a re-encode stays byte-identical.
         let mask = 0xffu8 >> (7 - ((bit_count - 1) & 7));
         buf[offset] ^= mask & (stream_byte ^ T::TAIL_XOR);
     }
     Ok(())
 }
 
-/// A game build's payload transform, selected by replay branch string.
-///
-/// Dispatch happens once per content block, and each arm calls a monomorphised
-/// [`transform_in_place`], so the inner word loops carry no indirection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum TransformVersion {
-    /// `++Ares-Core+release-12.10`
-    V1210,
-    /// `++Ares-Core+release-12.11`
-    V1211,
-    /// `++Ares-Core+release-13.00`
-    V1300,
-    /// `++Ares-Core+release-13.01`
-    V1301,
-    /// `++Ares-Core+release-13.02`
-    V1302,
-    /// `++Ares-Core+release-13.04`
-    V1304,
-}
-
-/// Every transform this build of the crate knows about.
-///
-/// The public type deliberately does not encode the current number of builds:
-/// adding another variant and registry entry remains source-compatible for
-/// callers that iterate this slice. [`TransformVersion`] is also
-/// [`non_exhaustive`](https://doc.rust-lang.org/reference/attributes/type_system.html#the-non_exhaustive-attribute),
-/// so downstream matches must retain a fallback arm for future builds.
-pub const ALL_VERSIONS: &[TransformVersion] = &[
-    TransformVersion::V1210,
-    TransformVersion::V1211,
-    TransformVersion::V1300,
-    TransformVersion::V1301,
-    TransformVersion::V1302,
-    TransformVersion::V1304,
-];
-
-/// A replay whose branch has no registered transform.
-///
-/// Reported rather than worked around: guessing a transform yields plausible-
-/// looking garbage instead of an error, and downstream metrics cannot tell the
-/// difference. The branch string is carried so callers can name it in a message.
+/// A replay branch with no registered transform: reported, never guessed,
+/// because a guessed transform yields plausible garbage instead of an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedBranch {
     /// The replay branch that could not be matched.
@@ -224,41 +176,14 @@ impl TransformVersion {
         })
     }
 
-    /// The replay branch string this transform decodes.
-    #[must_use]
-    pub const fn branch(self) -> &'static str {
-        match self {
-            Self::V1210 => V12_10::BRANCH,
-            Self::V1211 => V12_11::BRANCH,
-            Self::V1300 => V13_00::BRANCH,
-            Self::V1301 => V13_01::BRANCH,
-            Self::V1302 => V13_02::BRANCH,
-            Self::V1304 => V13_04::BRANCH,
-        }
-    }
-
     /// Bytes needed to hold `bit_count` bits.
     #[must_use]
     pub const fn output_byte_count(bit_count: usize) -> usize {
         bit_count.div_ceil(8)
     }
 
-    /// Transform `buf` in place.
-    pub fn apply(self, buf: &mut [u8], bit_count: usize, seed: u32) -> BitResult<()> {
-        match self {
-            Self::V1210 => transform_in_place::<V12_10>(buf, bit_count, seed),
-            Self::V1211 => transform_in_place::<V12_11>(buf, bit_count, seed),
-            Self::V1300 => transform_in_place::<V13_00>(buf, bit_count, seed),
-            Self::V1301 => transform_in_place::<V13_01>(buf, bit_count, seed),
-            Self::V1302 => transform_in_place::<V13_02>(buf, bit_count, seed),
-            Self::V1304 => transform_in_place::<V13_04>(buf, bit_count, seed),
-        }
-    }
-
-    /// Copy `bit_count` bits out of `reader` into `out`, then transform them.
-    ///
-    /// This is the shape the parser uses: the payload is never materialised
-    /// twice, and `out` is expected to be a reused scratch buffer.
+    /// Copy `bit_count` bits from `reader` into `out`, typically a reused
+    /// scratch buffer, and transform them there.
     pub fn decode_from(
         self,
         reader: &mut BitReader<'_>,
@@ -276,6 +201,133 @@ impl TransformVersion {
     }
 }
 
+/// Step `k` (1..=8) of a word function keys `word64` with
+/// `state.rotate_right(k)`, `word32` with `state.rotate_left(k)` and `byte`
+/// with `state * 11^k`; a rotation count is `key % (bits - 1) + 1` and an
+/// operand is the key's low bits, except that `word64` XORs `!u64::from(key)`.
+macro_rules! step {
+    (u64 $s:ident $k:literal) => { $s.rotate_right($k) };
+    (u32 $s:ident $k:literal) => { $s.rotate_left($k) };
+    (u8 $s:ident $k:literal) => { $s.wrapping_mul(const { 11u32.pow($k) }) };
+    ($t:ident $v:ident $s:ident add $k:literal) => { $v.wrapping_add(step!($t $s $k) as $t) };
+    ($t:ident $v:ident $s:ident sub $k:literal) => { $v.wrapping_sub(step!($t $s $k) as $t) };
+    (u64 $v:ident $s:ident xor $k:literal) => { $v ^ !u64::from(step!(u64 $s $k)) };
+    ($t:ident $v:ident $s:ident xor $k:literal) => { $v ^ step!($t $s $k) as $t };
+    ($t:ident $v:ident $s:ident rotl $k:literal) => {
+        $v.rotate_left(step!($t $s $k) % ($t::BITS - 1) + 1)
+    };
+    ($t:ident $v:ident $s:ident rotr $k:literal) => {
+        $v.rotate_right(step!($t $s $k) % ($t::BITS - 1) + 1)
+    };
+    ($t:ident $v:ident $s:ident not) => { !$v };
+    (u64 $v:ident $s:ident rev) => { reverse_bits64_without_final_16bit_swap($v) };
+    ($t:ident $v:ident $s:ident rev) => { $v.reverse_bits() };
+    (u64 $v:ident $s:ident swap) => { swap_adjacent_bits_u64($v) };
+    (u32 $v:ident $s:ident swap) => { swap_adjacent_bits_u32($v) };
+    (u8 $v:ident $s:ident swap) => { swap_adjacent_bits_u8($v) };
+    (u64 $v:ident $s:ident sbox) => { substitute_bytes_u64($v, &SBOX_64) };
+    (u32 $v:ident $s:ident sbox) => { substitute_bytes_u32($v, &SBOX_32) };
+    (u8 $v:ident $s:ident sbox) => { SBOX_8[$v as usize] };
+}
+
+/// Emits one `versions` struct per build, [`TransformVersion`],
+/// [`ALL_VERSIONS`] and the per-build dispatch. The three word functions run
+/// the same step list.
+macro_rules! transforms {
+    ($($variant:ident $name:ident $build:literal $addend:literal $offset:literal:
+        $($op:ident $($k:literal)?),+;)+) => {
+        /// One unit struct per build.
+        pub mod versions {
+            pub use crate::SeededTransform;
+            use crate::{helpers::*, sbox::*};
+            $(
+                pub struct $name;
+
+                impl SeededTransform for $name {
+                    const BRANCH: &'static str = concat!("++Ares-Core+release-", $build);
+                    const SEED_ADDEND: u32 = $addend;
+                    const INIT_A_OFFSET: u32 = i32::unsigned_abs($offset);
+                    const ADD_OFFSET: bool = $offset > 0;
+
+                    fn word64(v: u64, state: u32) -> u64 {
+                        $(let v = step!(u64 v state $op $($k)?);)+
+                        v
+                    }
+
+                    fn word32(v: u32, state: u32) -> u32 {
+                        $(let v = step!(u32 v state $op $($k)?);)+
+                        v
+                    }
+
+                    fn byte(v: u8, state: u32) -> u8 {
+                        $(let v = step!(u8 v state $op $($k)?);)+
+                        v
+                    }
+                }
+            )+
+        }
+
+        /// A game build's payload transform, selected by replay branch string.
+        /// Dispatch is once per content block; each arm calls a monomorphised
+        /// [`transform_in_place`], so the word loops carry no indirection.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
+        pub enum TransformVersion {
+            $(#[doc = concat!("`++Ares-Core+release-", $build, "`")] $variant,)+
+        }
+
+        /// Every transform this crate knows about. A slice, so adding a build
+        /// does not change the public type; [`TransformVersion`] is
+        /// non-exhaustive for the same reason.
+        pub const ALL_VERSIONS: &[TransformVersion] = &[$(TransformVersion::$variant),+];
+
+        impl TransformVersion {
+            /// The replay branch string this transform decodes.
+            #[must_use]
+            pub const fn branch(self) -> &'static str {
+                match self {
+                    $(Self::$variant => <versions::$name as SeededTransform>::BRANCH,)+
+                }
+            }
+
+            /// Transform `buf` in place.
+            pub fn apply(self, buf: &mut [u8], bit_count: usize, seed: u32) -> BitResult<()> {
+                match self {
+                    $(Self::$variant => transform_in_place::<versions::$name>(buf, bit_count, seed),)+
+                }
+            }
+        }
+    };
+}
+
+// variant, struct, build, SEED_ADDEND, INIT_A_OFFSET (negative: subtracted): steps
+transforms! {
+    V1106 V11_06 "11.06" 0x3325_e3bd  0x3d: add 8, sbox, xor 6, sbox, sbox, rev, swap;
+    V1107 V11_07 "11.07" 0x17b0_77d3 -0x2d: xor 8, sbox, rev, not, swap, xor 1;
+    V1108 V11_08 "11.08" 0xacf2_cdff -0x01: not, rotr 7, rotl 6, rotl 5, sub 2, swap;
+    V1109 V11_09 "11.09" 0x12cf_14e5 -0x1b: sbox, xor 7, xor 6, swap, rotl 3, swap, xor 1;
+    V1110 V11_10 "11.10" 0x34e9_d3ec -0x14: sub 8, xor 7, sub 6, rotl 5, sub 4, rev, sbox, not;
+    V1111 V11_11 "11.11" 0xc444_5c41 -0x3f: xor 8, sbox, rotl 6, swap, sbox, rotl 1;
+    V1200 V12_00 "12.00" 0x7087_6679 -0x07: rotr 8, rev, xor 6, sub 5, xor 4, xor 3, not;
+    V1201 V12_01 "12.01" 0x13fd_d831  0x31: sbox, xor 7, sub 6, swap, rotl 4, sbox, xor 2, add 1;
+    V1202 V12_02 "12.02" 0x9830_d09d  0x1d: rotl 8, rotr 7, rev, swap, sbox, rev, sub 2, rev;
+    V1203 V12_03 "12.03" 0x33d5_9dff -0x01: swap, sub 7, add 6, rotl 5, rotl 4, sbox, rotl 2, add 1;
+    V1204 V12_04 "12.04" 0xa568_4b42 -0x3e: rotr 8, rotr 7, rotl 6, rotr 5, add 4, sbox, rotl 1;
+    V1205 V12_05 "12.05" 0xc21d_548c  0x0c: rotr 8, not, rev, sub 4, rotr 3, sbox, not;
+    V1206 V12_06 "12.06" 0x8d68_6ca6  0x26: xor 8, rotr 7, sub 6, rev, rotl 3, rev, sub 1;
+    V1207 V12_07 "12.07" 0x2d21_d7c3 -0x3d: xor 8, add 7, xor 6, swap, sbox, sub 3;
+    V1208 V12_08 "12.08" 0xce2e_33e5 -0x1b: rotl 7, sbox, xor 4, rev, add 2, rotr 1;
+    V1209 V12_09 "12.09" 0x7ff2_feec -0x14: rotl 8, xor 7, rotl 6, rotl 5, not, xor 3, rotl 2, rotl 1;
+    V1210 V12_10 "12.10" 0x12fd_0ee5 -0x1b: rotr 8, swap, sub 6, rotr 5, xor 4, swap;
+    V1211 V12_11 "12.11" 0x409d_36a3  0x23: rotr 8, swap, add 6, rev, sub 4, sub 3, sub 2, swap;
+    V1300 V13_00 "13.00" 0x2949_b6ef -0x11: add 8, rev, add 6, not, xor 3, sbox, rotr 1;
+    V1301 V13_01 "13.01" 0xe62f_cd5c -0x24: not, swap, xor 5, rotr 4, not, add 1;
+    V1302 V13_02 "13.02" 0x9e81_a37c -0x04: sbox, rev, sub 6, not, rev, rotl 3, rotr 2;
+    V1304 V13_04 "13.04" 0x076d_c658 -0x28: rotr 7, xor 6, sub 5, swap, add 3, add 2, rotl 1;
+    V1305 V13_05 "13.05" 0x48c2_6613  0x13: xor 8, sub 7, rotl 6, sub 5, xor 4, xor 3, rotl 2, rotl 1;
+    V1306 V13_06 "13.06" 0xe974_593c  0x3c: swap, xor 7, swap, rev, sbox, not, add 2, sbox;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,25 +342,17 @@ mod tests {
     fn branch_lookup_round_trips() {
         for v in ALL_VERSIONS.iter().copied() {
             assert_eq!(TransformVersion::from_branch(v.branch()), Some(v));
+            // check_docs reads the registry's builds from the variant names.
+            let build = v.branch().trim_start_matches("++Ares-Core+release-");
+            assert_eq!(format!("{v:?}"), format!("V{}", build.replace('.', "")));
         }
     }
 
     #[test]
     fn public_registry_type_does_not_encode_its_length() {
-        // This assignment is the regression guard: changing ALL_VERSIONS back
-        // to `[TransformVersion; N]` makes the public API depend on N and fails
-        // to compile here when the next build is added.
-        let registry: &'static [TransformVersion] = ALL_VERSIONS;
-        assert_eq!(registry, ALL_VERSIONS);
-    }
-
-    #[test]
-    fn release_13_04_is_registered() {
-        let version = TransformVersion::from_branch("++Ares-Core+release-13.04");
-        assert_eq!(
-            version.map(TransformVersion::branch),
-            Some("++Ares-Core+release-13.04"),
-        );
+        // Fails to compile if the registry becomes a `[TransformVersion; N]`,
+        // whose length would then be public API.
+        let _: &'static [TransformVersion] = ALL_VERSIONS;
     }
 
     #[test]
@@ -317,8 +361,9 @@ mod tests {
         assert_eq!(err.branch, "++Ares-Core+release-99.99");
         let text = err.to_string();
         assert!(text.contains("release-99.99"), "{text}");
-        assert!(text.contains("release-13.02"), "{text}");
-        assert!(text.contains("release-13.04"), "{text}");
+        for v in ALL_VERSIONS {
+            assert!(text.contains(v.branch()), "{text}");
+        }
     }
 
     #[test]
@@ -331,15 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn output_byte_count_rounds_up() {
-        assert_eq!(TransformVersion::output_byte_count(0), 0);
-        assert_eq!(TransformVersion::output_byte_count(1), 1);
-        assert_eq!(TransformVersion::output_byte_count(8), 1);
-        assert_eq!(TransformVersion::output_byte_count(9), 2);
-        assert_eq!(TransformVersion::output_byte_count(287), 36);
-    }
-
-    #[test]
     fn apply_does_not_panic_on_an_undersized_buffer() {
         let mut buf = [0u8; 1];
         assert_eq!(
@@ -349,26 +385,5 @@ mod tests {
                 available: 8,
             }
         );
-    }
-
-    #[test]
-    fn distinct_builds_produce_distinct_output() {
-        // A regression guard against copy-paste errors between version impls:
-        // no two builds may agree on a non-trivial payload.
-        let payload = [0xBFu8, 0xDF, 0x6F, 0x9E, 0xA1, 0xF2, 0x7B, 0xA0, 0x11];
-        let bit_count = 65;
-        let mut outputs = Vec::new();
-        for v in ALL_VERSIONS.iter().copied() {
-            let mut buf = vec![0u8; TransformVersion::output_byte_count(bit_count)];
-            let mut r = BitReader::new(&payload);
-            v.decode_from(&mut r, bit_count, seed_for(bit_count, 2), &mut buf)
-                .unwrap();
-            assert!(
-                !outputs.contains(&buf),
-                "{} duplicates another build",
-                v.branch()
-            );
-            outputs.push(buf);
-        }
     }
 }

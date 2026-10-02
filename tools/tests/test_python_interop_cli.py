@@ -1,30 +1,23 @@
 import os
 import subprocess
 import sys
-import tempfile
-import unittest
 from pathlib import Path
+from support import REPO, TempDirTestCase
 
 
-SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "crates"
-    / "vrf-export"
-    / "tests"
-    / "python_interop.py"
-)
+SCRIPT = REPO / "crates" / "vrf-export" / "tests" / "python_interop.py"
 
 
-class ExactFixtureSelectionTests(unittest.TestCase):
+class ExactFixtureSelectionTests(TempDirTestCase):
     @staticmethod
-    def run_script(temp: Path, configured: Path | None = None):
+    def run_script(temp: Path, configured: Path | None = None, *args: str):
         env = os.environ.copy()
         env.update({"TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp)})
         env.pop("VRFKIT_INTEROP_DIR", None)
         if configured is not None:
             env["VRFKIT_INTEROP_DIR"] = str(configured)
         return subprocess.run(
-            [sys.executable, str(SCRIPT)],
+            [sys.executable, str(SCRIPT), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -34,34 +27,46 @@ class ExactFixtureSelectionTests(unittest.TestCase):
         )
 
     def test_a_stale_temp_fixture_is_never_selected_implicitly(self):
-        with tempfile.TemporaryDirectory() as temp_raw:
-            temp = Path(temp_raw)
-            stale = temp / "vrf_export_tests_stale" / "interop"
-            stale.mkdir(parents=True)
-            (stale / "fields_interop.parquet").write_bytes(b"stale")
-            (stale / "movement_interop.parquet").write_bytes(b"stale")
+        temp = self.tmp()
+        stale = temp / "vrf_export_tests_stale" / "interop"
+        stale.mkdir(parents=True)
+        (stale / "fields_interop.parquet").write_bytes(b"stale")
+        (stale / "movement_interop.parquet").write_bytes(b"stale")
 
-            result = self.run_script(temp)
+        result = self.run_script(temp)
 
         output = result.stdout + result.stderr
         self.assertNotEqual(result.returncode, 0, output)
         self.assertIn("explicit interop directory required", output.lower())
         self.assertNotIn(str(stale), output)
 
-    def test_environment_selects_one_exact_fixture_directory(self):
-        with tempfile.TemporaryDirectory() as temp_raw:
-            temp = Path(temp_raw)
-            exact = temp / "selected" / "interop"
-            exact.mkdir(parents=True)
+    def test_environment_names_the_rust_root_and_selects_its_interop_child(self):
+        # VRFKIT_INTEROP_DIR is the root the Rust write_interop_files test is
+        # given; its files are in `<root>/interop`, not in the root itself.
+        temp = self.tmp()
+        root = temp / "selected"
+        (root / "interop").mkdir(parents=True)
+        expected = (root / "interop").resolve()
 
-            result = self.run_script(temp, exact)
+        result = self.run_script(temp, root)
 
-        output = result.stdout + result.stderr
+        output = (result.stdout + result.stderr).lower()
         self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("interop dir:", output.lower())
-        self.assertIn(str(Path("selected") / "interop").lower(), output.lower())
-        self.assertIn("interop parquet files not found", output.lower())
+        self.assertIn(f"interop dir: {expected}".lower(), output)
+        self.assertIn("interop parquet files not found", output)
 
+    def test_an_argument_is_the_exact_fixture_directory(self):
+        # CI and CONTRIBUTING pass the `interop` child itself; nothing is
+        # appended to it, and it wins over the variable.
+        temp = self.tmp()
+        exact = temp / "passed" / "interop"
+        exact.mkdir(parents=True)
+        expected = exact.resolve()
 
-if __name__ == "__main__":
-    unittest.main()
+        result = self.run_script(temp, temp / "ignored", str(exact))
+
+        output = (result.stdout + result.stderr).lower()
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn(f"interop dir: {expected}".lower(), output)
+        self.assertNotIn("ignored", output)
+        self.assertIn("interop parquet files not found", output)

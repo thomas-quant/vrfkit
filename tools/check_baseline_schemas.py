@@ -11,10 +11,7 @@ import sys
 from collections import Counter
 from pathlib import Path, PureWindowsPath
 
-if __package__:
-    from .check_export_baseline import CHECKPOINT_COUNTERS, COUNTERS, PARQUET_FILES
-else:  # direct script execution
-    from check_export_baseline import CHECKPOINT_COUNTERS, COUNTERS, PARQUET_FILES
+from check_export_baseline import CHECKPOINT_COUNTERS, CHECKPOINT_PARQUET_FILES, COUNTERS, PARQUET_FILES
 
 REPO = Path(__file__).resolve().parent.parent
 BASELINES = REPO / "tools" / "baselines"
@@ -22,12 +19,14 @@ MAIN_COUNTERS = frozenset(COUNTERS)
 CHECKPOINT_ONLY_COUNTERS = frozenset(CHECKPOINT_COUNTERS)
 MAIN_PARQUET = tuple(PARQUET_FILES)
 CORPUS_TOTALS = ("blocks", "fields", "rpcs", "malformed", "skipped")
-BUILDS = ("12.10", "12.11", "13.00", "13.01", "13.02")
+BUILDS = ("12.10", "12.11", "13.00", "13.01", "13.02", "13.04", "13.05", "13.06")
+#: The corpus baseline of each build; 13.01 is pinned by export_02d4d478.json.
+CORPUS_BASELINES = {build: f"build_{build.replace('.', '')}.json"
+                    for build in BUILDS if build != "13.01"}
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 KNOWN_BASELINES = {
     "bench.json", "metrics_builds.json", "export_02d4d478.json",
-    "checkpoint_02d4d478.json", "build_1210.json", "build_1211.json",
-    "build_1300.json", "build_1302.json",
+    "checkpoint_02d4d478.json", *CORPUS_BASELINES.values(),
 }
 METRIC_INT_FIELDS = {
     "ability_spawns", "assists", "client_round_starts", "combat_players",
@@ -52,18 +51,17 @@ def _nonnegative_int(value) -> bool:
 
 
 def validate_bench_baseline(path: Path, data: dict) -> list[str]:
+    """`export` and `replay`, and optionally `export_checkpoints`; nothing else."""
     problems: list[str] = []
-    _keys(path, data, {"export", "replay"}, problems)
+    timings = {"export"} | ({"export_checkpoints"} & set(data))
+    _keys(path, data, {"replay"} | timings, problems)
     replay = data.get("replay")
     if not isinstance(replay, str) or not replay.endswith(".vrf"):
         problems.append(f"{path.name}: replay must name a .vrf file")
-    elapsed = data.get("export")
-    if (
-        not isinstance(elapsed, float)
-        or not math.isfinite(elapsed)
-        or elapsed <= 0
-    ):
-        problems.append(f"{path.name}: export must be a positive finite float")
+    for key in sorted(timings):
+        elapsed = data.get(key)
+        if not isinstance(elapsed, float) or not math.isfinite(elapsed) or elapsed <= 0:
+            problems.append(f"{path.name}: {key} must be a positive finite float")
     return problems
 
 
@@ -114,9 +112,7 @@ def validate_metrics_baseline(path: Path, data: dict) -> list[str]:
     return problems
 
 
-def validate_export_baseline(
-    path: Path, data: dict, *, require_hashes: bool = True
-) -> list[str]:
+def validate_export_baseline(path: Path, data: dict) -> list[str]:
     problems: list[str] = []
     _keys(path, data, {"replay", "counters", "parquet"}, problems)
     if not isinstance(data.get("replay"), str) or not data.get("replay", "").endswith(".vrf"):
@@ -133,7 +129,7 @@ def validate_export_baseline(
         if not _nonnegative_int(value):
             problems.append(f"{path.name}: counters.{key} must be a non-negative integer")
 
-    expected_tables = set(MAIN_PARQUET) | ({"checkpoint_fields"} if checkpoint else set())
+    expected_tables = set(MAIN_PARQUET) | (set(CHECKPOINT_PARQUET_FILES) if checkpoint else set())
     parquet = data.get("parquet")
     if not isinstance(parquet, dict):
         problems.append(f"{path.name}: parquet must be an object")
@@ -143,19 +139,14 @@ def validate_export_baseline(
         if not isinstance(record, dict):
             problems.append(f"{path.name}: parquet.{name} must be an object")
             continue
-        expected_record_keys = {"rows", "bytes", "sha256"}
-        if not require_hashes and "sha256" not in record:
-            expected_record_keys.remove("sha256")
-        _keys(path, record, expected_record_keys, problems)
+        _keys(path, record, {"rows", "bytes", "sha256"}, problems)
         for field in ("rows", "bytes"):
             if not _nonnegative_int(record.get(field)):
                 problems.append(
                     f"{path.name}: parquet.{name}.{field} must be a non-negative integer"
                 )
         digest = record.get("sha256")
-        if (require_hashes or digest is not None) and (
-            not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None
-        ):
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
             problems.append(f"{path.name}: parquet.{name}.sha256 is not a measured SHA-256")
     return problems
 
@@ -206,9 +197,7 @@ def _basename(raw: str) -> str:
     return PureWindowsPath(raw).name
 
 
-def validate_repository(
-    root: Path = BASELINES, *, require_hashes: bool = True
-) -> list[str]:
+def validate_repository(root: Path = BASELINES) -> list[str]:
     problems: list[str] = []
     loaded: dict[str, dict] = {}
     for path in sorted(root.glob("*.json")):
@@ -224,9 +213,7 @@ def validate_repository(
         if path.name not in KNOWN_BASELINES:
             problems.append(f"{path.name}: unknown baseline schema; refusing to skip")
         elif path.name.startswith(("export_", "checkpoint_")):
-            problems.extend(
-                validate_export_baseline(path, value, require_hashes=require_hashes)
-            )
+            problems.extend(validate_export_baseline(path, value))
         elif path.name.startswith("build_"):
             problems.extend(validate_corpus_baseline(path, value))
         elif path.name == "bench.json":
@@ -247,6 +234,9 @@ def validate_repository(
         if export.get("counters", {}).get(key) != checkpoint.get("counters", {}).get(key):
             problems.append(f"export/checkpoint counter {key} disagrees")
     for name in MAIN_PARQUET:
+        # partials.parquet holds both streams under --checkpoints.
+        if name == "partials":
+            continue
         if export.get("parquet", {}).get(name) != checkpoint.get("parquet", {}).get(name):
             problems.append(f"export/checkpoint {name}.parquet disagrees")
 
@@ -256,13 +246,8 @@ def validate_repository(
 
     metrics = loaded["metrics_builds.json"]
     replays = metrics.get("replays") if isinstance(metrics.get("replays"), dict) else {}
-    values = metrics.get("metrics") if isinstance(metrics.get("metrics"), dict) else {}
 
-    corpus_files = {
-        "12.10": "build_1210.json", "12.11": "build_1211.json",
-        "13.00": "build_1300.json", "13.02": "build_1302.json",
-    }
-    for build, filename in corpus_files.items():
+    for build, filename in CORPUS_BASELINES.items():
         corpus = loaded[filename]
         expected_branch = f"++Ares-Core+release-{build}"
         if corpus.get("branches") != {expected_branch: len(corpus.get("per_file", {}))}:
@@ -276,24 +261,16 @@ def validate_repository(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "--allow-missing-hashes",
-        action="store_true",
-        help="migration aid: validate legacy structure/cross-file identities "
-             "without accepting malformed hashes that are present",
-    )
-    args = ap.parse_args()
-    problems = validate_repository(require_hashes=not args.allow_missing_hashes)
+    argparse.ArgumentParser(description=__doc__).parse_args()
+    problems = validate_repository()
     if problems:
         print(f"FAILED: {len(problems)} baseline schema/cross-file problem(s)", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         return 1
-    qualifier = " (legacy hashes allowed)" if args.allow_missing_hashes else ""
     print(
         f"OK: {len(list(BASELINES.glob('*.json')))} committed baselines are "
-        f"consistent{qualifier}"
+        f"consistent"
     )
     return 0
 

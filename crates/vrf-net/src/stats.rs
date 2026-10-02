@@ -2,291 +2,230 @@
 //!
 //! Every discard, skip, or error is counted here. Silent data loss is a bug.
 //!
-//! # Diagnostics
-//!
-//! When content blocks fail to parse (malformed payload size, read errors in
-//! the block header, or transform failures), a [`DiagnosticEvent`] is recorded
-//! with full context: packet, bunch, channel, actor, header fields, and the
-//! exact bit position where failure occurred. This is essential for debugging
-//! new game builds where the payload transform may not yet be correct.
-//!
-//! The event log is bounded. On a healthy replay it stays empty -- 02d4d478
-//! records zero events -- but a replay whose transform is wrong can fail one
-//! block per bunch, and at 530 401 bunches an unbounded `Vec` of ~200-byte
-//! events is 100 MB of diagnostics for a run whose whole point is that it
-//! failed. [`MAX_DIAGNOSTIC_EVENTS`] caps the log and
-//! [`NetStats::diagnostics_dropped`] counts what the cap refused, so the loss
-//! is reported rather than silent. The counters above the log are never capped:
-//! `skipped_bits` and the failure counts remain exact totals.
-//!
-//! The whole of this machinery is behind the default-on `diagnostics` feature.
-//! A consumer that only wants framing and counters can switch it off and lose
-//! [`DiagnosticEvent`], [`SkipReason`], the two snapshot types and the two
-//! fields below; nothing else in the crate changes shape.
+//! A content block that cannot be framed (its header or `content_bits` does not
+//! read, or `content_bits` overruns the bunch), or whose payload transform
+//! fails, also records a `DiagnosticEvent` locating it: packet, bunch, channel,
+//! actor, header fields and the failing bit position. A field or RPC stream
+//! that fails to walk goes to the sink instead (see `SkipReason::ParseFailure`).
+//! Only the event log is capped, never the counters; a healthy replay has none.
 
-#[cfg(feature = "diagnostics")]
 use crate::content::ContentBlockHeader;
 
-/// Upper bound on [`NetStats::diagnostics`].
-///
-/// Sized so a full log is a few megabytes rather than a few hundred: an event
-/// is roughly 200 bytes, so this is about 3 MB. Anything past it is counted in
-/// [`NetStats::diagnostics_dropped`], never dropped quietly.
-#[cfg(feature = "diagnostics")]
+/// Upper bound on [`NetStats::diagnostics`]: a wrong transform can fail one
+/// block per bunch (530,401 on 02d4d478), ~100 MB of events; this is ~3 MB.
 pub const MAX_DIAGNOSTIC_EVENTS: usize = 16_384;
 
-/// Cumulative counters for one replay's replication pass.
-#[derive(Debug, Clone, Default)]
-pub struct NetStats {
-    /// Total packets processed (including malformed ones).
-    pub packets: u64,
-    /// Packets whose last byte was zero (sentinel missing).
-    pub malformed_packets: u64,
-    /// Total bunches parsed (header successfully read).
-    pub bunches: u64,
-    /// Partial-bunch sequence errors (fragment discarded).
-    pub partial_errors: u64,
+/// Declares [`NetStats`] with `counters`, `counters_mut` and `absorb` over one
+/// field list, so a counter cannot be summed or published by one and missed by
+/// another.
+macro_rules! net_stats {
+    ($($(#[$doc:meta])* $name:ident,)*) => {
+        /// Cumulative counters for one replay's replication pass.
+        #[derive(Debug, Clone, Default)]
+        pub struct NetStats {
+            $($(#[$doc])* pub $name: u64,)*
+            /// Diagnostic events, capped at [`MAX_DIAGNOSTIC_EVENTS`].
+            pub diagnostics: Vec<DiagnosticEvent>,
+        }
+
+        impl NetStats {
+            /// Every counter by field name, in declaration order.
+            #[must_use]
+            pub fn counters(&self) -> Vec<(&'static str, u64)> {
+                vec![$((stringify!($name), self.$name)),*]
+            }
+
+            /// [`Self::counters`], writable.
+            pub fn counters_mut(&mut self) -> Vec<(&'static str, &mut u64)> {
+                vec![$((stringify!($name), &mut self.$name)),*]
+            }
+
+            /// Add every counter from a completed independent pass; its events
+            /// are appended up to the cap and the rest counted as dropped.
+            pub fn absorb(&mut self, other: &mut Self) {
+                $(self.$name += other.$name;)*
+                let room = MAX_DIAGNOSTIC_EVENTS.saturating_sub(self.diagnostics.len());
+                let keep = room.min(other.diagnostics.len());
+                self.diagnostics.extend(other.diagnostics.drain(..keep));
+                self.diagnostics_dropped += other.diagnostics.len() as u64;
+                other.diagnostics.clear();
+            }
+        }
+    };
+}
+
+net_stats! {
+    /// Packets processed, malformed ones included.
+    packets,
+    /// Packets abandoned as malformed: no sentinel, a bunch header that does
+    /// not read, or a payload past the packet end. The bits after that point
+    /// reach no bit counter.
+    malformed_packets,
+    /// Bunches whose header read.
+    bunches,
+    /// Partial reassembly rejections of any cause (sequence, alignment,
+    /// resource limit, destructive close). The cause counters partition it;
+    /// [`Self::partial_unclassified_errors`] is the residual.
+    partial_errors,
+    /// Bunches whose header declared `b_partial`, rejected ones included.
+    partial_bunches,
+    /// Continuations rejected because no initial fragment was buffered.
+    partial_missing_initial,
+    /// Of those, the ones marked final.
+    partial_missing_initial_final,
+    /// Of those, the ones on a reliable channel.
+    partial_missing_initial_reliable,
+    /// Their payload bits, all discarded before framing.
+    partial_missing_initial_bits,
+    /// Initial fragments that replaced an incomplete assembly on the channel.
+    partial_overlapping_initial,
+    /// Continuations whose reliability or sequence did not match the assembly.
+    partial_mismatched_continuation,
+    /// Non-final fragments rejected because their payload was not byte-aligned.
+    partial_non_byte_aligned,
+    /// Buffered assemblies discarded by a destructive channel close.
+    partial_channel_close,
     /// Partial fragments accumulated (initial + continuations).
-    pub partial_fragments: u64,
-    /// Partial bunches that completed successfully.
-    pub partial_completed: u64,
-    /// Partial bunches still awaiting fragments when the replay ended.
-    ///
-    /// Moved only by [`crate::ReplicationReader::finish`], which must be called
-    /// once after the last packet. Reassembly state that never completes is
-    /// indistinguishable from reassembly in progress until the stream stops, so
-    /// this is the only point at which the loss can be named. `partial_errors`
-    /// does not cover it: nothing was out of sequence, the continuation simply
-    /// never arrived.
-    pub unfinished_partials: u64,
-    /// Bits buffered by those unfinished partial bunches, and therefore lost.
-    ///
-    /// Kept out of [`Self::skipped_bits`] -- but NOT because these bits never
-    /// reached framing; two other partial-reassembly discards (an overlapping
-    /// or out-of-sequence fragment rejected by `validate_sequence`, and a
-    /// channel destroyed with a reassembly still buffered) never reach framing
-    /// either, and both ARE added to `skipped_bits`, at the moment each is
-    /// discarded. The real distinction is *when* the loss becomes attributable:
-    /// those two are conclusive the instant they happen, during a specific
-    /// bunch's processing, same as any other framing loss `skipped_bits`
-    /// tallies. This field is not -- an in-progress reassembly is
-    /// indistinguishable from one still awaiting its next fragment until the
-    /// stream ends, so it cannot be charged to `skipped_bits` (which the
-    /// oracle divides by failed *blocks*, block by block) before then. It is
-    /// summed here, separately, only by [`crate::ReplicationReader::finish`].
-    pub unfinished_partial_bits: u64,
-    /// Bunch payloads whose header parse failed -- package-map exports,
-    /// must-be-mapped GUIDs, or the channel-open block. The prior code did
-    /// `let _ =` on these `Result`s, so a channel that failed to open was
-    /// invisible (every later bunch on it skipped silently at the channel
-    /// guard) and a truncated must-be-mapped list left the reader stuck and
-    /// parsed the rest of the bunch as garbage. Counted to make both loud.
-    pub bunch_header_failures: u64,
+    partial_fragments,
+    /// Partial bunches that completed.
+    partial_completed,
+    /// Partial bunches still awaiting fragments when the stream ended. Moved
+    /// only at end of stream (`finish` / `finish_with_sink`): until then they
+    /// cannot be told from reassembly in progress. Not a `partial_errors`.
+    unfinished_partials,
+    /// Bits buffered by those bunches, and so lost. Not in
+    /// [`Self::skipped_bits`]: the loss is attributable only at end of stream.
+    unfinished_partial_bits,
+    /// Bunch payloads abandoned because a header stage failed (package-map
+    /// exports, must-be-mapped GUIDs, the channel open), or refused at a
+    /// channel-state limit (then also in [`Self::channel_state_limit_failures`]).
+    bunch_header_failures,
     /// Content blocks framed (actor + subobject + deleted).
-    pub content_blocks: u64,
+    content_blocks,
     /// Content blocks with RepLayout (property) payloads.
-    pub rep_layout_blocks: u64,
+    rep_layout_blocks,
     /// Content blocks with ClassNetCache (RPC) payloads.
-    pub class_net_cache_blocks: u64,
+    class_net_cache_blocks,
     /// Content blocks flagged as deleted.
-    pub deleted_blocks: u64,
-    /// Total fields emitted (handle + payload pairs).
-    pub fields: u64,
-    /// Total RPC invocations emitted.
-    pub rpcs: u64,
-    /// Bits skipped due to malformed content block payloads.
-    pub skipped_bits: u64,
-    /// A content block's header, or its `content_bits` IntPacked field, could
-    /// not be read at all -- the two failure depths in `frame_content_blocks`
-    /// that ran before `malformed_content_blocks` or any other block-level
-    /// counter could apply. Both abandon the rest of the bunch (`skip_remaining`),
-    /// same loss as [`Self::malformed_content_blocks`], just one layer earlier;
-    /// counted here for the same reason that one is counted, and included in
-    /// [`Self::lost_content_blocks`] so `verdict_from_stats` can see it. Before
-    /// this existed, a build that shifted the header or `content_bits` grammar
-    /// by one bit moved `skipped_bits` and a diagnostics-only event (gated
-    /// behind `--diagnostics`, capped, and never read by the verdict) with
-    /// every other block-level counter left at zero -- a structurally
-    /// undetectable loss.
-    pub content_block_framing_failures: u64,
-    /// Malformed content block payloads (overrun).
-    pub malformed_content_blocks: u64,
-    /// Content blocks whose payload transform or bit copy failed.
-    ///
-    /// Counted separately from [`Self::malformed_content_blocks`] because the
-    /// failure is at a different layer: the block was framed correctly but its
-    /// payload could not be turned into readable bits at all, so the whole
-    /// declared length is skipped.
-    pub transform_failures: u64,
-    /// Content blocks whose decoded RepLayout field stream failed to parse.
-    ///
-    /// The header framed and the payload decoded, but walking the handle /
-    /// payload-length pairs inside it hit an error. These matter to the oracle:
-    /// a partially wrong transform can leave block framing intact while making
-    /// the field streams inside unreadable, and counting only framing failures
-    /// would report a perfect pass rate for it.
-    pub field_stream_failures: u64,
-    /// Content blocks whose decoded ClassNetCache (RPC) stream failed to parse.
-    pub rpc_stream_failures: u64,
-    /// RPC stream failures whose complete decoded payload was handed to the
-    /// sink because the replay did not provide a usable function count.
-    ///
-    /// This is an inclusive subset of [`Self::rpc_stream_failures`], not an
-    /// additional failure. It distinguishes an unsupported attribution whose
-    /// raw payload remains available from an abandoned, truncated, or otherwise
-    /// malformed stream that actually lost structure.
-    pub unresolved_rpc_payloads_preserved: u64,
+    deleted_blocks,
+    /// Fields walked (handle + payload pairs).
+    fields,
+    /// RPC invocations walked.
+    rpcs,
+    /// Bits not walked into a field or RPC: failed or abandoned block payloads
+    /// (preserved unresolved ones included), abandoned bunches, and refused or
+    /// discarded partial fragments. [`Self::unfinished_partial_bits`],
+    /// [`Self::unopened_channel_bits`] and RepLayout-export bunches are not in it.
+    skipped_bits,
+    /// Content blocks whose header or `content_bits` did not read: the rest of
+    /// the bunch is lost, as for an overrun. A [`Self::lost_content_blocks`] term.
+    content_block_framing_failures,
+    /// Content blocks whose `content_bits` overran the bunch.
+    malformed_content_blocks,
+    /// Content blocks whose payload transform failed: the whole declared
+    /// length is skipped.
+    transform_failures,
+    /// Content blocks whose decoded RepLayout stream failed to walk: a partly
+    /// wrong transform can frame cleanly and still fail here.
+    field_stream_failures,
+    /// Content blocks whose decoded ClassNetCache stream failed to walk,
+    /// including a RepLayout block's post-terminator tail that did not decode.
+    rpc_stream_failures,
+    /// RPC stream failures whose whole payload was preserved (an unresolved
+    /// group, or an unverified RepLayout tail kept whole): an inclusive subset
+    /// of [`Self::rpc_stream_failures`].
+    unresolved_rpc_payloads_preserved,
     /// Actor channels opened.
-    pub actor_opens: u64,
+    actor_opens,
     /// Actor channels closed.
-    pub actor_closes: u64,
-    /// Opens that replaced an actor still recorded as open on that channel.
-    ///
-    /// Channel 5 opens for actor A and opens again for actor B with no close in
-    /// between: A's state is overwritten and every later block on the channel is
-    /// attributed to B. Nothing misframes, so no other counter moves. The
-    /// replacement is kept -- the wire says B owns the channel now -- but A gets
-    /// no close row, and a fabricated one would be data the replay never sent.
-    /// This counts the fabrication that was NOT made.
-    pub channel_reopens_while_open: u64,
+    actor_closes,
+    /// Opens that replaced an actor still open on that channel: the new actor
+    /// stands and no close is fabricated for the old one.
+    channel_reopens_while_open,
     /// Dynamic-actor opens whose payload ended before the mandatory spawn block.
-    ///
-    /// The spawn block is not optional for a dynamic actor: the reference reads
-    /// archetype, level, transform and velocity unconditionally. A payload that
-    /// stops at the actor GUID used to be accepted as a successful open, which
-    /// emitted an actor with archetype and level GUID 0 and no transforms while
-    /// `bunch_header_failures` stayed at zero. Such an open now fails like any
-    /// other truncated read; this names the specific shape so a corpus run can
-    /// say whether it ever happens.
-    pub actor_opens_missing_spawn: u64,
-    /// Bunches refused because a channel-state table was at capacity or a
-    /// reliable sequence could not advance representably.
-    pub channel_state_limit_failures: u64,
+    actor_opens_missing_spawn,
+    /// Open bunches that failed to complete on a channel holding a live actor,
+    /// which is retired (no close fabricated) so later bunches are not framed
+    /// under its schema. For a clean package-map-export failure this alone
+    /// names the lost open. Opens carried by partial fragments are not covered.
+    failed_reopens_while_open,
+    /// Bunches that reached framing with payload left and no open actor on
+    /// their channel, dropped whole. Never framed, so they count as bunches
+    /// and bits, not in [`Self::lost_content_blocks`].
+    bunches_on_unopened_channel,
+    /// Payload bits those bunches held after their preambles. Not in
+    /// [`Self::skipped_bits`]: nothing failed to read.
+    unopened_channel_bits,
+    /// Bunches refused because a channel-state table was full or a reliable
+    /// sequence could not advance representably.
+    channel_state_limit_failures,
     /// Partial fragments refused because active reassembly state, buffered
-    /// bits, checked arithmetic, or allocation reached its bound.
-    pub partial_resource_limit_failures: u64,
-    /// Package-map export bunches processed.
-    pub package_map_exports: u64,
-    /// Package-map export bunches carrying a RepLayout export instead of GUIDs.
-    ///
-    /// That variant is not parsed -- the bunch is skipped whole. It is counted
-    /// separately rather than folded into [`Self::skipped_bits`] because the
-    /// oracle reads that tally as "bits lost across failed content blocks", and
-    /// no content block is involved here.
-    pub rep_layout_export_bunches: u64,
+    /// bits, checked arithmetic or allocation reached its bound.
+    partial_resource_limit_failures,
+    /// Package-map export bunches read.
+    package_map_exports,
+    /// Package-map export bunches carrying a RepLayout export, which is not
+    /// parsed: skipped whole. Their bits reach no bit counter; this is the
+    /// only record.
+    rep_layout_export_bunches,
     /// Net GUIDs exported via package-map.
-    pub exported_guids: u64,
+    exported_guids,
     /// Must-be-mapped GUIDs consumed.
-    pub must_be_mapped_guids: u64,
-    /// Detailed diagnostic events for every skip/malformed occurrence, capped
-    /// at [`MAX_DIAGNOSTIC_EVENTS`].
-    ///
-    /// This is the primary debugging tool when the oracle pass rate is not 100%
-    /// or the validation verdict reports another ReplayData failure.
-    /// Each event records the full context needed to locate the failure in the
-    /// replay stream and compare with the C# reference parser.
-    #[cfg(feature = "diagnostics")]
-    pub diagnostics: Vec<DiagnosticEvent>,
-    /// Diagnostic events the cap refused to record.
-    ///
-    /// Non-zero means [`Self::diagnostics`] is a prefix of what happened, not
-    /// the whole of it. The failure *counters* remain complete either way; only
-    /// the per-event context is truncated.
-    #[cfg(feature = "diagnostics")]
-    pub diagnostics_dropped: u64,
+    must_be_mapped_guids,
+    /// Events the cap refused: non-zero means [`Self::diagnostics`] is a
+    /// prefix. The counters are complete either way.
+    diagnostics_dropped,
 }
 
 impl NetStats {
-    /// Add every counter from a completed independent replication pass.
-    ///
-    /// Diagnostics are appended up to the ordinary cap and any excess is
-    /// folded into `diagnostics_dropped`, so the detailed list remains bounded
-    /// while all scalar totals remain exact.
-    pub fn absorb(&mut self, other: &mut Self) {
-        self.packets += other.packets;
-        self.malformed_packets += other.malformed_packets;
-        self.bunches += other.bunches;
-        self.partial_errors += other.partial_errors;
-        self.partial_fragments += other.partial_fragments;
-        self.partial_completed += other.partial_completed;
-        self.unfinished_partials += other.unfinished_partials;
-        self.unfinished_partial_bits += other.unfinished_partial_bits;
-        self.bunch_header_failures += other.bunch_header_failures;
-        self.content_blocks += other.content_blocks;
-        self.rep_layout_blocks += other.rep_layout_blocks;
-        self.class_net_cache_blocks += other.class_net_cache_blocks;
-        self.deleted_blocks += other.deleted_blocks;
-        self.fields += other.fields;
-        self.rpcs += other.rpcs;
-        self.skipped_bits += other.skipped_bits;
-        self.content_block_framing_failures += other.content_block_framing_failures;
-        self.malformed_content_blocks += other.malformed_content_blocks;
-        self.transform_failures += other.transform_failures;
-        self.field_stream_failures += other.field_stream_failures;
-        self.rpc_stream_failures += other.rpc_stream_failures;
-        self.unresolved_rpc_payloads_preserved += other.unresolved_rpc_payloads_preserved;
-        self.actor_opens += other.actor_opens;
-        self.actor_closes += other.actor_closes;
-        self.channel_reopens_while_open += other.channel_reopens_while_open;
-        self.actor_opens_missing_spawn += other.actor_opens_missing_spawn;
-        self.channel_state_limit_failures += other.channel_state_limit_failures;
-        self.partial_resource_limit_failures += other.partial_resource_limit_failures;
-        self.package_map_exports += other.package_map_exports;
-        self.rep_layout_export_bunches += other.rep_layout_export_bunches;
-        self.exported_guids += other.exported_guids;
-        self.must_be_mapped_guids += other.must_be_mapped_guids;
-        #[cfg(feature = "diagnostics")]
-        {
-            let available = MAX_DIAGNOSTIC_EVENTS.saturating_sub(self.diagnostics.len());
-            let keep = available.min(other.diagnostics.len());
-            self.diagnostics.extend(other.diagnostics.drain(..keep));
-            self.diagnostics_dropped += other.diagnostics_dropped + other.diagnostics.len() as u64;
-            other.diagnostics.clear();
-        }
+    /// Partial errors the exclusive cause counters do not explain: a residual,
+    /// so a new error path shows instead of being filed under a known cause.
+    #[must_use]
+    pub fn partial_unclassified_errors(&self) -> u64 {
+        self.partial_errors
+            .saturating_sub(self.classified_partial_errors())
     }
 
-    /// Content blocks whose payload never reached the exported tables.
-    ///
-    /// A block can fail at four different depths and only counting the
-    /// shallowest would overstate the verdict: framing can look fine while the
-    /// payload inside is unreadable. This is the single number that answers
-    /// "did anything get lost", and it is deliberately NOT the same thing as
-    /// the oracle's pass rate.
-    ///
-    /// `rpc_stream_failures` is netted against
-    /// `unresolved_rpc_payloads_preserved` because an unresolved
-    /// ClassNetCache block is not a loss: its whole payload is exported as one
-    /// reserved row (see `UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME` in
-    /// `vrf-export`), so the bits are still on disk even though no handle
-    /// could be named. On the 02d4d478 reference that netting separates 7,889
-    /// unattributed blocks from 0 lost ones. Older, pre-preservation-aware
-    /// output scored that shape as 98.94%; the current oracle correctly reports
-    /// 100% while still exposing the unresolved/raw counter.
-    ///
-    /// `saturating_sub` rather than `-`: the two counters are incremented on
-    /// different code paths, and a future path that preserves a payload
-    /// without counting the failure must not make this wrap to 18 quintillion.
-    ///
-    /// Consumers downstream of the export read this through
-    /// `manifest.json` -> `quality.content_blocks_lost`. Non-zero means the
-    /// published tables are missing replicated state, so any coverage claim
-    /// derived by recounting them is an undercount of unknown size.
+    /// Cause counts in excess of `partial_errors`, if attribution double-counted.
+    #[must_use]
+    pub fn partial_overclassified_errors(&self) -> u64 {
+        self.classified_partial_errors()
+            .saturating_sub(self.partial_errors)
+    }
+
+    fn classified_partial_errors(&self) -> u64 {
+        self.partial_missing_initial
+            + self.partial_overlapping_initial
+            + self.partial_mismatched_continuation
+            + self.partial_non_byte_aligned
+            + self.partial_channel_close
+            + self.partial_resource_limit_failures
+    }
+
+    /// Content blocks whose payload never reached the exported tables: one
+    /// term per failure depth, because framing can look fine while the payload
+    /// is unreadable. Published as manifest `quality.content_blocks_lost`.
+    /// RPC failures enter netted ([`Self::rpc_payloads_lost`]): an unresolved
+    /// ClassNetCache block is exported whole as one reserved row, so it is no
+    /// loss (6,490 such blocks and 0 lost on 02d4d478).
     pub fn lost_content_blocks(&self) -> u64 {
-        let rpc_payloads_lost = self
-            .rpc_stream_failures
-            .saturating_sub(self.unresolved_rpc_payloads_preserved);
         self.content_block_framing_failures
             + self.malformed_content_blocks
             + self.transform_failures
             + self.field_stream_failures
-            + rpc_payloads_lost
+            + self.rpc_payloads_lost()
     }
 
-    /// Record one diagnostic event, or count it as dropped if the log is full.
-    ///
-    /// The event is built by the closure so that a full log costs a length
-    /// compare rather than the construction of an event nobody will read.
-    #[cfg(feature = "diagnostics")]
+    /// RPC stream failures whose payload was not preserved. Saturating: the
+    /// two counters move on different paths.
+    #[must_use]
+    pub fn rpc_payloads_lost(&self) -> u64 {
+        self.rpc_stream_failures
+            .saturating_sub(self.unresolved_rpc_payloads_preserved)
+    }
+
+    /// Record one diagnostic event, or count it dropped if the log is full; the
+    /// closure builds the event only when it will be kept.
     pub fn record_diagnostic(&mut self, event: impl FnOnce() -> DiagnosticEvent) {
         if self.diagnostics.len() < MAX_DIAGNOSTIC_EVENTS {
             self.diagnostics.push(event());
@@ -297,32 +236,30 @@ impl NetStats {
 }
 
 /// Why a content block or bunch tail was skipped.
-#[cfg(feature = "diagnostics")]
 #[derive(Debug, Clone)]
 pub enum SkipReason {
-    /// `content_bits` (from `ReadIntPacked`) exceeded `bits_remaining` in the
-    /// bunch payload -- the stream is irrecoverably misaligned for this bunch.
+    /// `content_bits` exceeded the bits left in the bunch: the stream is
+    /// misaligned for the rest of this bunch.
     ContentBitsOverrun {
         /// The declared content payload size that was too large.
         declared_content_bits: u32,
         /// How many bits actually remained in the bunch payload.
         available_bits: u64,
     },
-    /// Reading the content block header failed (e.g. not enough bits for a
-    /// GUID or the deletion flags). The remaining bunch payload is discarded.
+    /// The content block header did not read; the rest of the bunch is lost.
     HeaderReadError,
-    /// Reading the `IntPacked` content-bits field itself failed.
+    /// The `IntPacked` content-bits field did not read.
     ContentBitsReadError,
-    /// Payload transform or field/RPC parsing failed -- the decoded block was
-    /// garbage. Only the bits of that one block are skipped.
+    /// The block framed but its payload transform failed; only that block's
+    /// `content_bits` are skipped. Unreachable from framing by construction
+    /// (an overrun is refused first and the scratch is sized to the block), so
+    /// `validate`'s skip breakdown reads 0 here. Stream failures are not
+    /// events: they go to the sink's `on_stream_failure`.
     ParseFailure,
 }
 
-/// Full context snapshot at the point a content block was skipped or malformed.
-///
-/// Every field requested in the diagnostic specification is captured here so
-/// that a single event dump is sufficient to identify the root cause.
-#[cfg(feature = "diagnostics")]
+/// Full context snapshot at the point a content block was skipped or malformed,
+/// so one event dump can identify the root cause.
 #[derive(Debug, Clone)]
 pub struct DiagnosticEvent {
     /// Why this event was recorded.
@@ -339,11 +276,14 @@ pub struct DiagnosticEvent {
     pub channel_index: u32,
     /// Actor network GUID on this channel.
     pub actor_net_guid: u32,
-    /// Resolved path for the actor (if available).
+    /// The actor's path in the sink's GUID cache when the event was recorded;
+    /// usually `None`, as dynamic actors are rarely exported by path.
     pub actor_path: Option<String>,
-    /// Archetype GUID.
+    /// Archetype GUID the channel's open read; 0 for a static actor (no spawn
+    /// block), the wire's no-object GUID rather than a failed read.
     pub archetype_net_guid: u32,
-    /// Class path (if resolved).
+    /// The archetype's path in the sink's GUID cache (not a class path,
+    /// despite the name), when it has one.
     pub class_path: Option<String>,
     /// Bunch header flags.
     pub bunch_flags: BunchFlagSnapshot,
@@ -359,13 +299,15 @@ pub struct DiagnosticEvent {
     pub content_bits: Option<u32>,
     /// Which content block within this bunch (0-based).
     pub block_index_in_bunch: u32,
-    /// Number of bits actually skipped in this event.
+    /// Bits this event charged to [`NetStats::skipped_bits`]: for a framing
+    /// abort, from the failing block's first bit to the end of the bunch (so it
+    /// can exceed `remaining_bits`); for a [`SkipReason::ParseFailure`], the
+    /// block's `content_bits`.
     pub bits_skipped: u64,
 }
 
 /// Snapshot of all bunch header flags for diagnostic reporting.
-#[cfg(feature = "diagnostics")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BunchFlagSnapshot {
     pub b_open: bool,
     pub b_close: bool,
@@ -379,7 +321,6 @@ pub struct BunchFlagSnapshot {
 }
 
 /// Snapshot of the content block header fields for diagnostic reporting.
-#[cfg(feature = "diagnostics")]
 #[derive(Debug, Clone)]
 pub struct ContentBlockHeaderSnapshot {
     pub has_rep_layout: bool,
@@ -392,7 +333,6 @@ pub struct ContentBlockHeaderSnapshot {
     pub delete_flags: u8,
 }
 
-#[cfg(feature = "diagnostics")]
 impl From<&ContentBlockHeader> for ContentBlockHeaderSnapshot {
     fn from(h: &ContentBlockHeader) -> Self {
         Self {
@@ -408,128 +348,63 @@ impl From<&ContentBlockHeader> for ContentBlockHeaderSnapshot {
     }
 }
 
-/// Tests for the loss accounting, which does not depend on `diagnostics`.
-///
-/// A separate module because the older `tests` module below is gated on that
-/// feature, and `lost_content_blocks` is read by the manifest on every build.
 #[cfg(test)]
-mod loss_tests {
-    use super::*;
-
-    /// Each of the four depths counts, and they add rather than mask.
-    #[test]
-    fn every_failure_depth_reaches_the_loss_total() {
-        for (label, stats) in [
-            (
-                "malformed framing",
-                NetStats {
-                    malformed_content_blocks: 3,
-                    ..NetStats::default()
-                },
-            ),
-            (
-                "transform failed",
-                NetStats {
-                    transform_failures: 3,
-                    ..NetStats::default()
-                },
-            ),
-            (
-                "field stream failed",
-                NetStats {
-                    field_stream_failures: 3,
-                    ..NetStats::default()
-                },
-            ),
-            (
-                "rpc payload lost",
-                NetStats {
-                    rpc_stream_failures: 3,
-                    ..NetStats::default()
-                },
-            ),
-        ] {
-            assert_eq!(
-                stats.lost_content_blocks(),
-                3,
-                "{label} must reach the loss total on its own"
-            );
-        }
-
-        let all_four = NetStats {
-            malformed_content_blocks: 1,
-            transform_failures: 2,
-            field_stream_failures: 4,
-            rpc_stream_failures: 8,
-            ..NetStats::default()
-        };
-        assert_eq!(
-            all_four.lost_content_blocks(),
-            15,
-            "the four depths add; a total that matches one of them alone would hide the rest"
-        );
-    }
-
-    /// The reference-replay shape: 7,889 blocks could not be attributed to a
-    /// group, and every one of their payloads was preserved as a reserved row.
-    /// Nothing was lost, so both the loss total and current oracle failure count
-    /// are zero. The formerly reported 98.94% score is historical.
-    #[test]
-    fn preserved_unresolved_rpc_payloads_are_not_a_loss() {
-        let stats = NetStats {
-            rpc_stream_failures: 7889,
-            unresolved_rpc_payloads_preserved: 7889,
-            ..NetStats::default()
-        };
-        assert_eq!(stats.lost_content_blocks(), 0);
-
-        let partly_preserved = NetStats {
-            rpc_stream_failures: 7889,
-            unresolved_rpc_payloads_preserved: 7000,
-            ..NetStats::default()
-        };
-        assert_eq!(
-            partly_preserved.lost_content_blocks(),
-            889,
-            "a failure whose payload was NOT preserved is a real loss"
-        );
-    }
-
-    /// The counters are incremented on different paths. More preserved than
-    /// failed must read as zero loss, never as a wrapped u64.
-    #[test]
-    fn more_preserved_than_failed_does_not_wrap() {
-        let stats = NetStats {
-            rpc_stream_failures: 1,
-            unresolved_rpc_payloads_preserved: 5,
-            ..NetStats::default()
-        };
-        assert_eq!(stats.lost_content_blocks(), 0);
-    }
-
-    /// Counters that are loud but normal must NOT be mistaken for loss. On the
-    /// 02d4d478 reference `skipped_bits` is 19 135 006 and the export is
-    /// complete; a definition that included them would report every healthy
-    /// replay as lossy and the signal would be discarded as noise.
-    #[test]
-    fn normal_noise_counters_are_not_loss() {
-        let stats = NetStats {
-            skipped_bits: 19_135_006,
-            partial_fragments: 4096,
-            deleted_blocks: 128,
-            actor_closes: 1799,
-            must_be_mapped_guids: 64,
-            ..NetStats::default()
-        };
-        assert_eq!(stats.lost_content_blocks(), 0);
-    }
-}
-
-#[cfg(all(test, feature = "diagnostics"))]
 mod tests {
     use super::*;
 
-    fn dummy_event(block_index: u32) -> DiagnosticEvent {
+    /// Each failure depth alone reaches the loss total and the five add;
+    /// preserved unresolved RPC payloads net out, saturating; loud but normal
+    /// counters are no loss (02d4d478 skips 18,217,181 bits and exports whole).
+    #[test]
+    fn lost_content_blocks_counts_each_depth_and_nets_preserved_rpcs() {
+        type Case = (fn(&mut NetStats), u64);
+        let cases: [Case; 10] = [
+            (|s| s.content_block_framing_failures = 3, 3),
+            (|s| s.malformed_content_blocks = 3, 3),
+            (|s| s.transform_failures = 3, 3),
+            (|s| s.field_stream_failures = 3, 3),
+            (|s| s.rpc_stream_failures = 3, 3),
+            (
+                |s| {
+                    s.content_block_framing_failures = 16;
+                    s.malformed_content_blocks = 1;
+                    s.transform_failures = 2;
+                    s.field_stream_failures = 4;
+                    s.rpc_stream_failures = 8;
+                },
+                31,
+            ),
+            (
+                |s| (s.rpc_stream_failures, s.unresolved_rpc_payloads_preserved) = (10, 10),
+                0,
+            ),
+            (
+                |s| (s.rpc_stream_failures, s.unresolved_rpc_payloads_preserved) = (10, 7),
+                3,
+            ),
+            (
+                |s| (s.rpc_stream_failures, s.unresolved_rpc_payloads_preserved) = (1, 5),
+                0,
+            ),
+            (
+                |s| {
+                    s.skipped_bits = 18_217_181;
+                    s.partial_fragments = 4096;
+                    s.deleted_blocks = 128;
+                    s.actor_closes = 1799;
+                    s.must_be_mapped_guids = 64;
+                },
+                0,
+            ),
+        ];
+        for (i, (set, lost)) in cases.into_iter().enumerate() {
+            let mut stats = NetStats::default();
+            set(&mut stats);
+            assert_eq!(stats.lost_content_blocks(), lost, "case {i}");
+        }
+    }
+
+    fn event(block_index: u32) -> DiagnosticEvent {
         DiagnosticEvent {
             reason: SkipReason::HeaderReadError,
             packet_id: 0,
@@ -541,17 +416,7 @@ mod tests {
             actor_path: None,
             archetype_net_guid: 0,
             class_path: None,
-            bunch_flags: BunchFlagSnapshot {
-                b_open: false,
-                b_close: false,
-                b_reliable: false,
-                b_partial: false,
-                b_partial_initial: false,
-                b_partial_final: false,
-                b_has_package_map_exports: false,
-                b_has_must_be_mapped_guids: false,
-                b_dormant: false,
-            },
+            bunch_flags: BunchFlagSnapshot::default(),
             payload_bit_count: 0,
             consumed_bits: 0,
             remaining_bits: 0,
@@ -562,113 +427,75 @@ mod tests {
         }
     }
 
-    /// Past the cap the log stops growing and the overflow is counted, not
-    /// dropped quietly. A replay whose transform is wrong fails roughly one
-    /// block per bunch, and 530 401 unbounded events is ~100 MB of context for
-    /// a run whose counters already say it failed.
+    /// Past the cap the log keeps its earliest events, which explain the rest,
+    /// and counts the overflow.
     #[test]
     fn diagnostics_are_capped_and_the_overflow_is_counted() {
         let mut stats = NetStats::default();
         for i in 0..(MAX_DIAGNOSTIC_EVENTS as u32 + 5) {
-            stats.record_diagnostic(|| dummy_event(i));
+            stats.record_diagnostic(|| event(i));
         }
         assert_eq!(stats.diagnostics.len(), MAX_DIAGNOSTIC_EVENTS);
         assert_eq!(stats.diagnostics_dropped, 5);
-        assert_eq!(
-            stats.diagnostics[0].block_index_in_bunch, 0,
-            "the log keeps the earliest events, which are the ones that explain the rest"
-        );
+        assert_eq!(stats.diagnostics[0].block_index_in_bunch, 0);
         assert_eq!(
             stats.diagnostics[MAX_DIAGNOSTIC_EVENTS - 1].block_index_in_bunch,
             MAX_DIAGNOSTIC_EVENTS as u32 - 1
         );
     }
 
-    /// A healthy pass records nothing and drops nothing. The reference replay
-    /// is this case: zero events across 608 020 content blocks.
+    /// Absorbing a pass twice doubles every counter under its own name, and
+    /// the events fill the log up to the cap, the rest counted as dropped.
     #[test]
-    fn a_clean_pass_records_no_diagnostics() {
-        let stats = NetStats::default();
-        assert!(stats.diagnostics.is_empty());
-        assert_eq!(stats.diagnostics_dropped, 0);
+    fn absorb_adds_every_counter_and_caps_the_events() {
+        let mut pass = NetStats::default();
+        for (i, (_, value)) in pass.counters_mut().into_iter().enumerate() {
+            *value = i as u64 + 1;
+        }
+        pass.diagnostics = vec![event(1), event(2)];
+        let mut total = NetStats::default();
+        total.absorb(&mut pass.clone());
+        total.absorb(&mut pass.clone());
+        let doubled: Vec<_> = (pass.counters().into_iter())
+            .map(|(name, value)| (name, 2 * value))
+            .collect();
+        assert_eq!(total.counters(), doubled);
+        assert_eq!(total.diagnostics.len(), 4);
+
+        let mut full = NetStats {
+            diagnostics: vec![event(0); MAX_DIAGNOSTIC_EVENTS - 1],
+            ..NetStats::default()
+        };
+        full.absorb(&mut pass.clone());
+        assert_eq!(full.diagnostics.len(), MAX_DIAGNOSTIC_EVENTS);
+        assert_eq!(
+            full.diagnostics[MAX_DIAGNOSTIC_EVENTS - 1].block_index_in_bunch,
+            1
+        );
+        assert_eq!(full.diagnostics_dropped, pass.diagnostics_dropped + 1);
     }
 
     #[test]
-    fn absorbing_checkpoint_stats_keeps_every_counter() {
-        let source = NetStats {
-            packets: 1,
-            malformed_packets: 2,
-            bunches: 3,
-            partial_errors: 4,
-            partial_fragments: 5,
-            partial_completed: 6,
-            unfinished_partials: 7,
-            unfinished_partial_bits: 8,
-            bunch_header_failures: 9,
-            content_blocks: 10,
-            rep_layout_blocks: 11,
-            class_net_cache_blocks: 12,
-            deleted_blocks: 13,
-            fields: 14,
-            rpcs: 15,
-            skipped_bits: 16,
-            content_block_framing_failures: 34,
-            malformed_content_blocks: 17,
-            transform_failures: 18,
-            field_stream_failures: 19,
-            rpc_stream_failures: 20,
-            unresolved_rpc_payloads_preserved: 21,
-            actor_opens: 22,
-            actor_closes: 23,
-            channel_reopens_while_open: 24,
-            actor_opens_missing_spawn: 25,
-            channel_state_limit_failures: 26,
-            partial_resource_limit_failures: 27,
-            package_map_exports: 28,
-            rep_layout_export_bunches: 29,
-            exported_guids: 30,
-            must_be_mapped_guids: 31,
-            diagnostics: vec![dummy_event(32)],
-            diagnostics_dropped: 33,
+    fn unknown_partial_error_paths_remain_visible_as_a_residual() {
+        let stats = NetStats {
+            partial_errors: 9,
+            partial_missing_initial: 2,
+            partial_overlapping_initial: 1,
+            partial_mismatched_continuation: 1,
+            partial_non_byte_aligned: 1,
+            partial_channel_close: 1,
+            partial_resource_limit_failures: 1,
+            ..Default::default()
         };
-        let mut totals = NetStats::default();
-        for _ in 0..2 {
-            totals.absorb(&mut source.clone());
-        }
+        assert_eq!(stats.partial_unclassified_errors(), 2);
+        assert_eq!(stats.partial_overclassified_errors(), 0);
 
-        assert_eq!(totals.packets, 2);
-        assert_eq!(totals.malformed_packets, 4);
-        assert_eq!(totals.bunches, 6);
-        assert_eq!(totals.partial_errors, 8);
-        assert_eq!(totals.partial_fragments, 10);
-        assert_eq!(totals.partial_completed, 12);
-        assert_eq!(totals.unfinished_partials, 14);
-        assert_eq!(totals.unfinished_partial_bits, 16);
-        assert_eq!(totals.bunch_header_failures, 18);
-        assert_eq!(totals.content_blocks, 20);
-        assert_eq!(totals.rep_layout_blocks, 22);
-        assert_eq!(totals.class_net_cache_blocks, 24);
-        assert_eq!(totals.deleted_blocks, 26);
-        assert_eq!(totals.fields, 28);
-        assert_eq!(totals.rpcs, 30);
-        assert_eq!(totals.skipped_bits, 32);
-        assert_eq!(totals.content_block_framing_failures, 68);
-        assert_eq!(totals.malformed_content_blocks, 34);
-        assert_eq!(totals.transform_failures, 36);
-        assert_eq!(totals.field_stream_failures, 38);
-        assert_eq!(totals.rpc_stream_failures, 40);
-        assert_eq!(totals.unresolved_rpc_payloads_preserved, 42);
-        assert_eq!(totals.actor_opens, 44);
-        assert_eq!(totals.actor_closes, 46);
-        assert_eq!(totals.channel_reopens_while_open, 48);
-        assert_eq!(totals.actor_opens_missing_spawn, 50);
-        assert_eq!(totals.channel_state_limit_failures, 52);
-        assert_eq!(totals.partial_resource_limit_failures, 54);
-        assert_eq!(totals.package_map_exports, 56);
-        assert_eq!(totals.rep_layout_export_bunches, 58);
-        assert_eq!(totals.exported_guids, 60);
-        assert_eq!(totals.must_be_mapped_guids, 62);
-        assert_eq!(totals.diagnostics.len(), 2);
-        assert_eq!(totals.diagnostics_dropped, 66);
+        let over = NetStats {
+            partial_errors: 1,
+            partial_missing_initial: 2,
+            ..Default::default()
+        };
+        assert_eq!(over.partial_unclassified_errors(), 0);
+        assert_eq!(over.partial_overclassified_errors(), 1);
     }
 }

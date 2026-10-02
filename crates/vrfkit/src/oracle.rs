@@ -1,15 +1,10 @@
 //! `validate` subcommand -- RepLayout grammar oracle.
 //!
-//! # What it proves, and over what
-//!
-//! The scope is the **ReplayData** stream. Checkpoint chunks are counted and
-//! skipped -- a checkpoint is an independent archive with its own GUID cache
-//! and export map, and decoding one is what `export --checkpoints` is for. This
-//! used to go unsaid while the run announced it was checking "all content
-//! blocks", which is why the skip now prints its own size under `NOT COVERED`.
-//!
-//! If the payload transform is correct, every decoded RepLayout content block
-//! satisfies this grammar:
+//! The scored scope is framed content blocks in the **ReplayData** stream;
+//! Checkpoint chunks are counted, skipped and declared under `NOT COVERED`
+//! ([`checkpoint_scope_note`]). A decoded RepLayout property prefix satisfies
+//! this grammar, and a valid zero terminator may be followed by a separate
+//! ClassNetCache tail in the block:
 //!
 //! ```text
 //! checksum_bit : 1 bit
@@ -17,172 +12,42 @@
 //!   handle = IntPacked   (0 -> end)
 //!   payload_bits = IntPacked
 //!   consume payload_bits
-//! total consumed == declared bit_count
+//! property prefix + decoded or preserved tail == declared bit_count
 //! ```
 //!
-//! When the transform is wrong, `IntPacked` returns nonsense (enormous handles
-//! or payload sizes) or the total consumed bits don't match the declared block
-//! size. A correct transform with lossless unresolved-payload preservation yields
-//! 100%; an incorrect one collapses toward 0%.
-//!
-//! This oracle uses every `ReplicationReader` counter that means bytes present
-//! in ReplayData could not be consumed: packet/header/framing failures,
-//! transform or inner-stream failures, unfinished reassembly state, and bytes
-//! trailing the declared ReplayData payload all fail the verdict. An unresolved
-//! ClassNetCache table is reported separately when the sink retained the whole
-//! decoded block; unsupported attribution with a recoverable raw payload is not
-//! treated as data loss.
-//!
-//! The current machine-local sweep on 2026-08-31 validates 527/527 replays at
-//! 100.000000%: 215 release-13.01, 204 release-13.02 and 108 release-13.04,
-//! covering 344,569,357 content blocks with zero malformed framing. This is a
-//! losslessness result, not a claim that every raw preservation row has a known
-//! property type.
-//!
-//! # Diagnostics
-//!
-//! Every malformed or skipped event is captured with full context (packet id,
-//! bunch index, channel, actor, header fields, bit positions). This is the
-//! primary tool for debugging new game builds where the transform may be
-//! partially incorrect. Use `validate --diagnostics` to see the full dump.
-//!
-//! # Resolved: the one-block-per-replay residue
-//!
-//! For a long stretch every `release-13.01` replay lost exactly one content block
-//! and a few hundred bits, always at the same fingerprint:
-//!
-//! ```text
-//! packet_id 0, bunch 0, channel 1, actor_net_guid 2   (the replay controller)
-//! payload_bit_count 831, consumed 136, remaining 695
-//! header: has_rep_layout=false is_actor=false object_net_guid=96
-//!         is_stably_named=true
-//! content_bits read: 8335   (only 695 bits remain -> overrun)
-//! ```
-//!
-//! Four hypotheses were tested and ruled out before the cause was found: the
-//! missing `ReadNetPlayerIndex` byte, the GUID-path spelling used to detect the
-//! controller, treating the subobject GUID as an exporting GUID, and a divergence
-//! in the spawn-data or header bit order (both were compared line by line against
-//! the reference and match).
-//!
-//! What found it was an exhaustive search rather than another hypothesis: the
-//! 831-bit payload was re-framed from every start offset and each walk scored on
-//! whether it consumed the payload to an exact end. Offset 108 does, yielding ten
-//! well-formed blocks with sequential even GUIDs (64, 6, 8, 10, ... 22) carrying a
-//! mix of RPC and property payloads -- exactly the replay controller's initial
-//! subobject replication. We were starting at 109, so the spawn-data read
-//! over-consumed **one bit**. The same relationship held on a second replay
-//! (failure 133, correct start 105), and in both cases the gap is the content
-//! block header (11) plus the `IntPacked` (16) plus that one bit.
-//!
-//! Instrumenting the spawn read bit by bit located it precisely:
-//!
-//! | sub-read | bits | position |
-//! |---|---|---|
-//! | actor GUID `IntPacked(2)` | 8 | 0..8 |
-//! | archetype `IntPacked(9)` | 8 | 8..16 |
-//! | level `IntPacked(3)` | 8 | 16..24 |
-//! | location, quantized 18-bit components | 63 | 24..87 |
-//! | rotation (flag, pitch absent, yaw set, roll absent) | 20 | 87..107 |
-//! | scale, absent | 1 | 107..108 |
-//! | velocity, absent | 1 | 108..109 |
-//!
-//! The velocity read is the extra bit: a `PlayerController` sets
-//! `bReplicateMovement = false`, so the server never serializes velocity for it
-//! and the field is absent from the wire rather than present-and-empty.
-//!
-//! Detection normally comes from the archetype path being registered as a
-//! PlayerController, but the very first bunch carries
-//! `bHasPackageMapExports = false`, so no path exists yet. The fallback is the
-//! actor GUID: dynamic GUIDs are even and non-zero, so 2 is the lowest one
-//! possible, and the first dynamic actor a VALORANT replay opens is always the
-//! replay controller. See `read_dynamic_spawn_data`.
-//!
-//! Immediate result of the fix: malformed blocks 215 -> 0, and 2,150
-//! previously-lost content blocks (ten per replay) now decode.
-//!
-//! This paragraph used to end "pass rate 100.000000% at min, median and max;
-//! skipped bits 153,096 -> 3,671", and those figures were retracted long
-//! before this comment was. They were not a better measurement -- they were
-//! taken while the parser silently dropped every content block whose
-//! `_ClassNetCache` group it could not resolve, without touching a counter,
-//! so the oracle scored itself on data it had thrown away. Exposing that path
-//! is what moved the numbers, not a regression.
-//!
-//! A historical `tools/validate_corpus.py` run over the same 215 replays,
-//! before unresolved whole-payload blocks were separated from true loss:
-//!
-//! ```text
-//! blocks 136,545,822   fields 98,884,839   rpcs 75,571,092
-//! malformed 0          skipped 1,972,018,965
-//! pass rate: min 97.487378%   median 99.323434%   max 99.682485%
-//! ```
-//!
-//! Those skipped bits are attribution gaps, not framing: the blocks cut
-//! correctly but their group could not be determined, so the handle width was
-//! unknown and their complete decoded payloads were retained as raw rows. The
-//! present verdict distinguishes those from malformed/abandoned streams. The
-//! figures remain historical; re-measure before quoting.
-//!
-//! # How the reference parser compares
-//!
-//! The reference keeps content-block counters in `BunchPayloadStats` but never
-//! emits them from its CLI or its manifest. Instrumenting it to print them gives,
-//! on the same replay:
-//!
-//! | counter | reference | here |
-//! |---|---|---|
-//! | `MalformedContentBlockCount` | 0 | 0 |
-//! | `MalformedPayloadCount` | **34,292** | -- |
-//! | `ContentPayloadBitsSkipped` | **49,948,659** | **0** |
-//! | `ContentBlockCount` | 563,626 | 608,020 |
-//!
-//! Its zero is not the same as ours. It abandons 34,292 bunches one level higher,
-//! at the payload stage, and never enters content-block framing for them; that is
-//! where its ~50 million skipped bits (6.2 MB) go, and why its content block
-//! count is ~44,000 lower. The `malformed_packet_count` that *is* in its manifest
-//! is a packet-level counter from a different struct and unrelated to either.
+//! A wrong transform makes `IntPacked` return nonsense or leaves the consumed
+//! bits short of the declared size. This is evidence about blocks that reached
+//! framing, not a whole-file losslessness proof. [`verdict_from_stats`] lists
+//! what fails the verdict; an unresolved ClassNetCache block whose whole
+//! decoded payload was kept is reported apart and is not loss.
 
 use std::fs;
 use std::time::Instant;
 
-use vrf_container::{
-    ChunkIterator, ChunkType, decompress_replay_data_with_trailing, parse_preamble,
-};
-use vrf_frame::iter_demo_frames;
-use vrf_net::pipeline::ReplicationReader;
+use vrf_container::parse_preamble;
 use vrf_net::stats::{DiagnosticEvent, NetStats, SkipReason};
-use vrf_schema::NetGuidCache;
 
 use crate::error::CliError;
-use crate::sink::{ChannelState, ExportSink, RecordBuffers};
+use crate::pass::{Chunk, Pass, Replay, for_each_chunk};
+use crate::report;
+use crate::sink::ExportStats;
 
 /// What a validation run concluded, and the exit code it earns.
 ///
-/// Before this existed `run` ended in `Ok(())` on every path, so `vrfkit
-/// validate` could not report failure: a replay whose framing was wrong
-/// printed a low pass rate and exited 0, and a file with no ReplayData at all
-/// printed "cannot validate" and exited 0 too. The verdict was a sentence on a
-/// screen rather than a result.
-///
-/// The two failure outcomes stay apart. "I looked and found problems" and "I
-/// had nothing to look at" are different answers, and a corpus sweep that
-/// merged them could not tell a broken build from a file carrying no
-/// replication stream.
+/// The two failure outcomes stay apart: "found problems" and "had nothing to
+/// look at" are different answers, and a corpus sweep that merged them could
+/// not tell a broken build from a file carrying no replication stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// Content blocks were found and every one of them framed.
     Passed,
-    /// At least one framing, payload, reassembly, or trailing-data failure was
-    /// observed. See [`Verdict::decide`].
+    /// At least one failure [`verdict_from_stats`] counts.
     ValidationFailed,
     /// No RepLayout or ClassNetCache blocks at all -- nothing was validated.
     NoContentBlocks,
 }
 
 impl Verdict {
-    /// Decide the verdict from the two counters that carry it.
-    ///
     /// Absence of evidence outranks: a file with no content blocks validated
     /// nothing, whatever its other counters say.
     #[must_use]
@@ -196,7 +61,6 @@ impl Verdict {
         }
     }
 
-    /// The process exit code for this verdict.
     #[must_use]
     pub fn exit_code(self) -> u8 {
         match self {
@@ -207,93 +71,67 @@ impl Verdict {
     }
 }
 
-/// Decide from every counter that means the validation walk lost or could not
-/// consume replay data.
+/// Decide from the hard-failure counters inside the scored validation scope.
 ///
-/// `partial_errors` is reported but is not a decoder verdict: it means the
-/// captured stream supplied a continuation without the earlier fragment (or a
-/// mismatched continuation), so there is no complete payload for this process
-/// to validate. An accumulator still holding bytes at EOF is different --
-/// those bytes were present and the walk abandoned them, hence
-/// `unfinished_partials` is a hard failure.
+/// Not terms: `partial_errors` (rejected before a complete bunch reaches
+/// framing, so unscored), `unopened_channel_bits` (moves only with
+/// `bunches_on_unopened_channel`) and a failed reopen (it fails the bunch
+/// header, or retires its actor so the bunches after it count as unopened).
+/// `unfinished_partials` is loss: bytes present at EOF and abandoned. The
+/// depth sum is `NetStats::lost_content_blocks`'s alone, so this verdict and
+/// `quality.content_blocks_lost` cannot drift. `bunches_on_unopened_channel`
+/// is 0 on 45 replays of 24 builds, main and checkpoint passes.
+/// `package_map_exports` (a superset of `rep_layout_export_bunches`) fails the
+/// run: the bunch content after the exports is never read. 0 on 1,018 replays.
 fn verdict_from_stats(stats: &NetStats, replay_data_trailing_bytes: u64) -> Verdict {
     let total_with_content = stats.rep_layout_blocks + stats.class_net_cache_blocks;
-    let rpc_payloads_lost = stats
-        .rpc_stream_failures
-        .saturating_sub(stats.unresolved_rpc_payloads_preserved);
     let failures = stats.malformed_packets
         + stats.unfinished_partials
         + stats.channel_state_limit_failures
         + stats.partial_resource_limit_failures
         + stats.bunch_header_failures
-        + stats.content_block_framing_failures
-        + stats.malformed_content_blocks
-        + stats.transform_failures
-        + stats.field_stream_failures
-        + rpc_payloads_lost
+        + stats.bunches_on_unopened_channel
+        + stats.package_map_exports
+        + stats.lost_content_blocks()
         + u64::from(replay_data_trailing_bytes != 0);
     Verdict::decide(total_with_content, failures)
 }
 
-/// Run the validate oracle. If `diagnostics` is true, print full diagnostic
-/// dumps for every malformed/skipped event.
-///
-/// The `Result` is still the container/IO failure channel -- a file that cannot
-/// be read at all is an error, not a verdict. A file that *was* read reports
-/// through [`Verdict`].
+/// Run the validate oracle; `diagnostics` prints every retained event in full.
+/// A file that cannot be read is an error, not a verdict.
 pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     let start = Instant::now();
 
     eprintln!("reading {path}...");
     let data = fs::read(path)?;
     let preamble = parse_preamble(&data)?;
-    let branch = &preamble.header.replay_version.branch;
-    let flags = preamble.header.flags;
-    let compressed = preamble.info.compressed;
-    let encrypted = preamble.info.encrypted;
+    let replay = Replay::new(&preamble);
+    let branch = replay.branch;
 
     eprintln!("branch: {branch}");
-    eprintln!("validating RepLayout grammar on every ReplayData content block...");
+    eprintln!("validating RepLayout grammar on framed ReplayData content blocks...");
 
-    let mut cache = NetGuidCache::new();
-    let mut repl_reader = ReplicationReader::new(branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
-
-    let mut total_packets: u32 = 0;
+    let mut pass = Pass::new(&replay)?;
+    // Counted as every pass does, never printed.
+    let mut sink = ExportStats::default();
     // Counted, not merely skipped: see `checkpoint_scope_note`.
     let mut checkpoint_chunks: u64 = 0;
     let mut replay_data_trailing_bytes = 0u64;
-    let mut chunk_iter = ChunkIterator::new(&data, preamble.remaining_offset);
-    let mut channel_state = ChannelState::new();
-    // Reused across every packet: the oracle never drains these, and
-    // `ExportSink::new` clears them, so they stay bounded by the largest packet.
-    let mut buffers = RecordBuffers::default();
-
-    while let Some(chunk) = chunk_iter.next_chunk()? {
-        if chunk.chunk_type == ChunkType::Checkpoint {
-            checkpoint_chunks += 1;
-            continue;
+    let unknown_chunks = for_each_chunk(&data, &replay, |chunk| {
+        match chunk {
+            Chunk::Checkpoint(_) => checkpoint_chunks += 1,
+            Chunk::ReplayData(frames, unread) => {
+                replay_data_trailing_bytes += unread as u64;
+                // Never drained: each packet's sink clears them.
+                pass.walk(&frames, &mut sink, |_| Ok(()))?;
+            }
+            Chunk::Event(_) => {}
         }
-        if chunk.chunk_type != ChunkType::ReplayData {
-            continue;
-        }
+        Ok(())
+    })?;
 
-        let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
-        let (decompressed, trailing) =
-            decompress_replay_data_with_trailing(payload, compressed, encrypted)?;
-        replay_data_trailing_bytes += trailing as u64;
-
-        iter_demo_frames(&decompressed, flags, &mut cache, |pkt, packet_cache| {
-            let mut sink = ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
-            sink.time_ms = pkt.time_ms;
-            sink.packet_id = total_packets;
-            repl_reader.process_packet(pkt.data, total_packets as i32, &mut sink);
-            total_packets += 1;
-        })?;
-    }
-
-    repl_reader.finish();
-    let stats = repl_reader.stats();
+    pass.finish();
+    let stats = pass.reader.stats();
     let elapsed = start.elapsed();
 
     let total_content = stats.content_blocks;
@@ -301,14 +139,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     let class_net = stats.class_net_cache_blocks;
     let malformed = stats.malformed_content_blocks;
     let deleted = stats.deleted_blocks;
-    // A block can fail at four different depths, and only counting the shallowest
-    // would overstate the verdict: framing can look fine while the payload inside
-    // is unreadable. `NetStats::lost_content_blocks` owns that definition; it is
-    // shared with `manifest.rs` so the number the oracle prints and the number
-    // `quality.content_blocks_lost` publishes cannot drift apart.
-    let rpc_payloads_lost = stats
-        .rpc_stream_failures
-        .saturating_sub(stats.unresolved_rpc_payloads_preserved);
+    let rpc_payloads_lost = stats.rpc_payloads_lost();
     let failed = stats.lost_content_blocks();
 
     println!();
@@ -319,12 +150,26 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     println!("    ClassNetCache:      {class_net}");
     println!("    Deleted:            {deleted}");
     println!("    Malformed packets:  {}", stats.malformed_packets);
-    println!(
-        "    Partial bunches:    {} errors / {} fragments / {} completed",
-        stats.partial_errors, stats.partial_fragments, stats.partial_completed
-    );
+    println!("    Partial bunches:    {}", report::partial_bunches(stats));
+    println!("    Partial causes:     {}", report::partial_causes(stats));
     println!("    Bunch header failed:{}", stats.bunch_header_failures);
+    println!(
+        "    Failed reopens:     {}",
+        stats.failed_reopens_while_open
+    );
+    println!(
+        "    Unopened channel:   {} bunches / {} bits",
+        stats.bunches_on_unopened_channel, stats.unopened_channel_bits
+    );
+    println!(
+        "    Package map exports: {} ({} with RepLayout export)",
+        stats.package_map_exports, stats.rep_layout_export_bunches
+    );
     println!("    Malformed framing:  {malformed}");
+    println!(
+        "    Content framing fails: {}",
+        stats.content_block_framing_failures
+    );
     println!("    Transform failed:   {}", stats.transform_failures);
     println!("    Field stream failed:{}", stats.field_stream_failures);
     println!("    RPC payload lost:   {rpc_payloads_lost}");
@@ -347,6 +192,16 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         "  ReplayData unread:    {} bytes",
         replay_data_trailing_bytes
     );
+    println!("  ReplayData frames:    {}", pass.frames);
+    println!("  Unknown chunks:       {unknown_chunks}");
+    println!(
+        "  Frame skips:          {}",
+        report::frame_skips(&pass.frame_skips)
+    );
+    println!(
+        "  Frame times:          {} non-finite",
+        pass.non_finite_frame_times
+    );
     println!("  Packets:              {}", stats.packets);
     println!("  Bunches:              {}", stats.bunches);
     println!("  Actor opens:          {}", stats.actor_opens);
@@ -354,43 +209,22 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     if let Some(note) = checkpoint_scope_note(checkpoint_chunks) {
         println!("  NOT COVERED:          {note}");
     }
+    if let Some(note) = partial_reassembly_scope_note(stats.partial_errors) {
+        println!("  NOT COVERED:          {note}");
+    }
     println!();
 
-    // Oracle verdict: the fraction of content blocks (RepLayout + ClassNetCache)
-    // that framed, decoded and walked cleanly. With a correct transform this
-    // should be 100%; a wrong one collapses it toward zero.
+    // The rate is over classified blocks (RepLayout + ClassNetCache).
     let total_with_content = rep_layout + class_net;
     let verdict = verdict_from_stats(stats, replay_data_trailing_bytes);
     if total_with_content == 0 {
         println!("  No content blocks found - cannot validate.");
     } else {
-        // `failed` (`lost_content_blocks()`) is not a subset of
-        // `total_with_content`: a content-block framing failure (header or
-        // `content_bits` unreadable) is counted as lost without the block ever
-        // reaching `rep_layout_blocks`/`class_net_cache_blocks`, since framing
-        // failed before classification. So `failed` can exceed
-        // `total_with_content`, and the passed-block count is saturated at 0
-        // rather than wrapping to u64::MAX on the `- failed` a release build's
-        // disabled overflow checks would not catch.
-        let passed = total_with_content.saturating_sub(failed);
-        let pass_rate = 1.0 - (failed as f64 / total_with_content as f64);
-        println!(
-            "  ORACLE PASS RATE:     {:.6}% ({} / {} blocks passed)",
-            pass_rate * 100.0,
-            passed,
-            total_with_content
-        );
-        if stats.skipped_bits > 0 {
-            println!(
-                "  (skipped {} bits across {} failed blocks)",
-                stats.skipped_bits, failed
-            );
-        }
+        println!("{}", pass_rate_line(total_with_content, failed));
     }
 
-    // Name the payload-stage failures. The counters above say how many; these
-    // lines say which class, which is what an investigation needs.
-    let stream_failures = channel_state.stream_failures();
+    // The counters above say how many payload-stage failures; these say which.
+    let stream_failures = pass.channels.stream_failures();
     if !stream_failures.is_empty() {
         println!();
         println!("=== Stream failures ({} shown) ===", stream_failures.len());
@@ -399,15 +233,10 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         }
     }
 
-    // Diagnostic summary -- always shown when events exist
     if !stats.diagnostics.is_empty() {
         println!();
-        // The retained list is capped (an unbounded one reaches ~100 MB on a
-        // replay whose transform is wrong), so its length is not the event
-        // count once the cap is hit. Printing only `len()` would turn an
-        // honest counter into a screen that quietly under-reports -- the exact
-        // shape of the oracle bug section 5-A was about, in the display layer
-        // instead of the parser.
+        // Capped (uncapped, ~100 MB on a wrong transform), so past the cap
+        // `len()` alone under-reports.
         if stats.diagnostics_dropped == 0 {
             println!(
                 "=== Diagnostic Events ({} total) ===",
@@ -422,7 +251,6 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
             );
         }
 
-        // Aggregate skipped bits by source
         print_skip_breakdown(&stats.diagnostics);
 
         if diagnostics {
@@ -438,29 +266,15 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
 
     println!();
     println!("  Elapsed: {:.2?}", elapsed);
-    // Last line, and the only one that is a conclusion rather than a
-    // measurement. It says in words what the exit code says in a number, so a
-    // human reading a terminal and a script reading `$?` cannot disagree.
+    // The exit code in words, so a terminal and `$?` cannot disagree.
     println!("  VERDICT: {}", verdict_line(verdict));
 
     Ok(verdict)
 }
 
-/// The scope limit to declare when the file carried Checkpoint chunks.
-///
-/// This oracle walks the ReplayData stream. Checkpoint chunks are skipped, and
-/// that was implicit: the run announced "validating RepLayout grammar on all
-/// content blocks" and then ignored every one of them, so malformed
-/// replication framing inside a snapshot was never seen and nothing on the
-/// screen said as much.
-///
-/// The skip stays. A checkpoint is an independent archive -- its own GUID
-/// cache, its own export map, its own DemoFrame re-opening every live actor --
-/// and walking it is what `export --checkpoints` exists for; folding that pass
-/// into `validate` would change every counter this command's pinned baselines
-/// hold and add three new hard-failure paths to a command whose job is to
-/// report rather than to abort. What changes is that the gap now states its own
-/// size instead of being inferred from a sentence that overclaimed.
+/// The `NOT COVERED` line for the Checkpoint chunks this oracle skips, stated
+/// rather than implied: walking them would move every counter `validate`'s
+/// pinned baselines hold, and `export --checkpoints` decodes them.
 fn checkpoint_scope_note(checkpoint_chunks: u64) -> Option<String> {
     (checkpoint_chunks > 0).then(|| {
         format!(
@@ -469,57 +283,68 @@ fn checkpoint_scope_note(checkpoint_chunks: u64) -> Option<String> {
     })
 }
 
+fn partial_reassembly_scope_note(partial_errors: u64) -> Option<String> {
+    (partial_errors > 0).then(|| {
+        let rejection = if partial_errors == 1 {
+            "rejection was"
+        } else {
+            "rejections were"
+        };
+        format!(
+            "{partial_errors} partial reassembly {rejection} discarded before content-block framing - excluded from the block score and verdict"
+        )
+    })
+}
+
+/// The `ORACLE PASS RATE` line for `failed` of `total_with_content` blocks.
+/// `failed` can exceed the classified total (a block whose header could not be
+/// read is lost unclassified), so `passed` and the rate saturate at 0; the
+/// rate stays `1 - failed / total`, whose last bit can differ from
+/// `passed / total`.
+fn pass_rate_line(total_with_content: u64, failed: u64) -> String {
+    let passed = total_with_content.saturating_sub(failed);
+    let pass_rate = 1.0 - (failed.min(total_with_content) as f64 / total_with_content as f64);
+    format!(
+        "  ORACLE PASS RATE:     {:.6}% ({} / {} blocks passed)",
+        pass_rate * 100.0,
+        passed,
+        total_with_content
+    )
+}
+
 /// The one-line conclusion printed under `VERDICT:`.
 fn verdict_line(verdict: Verdict) -> &'static str {
     match verdict {
-        Verdict::Passed => "PASS - all ReplayData was consumed and decoded (exit 0)",
+        Verdict::Passed => "PASS - ReplayData block validation passed (exit 0)",
         Verdict::ValidationFailed => "FAIL - ReplayData validation found loss (exit 1)",
         Verdict::NoContentBlocks => "CANNOT VALIDATE - no content blocks found (exit 2)",
     }
 }
 
-/// Print a breakdown of where skipped bits come from.
+/// Print a breakdown of where skipped bits come from, zeros included, so a
+/// category that stops being recorded stays visible.
 fn print_skip_breakdown(events: &[DiagnosticEvent]) {
-    let mut overrun_count = 0u32;
-    let mut overrun_bits = 0u64;
-    let mut header_err_count = 0u32;
-    let mut header_err_bits = 0u64;
-    let mut bits_read_err_count = 0u32;
-    let mut bits_read_err_bits = 0u64;
-    let mut parse_fail_count = 0u32;
-    let mut parse_fail_bits = 0u64;
-
+    let mut tally = [(0u32, 0u64); 4];
     for ev in events {
-        match &ev.reason {
-            SkipReason::ContentBitsOverrun { .. } => {
-                overrun_count += 1;
-                overrun_bits += ev.bits_skipped;
-            }
-            SkipReason::HeaderReadError => {
-                header_err_count += 1;
-                header_err_bits += ev.bits_skipped;
-            }
-            SkipReason::ContentBitsReadError => {
-                bits_read_err_count += 1;
-                bits_read_err_bits += ev.bits_skipped;
-            }
-            SkipReason::ParseFailure => {
-                parse_fail_count += 1;
-                parse_fail_bits += ev.bits_skipped;
-            }
-        }
+        let reason = match ev.reason {
+            SkipReason::ContentBitsOverrun { .. } => 0,
+            SkipReason::HeaderReadError => 1,
+            SkipReason::ContentBitsReadError => 2,
+            SkipReason::ParseFailure => 3,
+        };
+        tally[reason].0 += 1;
+        tally[reason].1 += ev.bits_skipped;
     }
-
     println!("  Skip breakdown:");
-    // Unconditional, zeros included: a category that stops being recorded (a
-    // renumbered `SkipReason`, a bypassed recording path) is otherwise
-    // indistinguishable from one that legitimately saw nothing -- the line
-    // just vanishes either way. See the module-level rule against counters
-    // that cannot move.
-    println!("    ContentBitsOverrun:   {overrun_count} events, {overrun_bits} bits");
-    println!("    HeaderReadError:      {header_err_count} events, {header_err_bits} bits");
-    println!("    ContentBitsReadError: {bits_read_err_count} events, {bits_read_err_bits} bits");
-    println!("    ParseFailure:         {parse_fail_count} events, {parse_fail_bits} bits");
+    let labels = [
+        "ContentBitsOverrun:",
+        "HeaderReadError:",
+        "ContentBitsReadError:",
+        "ParseFailure:",
+    ];
+    for (label, (count, bits)) in labels.into_iter().zip(tally) {
+        println!("    {label:<22}{count} events, {bits} bits");
+    }
 }
 
 /// Print full details for one diagnostic event.
@@ -537,7 +362,7 @@ fn print_diagnostic_event(index: usize, ev: &DiagnosticEvent) {
     }
     println!("  | archetype_net_guid:  {}", ev.archetype_net_guid);
     if let Some(ref path) = ev.class_path {
-        println!("  | class_path:          {path}");
+        println!("  | archetype_path:      {path}");
     }
     println!("  | bunch_flags:");
     let f = &ev.bunch_flags;
@@ -580,17 +405,12 @@ fn print_diagnostic_event(index: usize, ev: &DiagnosticEvent) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Verdict, checkpoint_scope_note, verdict_from_stats};
+    use super::{
+        Verdict, checkpoint_scope_note, partial_reassembly_scope_note, pass_rate_line,
+        verdict_from_stats,
+    };
     use vrf_net::stats::NetStats;
 
-    /// The chunks this oracle does not walk have to say so themselves.
-    ///
-    /// `validate` announced that it was checking "all content blocks" and then
-    /// skipped every Checkpoint chunk, so malformed replication framing inside
-    /// a snapshot was never looked at and nothing on the screen admitted it.
-    /// The skip is a real scope limit -- a checkpoint is a separate archive
-    /// with its own GUID cache and export map, and walking it is an `export
-    /// --checkpoints` job -- but a limit that is not stated reads as coverage.
     #[test]
     fn skipped_checkpoint_chunks_are_named_rather_than_implied() {
         assert_eq!(
@@ -602,18 +422,43 @@ mod tests {
         assert!(note.contains("37"), "the note must carry the count: {note}");
     }
 
-    /// `vrfkit validate` has to be able to report failure.
-    ///
-    /// It could not: `run` ended in `Ok(())` on every path, so a replay whose
-    /// framing was wrong printed a low pass rate and exited 0 exactly like a
-    /// clean one, and a file with no ReplayData at all printed "cannot
-    /// validate" and also exited 0. A verdict that cannot move is not a
-    /// verdict.
-    ///
-    /// The two failing outcomes are kept apart. "Found problems" and "had
-    /// nothing to look at" are different answers, and merging them into one
-    /// non-zero code would make a corpus sweep unable to tell a broken build
-    /// from a file that carries no replication stream.
+    #[test]
+    fn partial_reassembly_rejections_are_named_as_unscored_input() {
+        assert_eq!(partial_reassembly_scope_note(0), None);
+        let note = partial_reassembly_scope_note(125_037)
+            .expect("a non-zero rejected population must be disclosed");
+        assert!(
+            note.contains("125037"),
+            "the note must carry the count: {note}"
+        );
+        assert!(
+            note.contains("before content-block framing"),
+            "the note must identify the scope boundary: {note}"
+        );
+        assert!(
+            note.contains("excluded from the block score and verdict"),
+            "the note must state the scoring consequence: {note}"
+        );
+    }
+
+    /// A negative rate would not match the corpus sweeps' `([\d.]+)%`, so they
+    /// would report no rate at all.
+    #[test]
+    fn the_pass_rate_saturates_like_the_passed_count() {
+        assert_eq!(
+            pass_rate_line(2, 3),
+            "  ORACLE PASS RATE:     0.000000% (0 / 2 blocks passed)"
+        );
+        assert_eq!(
+            pass_rate_line(4, 1),
+            "  ORACLE PASS RATE:     75.000000% (3 / 4 blocks passed)"
+        );
+        assert_eq!(
+            pass_rate_line(4, 0),
+            "  ORACLE PASS RATE:     100.000000% (4 / 4 blocks passed)"
+        );
+    }
+
     #[test]
     fn the_verdict_separates_clean_from_failed_from_unvalidatable() {
         assert_eq!(Verdict::decide(1_000, 0), Verdict::Passed);
@@ -621,84 +466,51 @@ mod tests {
         assert_eq!(Verdict::decide(0, 0), Verdict::NoContentBlocks);
     }
 
+    /// Each hard-failure term alone fails a replay that otherwise passes; an
+    /// unresolved RPC whose whole payload was kept and a reassembly rejection
+    /// (reported as unscored) do not.
     #[test]
     fn every_unfinished_or_payload_failure_prevents_a_pass() {
-        let clean = NetStats {
+        let failures: [fn(&mut NetStats); 11] = [
+            |s| s.malformed_packets = 1,
+            |s| s.bunch_header_failures = 1,
+            |s| s.transform_failures = 1,
+            |s| s.field_stream_failures = 1,
+            |s| (s.class_net_cache_blocks, s.rpc_stream_failures) = (1, 1),
+            |s| s.unfinished_partials = 1,
+            |s| s.partial_resource_limit_failures = 1,
+            |s| s.channel_state_limit_failures = 1,
+            |s| s.content_block_framing_failures = 1,
+            |s| (s.bunches_on_unopened_channel, s.unopened_channel_bits) = (1, 10),
+            |s| s.package_map_exports = 1,
+        ];
+        let passes: [fn(&mut NetStats); 3] = [
+            |_| {},
+            |s| (s.rpc_stream_failures, s.unresolved_rpc_payloads_preserved) = (1, 1),
+            |s| s.partial_errors = 1,
+        ];
+        let clean = || NetStats {
             rep_layout_blocks: 1,
             ..NetStats::default()
         };
-        assert_eq!(verdict_from_stats(&clean, 0), Verdict::Passed);
-
-        for failed in [
-            NetStats {
-                rep_layout_blocks: 1,
-                transform_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                field_stream_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                class_net_cache_blocks: 1,
-                rpc_stream_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                unfinished_partials: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                partial_resource_limit_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                channel_state_limit_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                content_block_framing_failures: 1,
-                ..NetStats::default()
-            },
-        ] {
-            assert_eq!(verdict_from_stats(&failed, 0), Verdict::ValidationFailed);
+        let verdict = |set: fn(&mut NetStats)| {
+            let mut stats = clean();
+            set(&mut stats);
+            verdict_from_stats(&stats, 0)
+        };
+        for (i, set) in failures.into_iter().enumerate() {
+            assert_eq!(verdict(set), Verdict::ValidationFailed, "failure {i}");
+        }
+        for (i, set) in passes.into_iter().enumerate() {
+            assert_eq!(verdict(set), Verdict::Passed, "pass {i}");
         }
         assert_eq!(
-            verdict_from_stats(&clean, 1),
+            verdict_from_stats(&clean(), 1),
             Verdict::ValidationFailed,
             "unconsumed decompressed ReplayData bytes must fail validation"
         );
-
-        let unresolved_but_preserved = NetStats {
-            class_net_cache_blocks: 1,
-            rpc_stream_failures: 1,
-            unresolved_rpc_payloads_preserved: 1,
-            ..NetStats::default()
-        };
-        assert_eq!(
-            verdict_from_stats(&unresolved_but_preserved, 0),
-            Verdict::Passed,
-            "an unresolved RPC whose whole decoded payload was preserved is not data loss"
-        );
-
-        let missing_prior_fragments = NetStats {
-            rep_layout_blocks: 1,
-            partial_errors: 1,
-            ..NetStats::default()
-        };
-        assert_eq!(
-            verdict_from_stats(&missing_prior_fragments, 0),
-            Verdict::Passed,
-            "a missing earlier network fragment is reported, but does not prove this decoder lost bytes"
-        );
     }
 
-    /// The three outcomes must reach the shell as three different codes.
     #[test]
     fn each_verdict_earns_its_own_exit_code() {
         assert_eq!(Verdict::Passed.exit_code(), 0);

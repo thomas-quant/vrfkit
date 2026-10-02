@@ -1,149 +1,94 @@
-//! The three `FEffectData*` element types and their array decoders.
-//!
-//! All three arrays share one framing and differ only in how the value member
-//! is read, so the element loop is written once over the [`EffectElement`]
-//! trait. The three public decoders differ from each other in exactly the four
-//! lines the trait declares -- which is the point: an element loop copied three
-//! times is three places for the `settle_field` accounting to drift.
+//! The `FEffectData*` element type and its array decoders. The element loop is
+//! written once over [`EffectValue`], so the `settle_field` accounting cannot
+//! drift between the three value types.
 
 use vrf_bitio::BitReader;
 
-use super::framing::{
-    MAX_FIELDS_PER_ELEMENT, consume_trailing_terminator, expect_width, read_array_count,
-    read_element_index, read_field_header, settle_field,
-};
+use super::framing::{MAX_ARRAY_COUNT, consume_trailing_terminator, expect_width, settle_field};
 use super::{
     EffectBlobError, EffectHandles, FLOAT_HANDLES, OBJECT_HANDLES, Result, VECTOR_HANDLES,
 };
+use crate::framing::{
+    MAX_FIELDS_PER_ELEMENT, read_array_count, read_element_index, read_field_header,
+};
 use crate::types::FVector;
 
-/// A single decoded `FEffectDataFloat` element: a gameplay-tag index plus a
-/// float value.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EffectDataFloat {
-    /// Gameplay tag index (resolved to a name like `FiringState.AmmoRemaining`
-    /// via the replay's tag table). `None` if the tag field was absent.
-    pub tag_index: Option<u32>,
-    /// The float value. `None` if the value field was absent.
-    pub value: Option<f32>,
-}
-
-/// A single decoded `FEffectDataObject` element: a gameplay-tag index plus a
-/// net GUID (object reference).
+/// One `FEffectData*` element: a gameplay-tag index (a name like
+/// `FiringState.AmmoRemaining` through the replay's tag table) and a value,
+/// each `None` if the wire left it out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EffectDataObject {
-    /// Gameplay tag index. `None` if the tag field was absent.
+pub struct EffectData<V> {
     pub tag_index: Option<u32>,
-    /// Object net GUID. `None` if the value field was absent.
-    pub value: Option<u32>,
+    pub value: Option<V>,
 }
 
-/// A single decoded `FEffectDataVector` element: a gameplay-tag index plus a
-/// 3D vector (f64 components, matching the wire format).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EffectDataVector {
-    /// Gameplay tag index. `None` if the tag field was absent.
-    pub tag_index: Option<u32>,
-    /// The vector value. `None` if the value field was absent.
-    pub value: Option<FVector>,
-}
+/// `FEffectDataFloat`.
+pub type EffectDataFloat = EffectData<f32>;
+/// `FEffectDataObject`: the value is an object net GUID.
+pub type EffectDataObject = EffectData<u32>;
+/// `FEffectDataVector`: the value is three f64s on the wire.
+pub type EffectDataVector = EffectData<FVector>;
 
-/// What an element type has to say for itself so the shared loop can decode it.
-trait EffectElement: Copy {
-    /// Names this element type in a [`EffectBlobError::TooManyFields`].
+/// A value type the shared element loop can read.
+trait EffectValue: Copy {
+    /// Names the element type in [`EffectBlobError::TooManyFields`] and
+    /// [`EffectBlobError::MissingTerminator`].
     const CONTEXT: &'static str;
-    /// A slot the wire never populated. A sparse array keeps these.
-    const ABSENT: Self;
 
-    fn set_tag(&mut self, tag_index: u32);
-
-    /// Read the value member, having already checked the handle. `payload_bits`
-    /// is the field's declared width -- the implementations that know their own
-    /// width check it here, because reading a wider type than the field
-    /// declared would run into the next field.
-    fn read_value(&mut self, reader: &mut BitReader<'_>, payload_bits: u32) -> Result<()>;
+    /// Read the value member (handle already checked). Fixed-width types check
+    /// `payload_bits` first: a wider read would run into the next field.
+    fn read(reader: &mut BitReader<'_>, payload_bits: u32) -> Result<Self>;
 }
 
-impl EffectElement for EffectDataFloat {
+impl EffectValue for f32 {
     const CONTEXT: &'static str = "EffectDataFloat";
-    const ABSENT: Self = Self {
-        tag_index: None,
-        value: None,
-    };
 
-    fn set_tag(&mut self, tag_index: u32) {
-        self.tag_index = Some(tag_index);
-    }
-
-    fn read_value(&mut self, reader: &mut BitReader<'_>, payload_bits: u32) -> Result<()> {
+    fn read(reader: &mut BitReader<'_>, payload_bits: u32) -> Result<Self> {
         expect_width("EffectDataFloat value", 32, payload_bits)?;
-        self.value = Some(reader.read_f32()?);
-        Ok(())
+        Ok(reader.read_f32()?)
     }
 }
 
-impl EffectElement for EffectDataObject {
+impl EffectValue for u32 {
     const CONTEXT: &'static str = "EffectDataObject";
-    const ABSENT: Self = Self {
-        tag_index: None,
-        value: None,
-    };
 
-    fn set_tag(&mut self, tag_index: u32) {
-        self.tag_index = Some(tag_index);
-    }
-
-    /// ObjectNetGuid: IntPacked. Both members of this element type are
-    /// IntPacked, so width cannot tell them apart -- the tag is identified by
-    /// being the lower handle. Verified per function on `02d4d478`: the lower
-    /// handle takes 1 to 5 distinct values drawn from the gameplay-tag space
-    /// (282, 283, 298, 306, 65535), the upper takes 209 to 580 distinct values
-    /// spanning the dynamic net-GUID range.
-    fn read_value(&mut self, reader: &mut BitReader<'_>, _payload_bits: u32) -> Result<()> {
-        self.value = Some(reader.read_int_packed()?);
-        Ok(())
+    /// IntPacked, like the tag, so width cannot tell them apart; the tag is the
+    /// lower handle. Per function on `02d4d478` the lower takes 1 to 5 values
+    /// from tag space, the upper 209 to 580 across the net-GUID range.
+    fn read(reader: &mut BitReader<'_>, _payload_bits: u32) -> Result<Self> {
+        Ok(reader.read_int_packed()?)
     }
 }
 
-impl EffectElement for EffectDataVector {
+impl EffectValue for FVector {
     const CONTEXT: &'static str = "EffectDataVector";
-    const ABSENT: Self = Self {
-        tag_index: None,
-        value: None,
-    };
 
-    fn set_tag(&mut self, tag_index: u32) {
-        self.tag_index = Some(tag_index);
-    }
-
-    fn read_value(&mut self, reader: &mut BitReader<'_>, payload_bits: u32) -> Result<()> {
+    fn read(reader: &mut BitReader<'_>, payload_bits: u32) -> Result<Self> {
         expect_width("EffectDataVector value", 192, payload_bits)?;
-        let x = reader.read_f64()?;
-        let y = reader.read_f64()?;
-        let z = reader.read_f64()?;
-        self.value = Some(FVector { x, y, z });
-        Ok(())
+        Ok(FVector {
+            x: reader.read_f64()?,
+            y: reader.read_f64()?,
+            z: reader.read_f64()?,
+        })
     }
 }
 
-/// Decode one `TArray<FEffectData*>` given the handle pair its function uses.
-///
-/// The returned vector always has the array's declared length: slots the wire
-/// left unpopulated stay [`EffectElement::ABSENT`] so an element's index in the
-/// output is its index on the wire.
-fn decode_elements<T: EffectElement>(
+/// Decode one `TArray<FEffectData*>` under the handle pair its function uses.
+/// The result has the declared length, unpopulated slots staying all-`None`,
+/// so an output index is the wire index.
+fn decode_elements<V: EffectValue>(
     reader: &mut BitReader<'_>,
     handles: EffectHandles,
-) -> Result<Vec<T>> {
-    let count = read_array_count(reader)?;
-    let mut elements = vec![T::ABSENT; count as usize];
-    // An array ends on a zero index and an element on a zero handle. Running
-    // out of bits instead was accepted, and because these arrays are sparse by
-    // design the elements that never arrived rendered as `{"tag":null,...}` --
-    // exactly what a legitimately unpopulated slot looks like. Truncation was
-    // therefore indistinguishable from sparseness, so the terminators are now
-    // required rather than inferred.
+) -> Result<Vec<EffectData<V>>> {
+    let count = read_array_count(reader, MAX_ARRAY_COUNT)?;
+    let absent = EffectData {
+        tag_index: None,
+        value: None,
+    };
+    let mut elements = vec![absent; count as usize];
+    // Terminators are required, not inferred; see `MissingTerminator`.
     let mut array_terminated = false;
+    let mut previous: Option<u32> = None;
 
     while !reader.at_end() {
         let Some(index) = read_element_index(reader, count)? else {
@@ -151,6 +96,10 @@ fn decode_elements<T: EffectElement>(
             array_terminated = true;
             break;
         };
+        if let Some(previous) = previous.filter(|&p| index <= p) {
+            return Err(EffectBlobError::NonAscendingIndex { index, previous });
+        }
+        previous = Some(index);
 
         let elem = &mut elements[index as usize];
         let mut field_count = 0u32;
@@ -164,28 +113,25 @@ fn decode_elements<T: EffectElement>(
             field_count += 1;
             if field_count > MAX_FIELDS_PER_ELEMENT {
                 return Err(EffectBlobError::TooManyFields {
-                    context: T::CONTEXT,
+                    context: V::CONTEXT,
                 });
             }
 
             let start_pos = reader.position();
             if handle == handles.tag {
-                // FGameplayTag: IntPacked tag index
-                elem.set_tag(reader.read_int_packed()?);
+                elem.tag_index = Some(reader.read_int_packed()?);
             } else if handle == handles.value {
-                elem.read_value(reader, payload_bits)?;
+                elem.value = Some(V::read(reader, payload_bits)?);
             } else {
-                // Unknown handle: skip the payload
                 reader.skip_bits(u64::from(payload_bits))?;
             }
 
-            // Ensure we consumed exactly payload_bits
             settle_field(reader, start_pos, payload_bits)?;
         }
 
         if !element_terminated {
             return Err(EffectBlobError::MissingTerminator {
-                context: T::CONTEXT,
+                context: V::CONTEXT,
             });
         }
     }
@@ -194,38 +140,23 @@ fn decode_elements<T: EffectElement>(
     // byte is the whole blob -- so only a populated array owes one.
     if count > 0 && !array_terminated {
         return Err(EffectBlobError::MissingTerminator {
-            context: T::CONTEXT,
+            context: V::CONTEXT,
         });
     }
 
     Ok(elements)
 }
 
-/// Decode a `TArray<FEffectDataFloat>` RepLayout dynamic array.
-///
-/// # Arguments
-/// - `reader`: bit reader positioned at the start of the FloatValues blob.
-///
-/// # Returns
-/// A vector of decoded float data elements. Elements that were not populated
-/// in the stream (sparse array) are filled with `tag_index: None, value: None`.
-///
-/// # Wire layout
-/// ```text
-/// [IntPacked: count]
-/// elements (sparse, terminated by index=0):
-///   [IntPacked: index+1]
-///   fields (terminated by handle=0):
-///     handle 7: [IntPacked: bits] [IntPacked: tag_index]
-///     handle 8: [IntPacked: bits] [f32: value]
-/// ```
+/// Decode a `TArray<FEffectDataFloat>` (`reader` at the start of the blob)
+/// under the handles `ReplayPlayContinuousEffectAtLocation` uses, 7/8; other
+/// functions need [`decode_effect_floats_at`]. The framing is in the
+/// [`crate::effect`] docs.
 pub fn decode_effect_floats(reader: &mut BitReader<'_>) -> Result<Vec<EffectDataFloat>> {
-    decode_effect_floats_at(reader, FLOAT_HANDLES)
+    decode_elements(reader, FLOAT_HANDLES)
 }
 
-/// [`decode_effect_floats`] with the element's handle pair supplied.
-///
-/// See [`EffectHandles`] for why the pair is not a constant.
+/// [`decode_effect_floats`] with the element's handle pair supplied (see
+/// [`EffectHandles`]).
 pub fn decode_effect_floats_at(
     reader: &mut BitReader<'_>,
     handles: EffectHandles,
@@ -233,30 +164,14 @@ pub fn decode_effect_floats_at(
     decode_elements(reader, handles)
 }
 
-/// Decode a `TArray<FEffectDataObject>` RepLayout dynamic array.
-///
-/// # Arguments
-/// - `reader`: bit reader positioned at the start of the ObjectValues blob.
-///
-/// # Returns
-/// A vector of decoded object-reference data elements.
-///
-/// # Wire layout
-/// ```text
-/// [IntPacked: count]
-/// elements (sparse, terminated by index=0):
-///   [IntPacked: index+1]
-///   fields (terminated by handle=0):
-///     handle 15: [IntPacked: bits] [IntPacked: tag_index]
-///     handle 16: [IntPacked: bits] [IntPacked: net_guid]
-/// ```
+/// Decode a `TArray<FEffectDataObject>` under the handles
+/// `ReplayPlayContinuousEffectAtLocation` uses, 15/16; see
+/// [`decode_effect_floats`].
 pub fn decode_effect_objects(reader: &mut BitReader<'_>) -> Result<Vec<EffectDataObject>> {
-    decode_effect_objects_at(reader, OBJECT_HANDLES)
+    decode_elements(reader, OBJECT_HANDLES)
 }
 
 /// [`decode_effect_objects`] with the element's handle pair supplied.
-///
-/// See [`EffectHandles`] for why the pair is not a constant.
 pub fn decode_effect_objects_at(
     reader: &mut BitReader<'_>,
     handles: EffectHandles,
@@ -264,31 +179,14 @@ pub fn decode_effect_objects_at(
     decode_elements(reader, handles)
 }
 
-/// Decode a `TArray<FEffectDataVector>` RepLayout dynamic array.
-///
-/// # Arguments
-/// - `reader`: bit reader positioned at the start of the VectorValues blob.
-///
-/// # Returns
-/// A vector of decoded vector data elements. Each vector has f64 components
-/// matching the 192-bit FVector(double) wire format.
-///
-/// # Wire layout
-/// ```text
-/// [IntPacked: count]
-/// elements (sparse, terminated by index=0):
-///   [IntPacked: index+1]
-///   fields (terminated by handle=0):
-///     handle 11: [IntPacked: bits] [IntPacked: tag_index]
-///     handle 12: [IntPacked: bits] [f64: x] [f64: y] [f64: z]
-/// ```
+/// Decode a `TArray<FEffectDataVector>` (values are three f64s, 192 bits)
+/// under the handles `ReplayPlayContinuousEffectAtLocation` uses, 11/12; see
+/// [`decode_effect_floats`].
 pub fn decode_effect_vectors(reader: &mut BitReader<'_>) -> Result<Vec<EffectDataVector>> {
-    decode_effect_vectors_at(reader, VECTOR_HANDLES)
+    decode_elements(reader, VECTOR_HANDLES)
 }
 
 /// [`decode_effect_vectors`] with the element's handle pair supplied.
-///
-/// See [`EffectHandles`] for why the pair is not a constant.
 pub fn decode_effect_vectors_at(
     reader: &mut BitReader<'_>,
     handles: EffectHandles,

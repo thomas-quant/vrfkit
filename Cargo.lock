@@ -227,6 +227,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cityhasher"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ceab37c9e94f42414cccae77e930232c517f1bb190947018cffb0ab41fc40992"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -284,6 +290,14 @@ dependencies = [
  "anstyle",
  "env_filter",
  "log",
+]
+
+[[package]]
+name = "extract-component-classes"
+version = "0.0.0"
+dependencies = [
+ "cityhasher",
+ "oozextract",
 ]
 
 [[package]]
@@ -951,28 +965,30 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vrf-bitio"
-version = "0.1.0"
+version = "0.2.5"
 
 [[package]]
 name = "vrf-container"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "oozextract",
  "thiserror",
  "vrf-bitio",
+ "vrf-testkit",
 ]
 
 [[package]]
 name = "vrf-decode"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "thiserror",
  "vrf-bitio",
+ "vrf-testkit",
 ]
 
 [[package]]
 name = "vrf-export"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -983,48 +999,57 @@ dependencies = [
 
 [[package]]
 name = "vrf-frame"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "thiserror",
  "vrf-bitio",
  "vrf-schema",
+ "vrf-testkit",
 ]
 
 [[package]]
 name = "vrf-movement"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "thiserror",
  "vrf-bitio",
+ "vrf-testkit",
 ]
 
 [[package]]
 name = "vrf-net"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "thiserror",
  "vrf-bitio",
+ "vrf-schema",
+ "vrf-testkit",
  "vrf-transform",
 ]
 
 [[package]]
 name = "vrf-schema"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "thiserror",
  "vrf-bitio",
+ "vrf-testkit",
 ]
 
 [[package]]
+name = "vrf-testkit"
+version = "0.0.0"
+
+[[package]]
 name = "vrf-transform"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "vrf-bitio",
 ]
 
 [[package]]
 name = "vrfkit"
-version = "0.1.0"
+version = "0.2.5"
 dependencies = [
  "smallvec",
  "thiserror",
@@ -1036,6 +1061,7 @@ dependencies = [
  "vrf-movement",
  "vrf-net",
  "vrf-schema",
+ "vrf-testkit",
  "vrf-transform",
 ]
 

@@ -1,41 +1,46 @@
 """Compare CombatReport values as multisets per path shape.
 
 A leaf-by-leaf path join under-counts: C# writes array positions into its own
-`Index` field while we encode the wire index in the path brackets, so two records
-carrying identical data can spell their paths differently. Comparing the multiset
-of values for each *shape* (indices collapsed) sidesteps that and still catches a
-wrong decoder -- a bit-level error would change the values themselves, not just
-their addresses.
+`Index` field while we encode the wire index in the path brackets. Comparing
+the multiset of values for each *shape* (indices collapsed) sidesteps that and
+still catches a wrong decoder, whose error changes the values themselves.
+Restricted to the leaves valplay derives metrics from.
 
-Restricted to the fields valplay actually derives metrics from.
+Three of the ten leaves are spelled differently on the wire (DamageRecieved,
+HitsRecieved, bDidKill), so our side is relabelled through the bundle
+adapter's handle table (shared on purpose, so the two cannot drift);
+`INTERESTING` keeps the C# spelling.
 
-The two sides no longer spell these leaves the same way. `fields.parquet` now
-labels each array leaf with the name the REPLAY declares for its handle, which
-for six of the ten shapes below is not what the C# reference calls it: the wire
-says `DamageRecieved` and `HitsRecieved` (Riot's typos), `bDidKill`,
-`bIsWallPen`, and `ParticipantSubject`. So our side is relabelled through the
-same handle -> reference-name table the bundle adapter uses before the shapes
-are compared. Sharing that table is deliberate -- a second copy could drift, and
-this comparison is what would then quietly stop testing anything.
+The reference is the C# reference parser's `export` of the 13.01 reference
+replay, kept machine-local because it carries per-player values; docs/USAGE.md
+section 6 has the commands that produce it. compare_rpc_params.py shares
+`parse_args`, `missing_input` and `verdict`.
 
-`INTERESTING` stays in the C# spelling because the C# side of this comparison is
-read straight from the reference's own `events.ndjson`.
+Usage:
+    python tools/compare_combat_report.py [--reference EVENTS] [--ours PARQUET]
 """
 
+import argparse
 import collections
 import json
 import os
 import sys
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from to_valplay_bundle import _combat_report_leaf_name  # noqa: E402
 
-CS = Path(
-    os.environ.get("VRFKIT_VALPLAY_DIR", "")
-) / "pipeline" / "exports" / "02d4d478-1dfb-4412-9a77-29ca29105a9d" / "events.ndjson"
+#: The C# reference parser's export of replay 02d4d478.
+REFERENCE_DIR = r"%LOCALAPPDATA%\vrfkit\csharp-reference\02d4d478-1dfb-4412-9a77-29ca29105a9d"
+#: Its CombatReportComponent lines (the whole events.ndjson works too). The C#
+#: build must decode Rounds; one that keeps it a raw payload has no values.
+DEFAULT_REFERENCE = REFERENCE_DIR + r"\combat_report.ndjson"
+#: vrfkit's export of the same replay.
+DEFAULT_OURS = "out/nested/fields.parquet"
 
 # The leaves that drive K/D/A, ADR, HS%, multikills and wallbangs.
 INTERESTING = {
@@ -75,10 +80,8 @@ def shape(path):
     return "".join(out)
 
 
-#: Decimal places floats are rounded to before the multisets are compared.
-#: `IDENTICAL multiset` therefore means identical to this precision and no
-#: further -- a real tolerance, which the verdict line now states rather than
-#: leaving the reader to find it here.
+#: Decimal places floats are rounded to before the multisets are compared:
+#: `MATCH` means identical to this precision and no further.
 FLOAT_PLACES = 3
 
 
@@ -112,20 +115,18 @@ def load_cs(path):
     return cs
 
 
-def load_ours(parquet="out/nested/fields.parquet"):
-    t = pq.read_table(parquet)
-    cols = {
-        n: t.column(n).to_pylist()
-        for n in ("group_path", "field_name", "handle",
-                  "value_i64", "value_f64", "value_bool", "value_str")
-    }
+def load_ours(parquet=DEFAULT_OURS):
+    columns = ["group_path", "field_name", "handle",
+               "value_i64", "value_f64", "value_bool", "value_str"]
+    t = pq.read_table(parquet, columns=columns)
+    # Only the CombatReport Rounds rows become Python objects (of ~1.3M).
+    keep = pc.and_(
+        pc.match_substring(t.column("group_path").cast(pa.string()), "CombatReportComponent"),
+        pc.starts_with(t.column("field_name").cast(pa.string()), "Rounds"))
+    t = t.filter(pc.fill_null(keep, False))
+    cols = {n: t.column(n).to_pylist() for n in columns}
     ours = collections.defaultdict(collections.Counter)
-    for i, g in enumerate(cols["group_path"]):
-        if "CombatReportComponent" not in g:
-            continue
-        n = cols["field_name"][i]
-        if not n or not n.startswith("Rounds"):
-            continue
+    for i, (g, n) in enumerate(zip(cols["group_path"], cols["field_name"])):
         s = shape(_combat_report_leaf_name(g, n, cols["handle"][i]))
         if s not in INTERESTING:
             continue
@@ -137,85 +138,94 @@ def load_ours(parquet="out/nested/fields.parquet"):
     return ours
 
 
-def compare(cs, ours, interesting):
-    """`(printable rows, everything matched)`.
+def verdict(cs, ours):
+    """`(text, matched, compared)` for one key's C# and vrfkit Counters.
 
-    Split out from the printing so the verdict can be asserted on. It could
-    not be before: the whole comparison ran at import, which is why the script
-    had no way to report failure to anything but a reader.
+    Emptiness goes first, because two empty Counters are equal: an empty pair
+    is no disagreement, but it is not counted as compared.
     """
-    rows, all_match = [], True
+    if not cs and not ours:
+        return "absent both sides", True, False
+    if cs == ours:
+        return "MATCH", True, True
+    return (f"DIFFER (+{sum((ours - cs).values())} vrfkit / "
+            f"+{sum((cs - ours).values())} C#)", False, True)
+
+
+def compare(cs, ours, interesting):
+    """`(printable rows, everything matched, how many shapes were compared)`."""
+    rows, all_match, checked = [], True, 0
     for s in sorted(interesting):
         a, b = cs.get(s, collections.Counter()), ours.get(s, collections.Counter())
-        # Emptiness is tested FIRST. Two empty counters satisfy `a == b`, so
-        # this arm sat below the equality test and could never be reached --
-        # every shape of a replay carrying none of them read `IDENTICAL
-        # multiset`. `all_match` is deliberately left alone: per shape that is
-        # still not a disagreement. What it is not is a comparison, and that is
-        # what `compared_shapes` answers.
-        if not a and not b:
-            verdict = "absent both sides"
-        elif a == b:
-            verdict = "IDENTICAL multiset"
-        else:
-            extra_ours = sum((b - a).values())
-            extra_cs = sum((a - b).values())
-            verdict = f"DIFFER (+{extra_ours} ours / +{extra_cs} C#)"
-            all_match = False
+        text, matched, compared = verdict(a, b)
+        all_match &= matched
+        checked += compared
         label = s.replace("Rounds[].Reports[].Interactions[]", "..Interactions[]")
-        rows.append(f"{label:<66} {sum(a.values()):>7,} {sum(b.values()):>7,}  "
-                    f"{verdict}")
-    return rows, all_match
+        rows.append(f"{label:<66} {sum(a.values()):>7,} {sum(b.values()):>7,}  {text}")
+    return rows, all_match, checked
 
 
-def compared_shapes(cs, ours, interesting) -> int:
-    """How many of the interesting shapes actually had something to compare.
+def parse_args(argv, doc, reference, lines):
+    """`(reference path, parquet)` from --reference and --ours."""
+    parser = argparse.ArgumentParser(description=doc.splitlines()[0])
+    parser.add_argument("--reference", default=reference,
+                        help=f"C# export events.ndjson, or its {lines} "
+                             "(default: %(default)s)")
+    parser.add_argument("--ours", default=DEFAULT_OURS,
+                        help="vrfkit fields.parquet of the same replay "
+                             "(default: %(default)s)")
+    args = parser.parse_args(argv)
+    return Path(os.path.expandvars(args.reference)), args.ours
 
-    `compare` reports every shape absent from both sides as a match, which per
-    shape is true and useless. Without this the whole run could compare nothing
-    -- a wrong parquet path, the wrong reference bundle, a CombatReport decoder
-    that stopped emitting -- and still print `ALL INTERESTING SHAPES MATCH`.
+
+def missing_input(reference, parquet) -> bool:
+    """Report the first input that is not a file (None skips one)."""
+    if reference is not None and not reference.is_file():
+        print(f"C# reference not found at {reference}; produce it with the "
+              f"commands in docs/USAGE.md section 6, or pass --reference",
+              file=sys.stderr)
+        return True
+    if parquet is not None and not Path(parquet).is_file():
+        print(f"vrfkit fields.parquet not found at {parquet}; export the "
+              f"same replay, or pass --ours", file=sys.stderr)
+        return True
+    return False
+
+
+def main(cs=None, ours=None, interesting=None, argv=None):
+    """Exit 0 only if every interesting shape matches and every one was there;
+    1 when the CombatReport decoder disagrees with the C# reference on values;
+    2 when an input is missing or a shape carried nothing on either side
+    (every shape is present in the reference replay).
     """
-    return sum(1 for s in interesting
-               if cs.get(s, collections.Counter()) or ours.get(s, collections.Counter()))
-
-
-def main(cs=None, ours=None, interesting=None):
-    """Exit 0 only if every interesting shape matches, and some shape existed.
-
-    A mismatch here means the CombatReport decoder disagrees with the C#
-    reference on values, not just on how they are addressed -- the one thing
-    this comparison exists to catch. Returning 0 regardless made it a report.
-    A run that compared nothing exits 2: it is neither agreement nor
-    disagreement, and reporting it as agreement is what this guards against.
-    """
-    if cs is None:
-        if not CS.is_file():
-            print(f"set VRFKIT_VALPLAY_DIR to the valplay checkout root; "
-                  f"events.ndjson not found at {CS}", file=sys.stderr)
+    if cs is None or ours is None:
+        reference, parquet = parse_args(argv, __doc__, DEFAULT_REFERENCE,
+                                        "CombatReport lines")
+        if missing_input(reference if cs is None else None,
+                         parquet if ours is None else None):
             return 2
-        cs = load_cs(CS)
-    if ours is None:
-        ours = load_ours()
+        cs = load_cs(reference) if cs is None else cs
+        ours = load_ours(parquet) if ours is None else ours
 
     shapes = interesting or INTERESTING
-    rows, all_match = compare(cs, ours, shapes)
-    checked = compared_shapes(cs, ours, shapes)
+    rows, all_match, checked = compare(cs, ours, shapes)
     print(f"{'shape':<66} {'C#':>7} {'ours':>7}  verdict")
     print("-" * 96)
-    for row in rows:
-        print(row)
+    print("\n".join(rows))
     print()
-    if not checked:
-        print(f"NOTHING COMPARED: none of the {len(shapes)} interesting shapes "
-              f"carries a value on either side. This is not agreement -- check "
-              f"the parquet path and the reference bundle.")
+    if not all_match:
+        print("SOME SHAPES DIFFER -- see above")
+        return 1
+    if checked < len(shapes):
+        print(f"INCOMPLETE: {len(shapes) - checked} of the {len(shapes)} "
+              f"interesting shapes carry no value on either side, so they were "
+              f"not compared. This is not agreement -- check the parquet path "
+              f"and the reference.")
         return 2
-    print(f"ALL {checked} INTERESTING SHAPES PRESENT MATCH "
-          f"(values to {FLOAT_PLACES} decimal places)" if all_match
-          else "SOME SHAPES DIFFER -- see above")
-    return 0 if all_match else 1
+    print(f"ALL {checked} INTERESTING SHAPES MATCH "
+          f"(values to {FLOAT_PLACES} decimal places)")
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(argv=sys.argv[1:]))

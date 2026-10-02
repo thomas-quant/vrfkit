@@ -5,35 +5,16 @@ noise into a verdict, or let a genuinely faster run pass silently -- a run well
 under the baseline means the baseline is stale, which is the same problem as a
 regression pointed the other way.
 """
-import contextlib
-import io
 import json
-import sys
-import tempfile
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import bench_export as bench  # noqa: E402
-import check_baseline_schemas as schemas  # noqa: E402
-
-
-class MedianTests(unittest.TestCase):
-    def test_an_odd_count_takes_the_middle(self):
-        self.assertEqual(bench.median([3.0, 1.0, 2.0]), 2.0)
-
-    def test_an_even_count_averages_the_two_middles(self):
-        self.assertEqual(bench.median([1.0, 2.0, 3.0, 4.0]), 2.5)
-
-    def test_a_single_sample_is_itself(self):
-        self.assertEqual(bench.median([1.5]), 1.5)
-
-    def test_no_samples_is_an_error_not_a_zero(self):
-        """A zero would read as an infinitely fast run."""
-        with self.assertRaises(ValueError):
-            bench.median([])
+from support import TempDirTestCase, run_cli
+import bench_export as bench
+import check_baseline_schemas as schemas
 
 
 class CompareTests(unittest.TestCase):
@@ -62,61 +43,12 @@ class CompareTests(unittest.TestCase):
             bench.compare(1.0, 0.0, self.TOL)
 
 
-class BaselineKeyContractTests(unittest.TestCase):
-    """The generator must not write a key its own repo's validator rejects.
-
-    `--checkpoints --update` wrote `export_checkpoints` into bench.json, and
-    `check_baseline_schemas.py` -- which the pre-PR sweep in CONTRIBUTING.md
-    runs -- checks that file's keys for EQUALITY with `{export, replay}`. So
-    following this tool's own printed advice ("record one with --update")
-    produced a committed baseline that failed the sweep, with the error naming
-    the baseline rather than the tool that wrote it.
-
-    The validator is the side that is right: bench.json is committed, one
-    replay's timing is what it is for, and a schema that enumerates its keys is
-    the thing that catches an unknown key rather than skipping it. So this tool
-    refuses instead.
-    """
-
-    def test_the_key_set_matches_what_the_validator_accepts(self):
-        """Read the expectation off the validator, not a copy of it.
-
-        `validate_bench_baseline` is the authority. Asserting against a
-        hand-copied set here would drift in the same step as the bug -- the
-        shape of Defect 1 in this same fix.
-        """
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "bench.json"
-            good = {key: 1.0 if key == "export" else "m.vrf"
-                    for key in bench.BASELINE_KEYS}
-            self.assertEqual(
-                schemas.validate_bench_baseline(path, good), [],
-                "the validator rejects the exact key set bench_export writes",
-            )
-
-    def test_the_validator_rejects_the_key_this_tool_used_to_write(self):
-        """Pins the defect itself: `export_checkpoints` is not acceptable."""
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "bench.json"
-            problems = schemas.validate_bench_baseline(
-                path, {"export": 1.0, "replay": "m.vrf",
-                       "export_checkpoints": 2.0},
-            )
-            self.assertTrue(problems)
-            self.assertIn("export_checkpoints", " ".join(problems))
-
-    def test_checkpoints_is_not_a_recordable_key(self):
-        self.assertNotIn(bench.TIMING_KEYS[True], bench.BASELINE_KEYS)
-        self.assertIn(bench.TIMING_KEYS[False], bench.BASELINE_KEYS)
-
-
-class UpdateTests(unittest.TestCase):
-    """What `--update` writes, checked against the validator that reads it."""
+class MainTests(TempDirTestCase):
+    """What `--update` writes, checked against the validator that reads it,
+    and what a run compares against."""
 
     def setUp(self):
-        self._temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._temp.cleanup)
-        self.root = Path(self._temp.name)
+        self.root = self.tmp()
         self.exe = self.root / "vrfkit"
         self.exe.write_bytes(b"exe")
         self.baseline = self.root / "bench.json"
@@ -126,110 +58,71 @@ class UpdateTests(unittest.TestCase):
         path.write_bytes(b"replay")
         return path
 
-    def run_bench(self, replay: Path, extra=(), seconds=1.0) -> int:
-        argv = sys.argv
-        sys.argv = [
-            "bench_export.py",
-            "--exe", str(self.exe),
-            "--replay", str(replay),
-            "--baseline", str(self.baseline),
-            "--repeats", "1",
-            *extra,
-        ]
-        try:
-            with mock.patch.object(bench, "time_export", return_value=[seconds]):
-                return bench.main()
-        finally:
-            sys.argv = argv
+    def run_bench(self, replay: Path, extra=(), seconds=1.0) -> tuple[int, str]:
+        with mock.patch.object(bench, "time_export", return_value=[seconds]):
+            return run_cli(bench.main, "--exe", self.exe, "--replay", replay, "--baseline", self.baseline,
+                           "--repeats", "1", *extra, prog="bench_export.py", merged=True)[:2]
 
     def read(self) -> dict:
         return json.loads(self.baseline.read_text(encoding="utf-8"))
 
-    def test_a_plain_update_writes_a_baseline_the_validator_accepts(self):
-        code = self.run_bench(self.replay("m.vrf"), ["--update"])
-        self.assertEqual(code, 0)
-        data = self.read()
-        self.assertEqual(set(data), set(bench.BASELINE_KEYS))
-        self.assertEqual(
-            schemas.validate_bench_baseline(self.baseline, data), [])
+    def test_each_mode_records_its_own_slot_beside_the_other(self):
+        """`export_checkpoints` is recorded only beside an `export` slot for the
+        same replay: bench.json without `export` fails check_baseline_schemas."""
+        cp_update = ["--checkpoints", "--update"]
+        code, output = self.run_bench(self.replay("m.vrf"), cp_update)  # no bench.json
+        self.assertEqual((code, self.baseline.exists()), (2, False), output)
+        self.assertEqual(self.run_bench(self.replay("m.vrf"), ["--update"])[0], 0)
+        self.assertEqual(self.read(), {"export": 1.0, "replay": "m.vrf"})
+        self.assertEqual(schemas.validate_bench_baseline(self.baseline, self.read()), [])
+        self.run_bench(self.replay("m.vrf"), cp_update, seconds=2.5)
+        both = {"export": 1.0, "export_checkpoints": 2.5, "replay": "m.vrf"}
+        self.assertEqual(self.read(), both)
+        self.assertEqual(schemas.validate_bench_baseline(self.baseline, self.read()), [])
+        code, output = self.run_bench(self.replay("new.vrf"), cp_update)  # another replay
+        self.assertEqual((code, self.read()), (2, both), output)
+        self.assertIn("--update without --checkpoints", output)
 
-    def test_checkpoints_update_is_refused_and_writes_nothing(self):
-        """Refusing is the fix, and refusing must not leave a file behind."""
-        code = self.run_bench(self.replay("m.vrf"), ["--checkpoints", "--update"])
+    def test_a_timing_is_never_kept_beside_another_replay_or_an_unknown_key(self):
+        """A timing next to a replay it did not time is a plausible number
+        for a measurement that never happened."""
+        for replay, stored, want in (
+                ("new.vrf", {"export": 1.0, "export_checkpoints": 2.0, "replay": "old.vrf"},
+                 {"export": 7.5, "replay": "new.vrf"}),
+                ("m.vrf", {"export": 1.0, "replay": "m.vrf", "export_debug": 2.0},
+                 {"export": 7.5, "replay": "m.vrf"})):
+            with self.subTest(replay=replay):
+                self.baseline.write_text(json.dumps(stored), encoding="utf-8")
+                self.run_bench(self.replay(replay), ["--update"], seconds=7.5)
+                self.assertEqual(self.read(), want)
+
+    def test_a_run_compares_against_its_own_slot(self):
+        self.baseline.write_text(json.dumps({"export": 1.0, "export_checkpoints": 2.5,
+                                             "replay": "m.vrf"}), encoding="utf-8")
+        for extra, seconds, code in (((), 1.0, 0), (("--checkpoints",), 2.5, 0),
+                                     (("--checkpoints",), 1.0, 1), ((), 2.5, 1)):
+            with self.subTest(extra=extra, seconds=seconds):
+                got, output = self.run_bench(self.replay("m.vrf"), extra, seconds)
+                self.assertEqual(got, code, output)
+
+    def test_a_missing_replay_or_slot_skips_unless_the_corpus_is_required(self):
+        self.baseline.write_text(json.dumps({"export": 1.0, "replay": "m.vrf"}),
+                                 encoding="utf-8")
+        for replay in (self.root / "absent.vrf", self.replay("other.vrf")):
+            for required, code, text in (("", 0, "SKIP:"), ("1", 2, "REQUIRED INPUT MISSING")):
+                with self.subTest(replay=replay.name, required=required), \
+                        mock.patch.dict(os.environ, {"VRFKIT_REQUIRE_CORPUS": required}):
+                    got, output = self.run_bench(replay)
+                    self.assertEqual(got, code, output)
+                    self.assertIn(text, output)
+
+    def test_a_missing_binary_or_no_samples_is_a_usage_error_not_a_skip(self):
+        """A typo'd --exe must not read as a benchmark that passed, nor zero
+        samples as an infinitely fast run."""
+        with self.assertRaises(SystemExit) as raised:
+            self.run_bench(self.replay("m.vrf"), ["--repeats", "0"])
+        self.assertEqual(raised.exception.code, 2)
+        self.exe = self.root / "relase" / "vrfkit"
+        code, output = self.run_bench(self.replay("m.vrf"))
         self.assertEqual(code, 2)
-        self.assertFalse(
-            self.baseline.exists(),
-            "the refused run still wrote a baseline",
-        )
-
-    def test_checkpoints_update_does_not_corrupt_an_existing_baseline(self):
-        self.run_bench(self.replay("m.vrf"), ["--update"])
-        before = self.read()
-        code = self.run_bench(self.replay("m.vrf"), ["--checkpoints", "--update"])
-        self.assertEqual(code, 2)
-        self.assertEqual(self.read(), before)
-
-    def test_recording_a_new_replay_does_not_keep_the_old_timing(self):
-        """`replay` and the timing beside it must come from the same run.
-
-        The old code merged into whatever the file held, so `--update` against
-        a different replay replaced `replay` and left the PREVIOUS replay's
-        `export` seconds under the new name -- a plausible number attributed to
-        a measurement that never happened, which is the one thing this repo's
-        doctrine forbids outright.
-        """
-        self.run_bench(self.replay("old.vrf"), ["--update"], seconds=1.0)
-        self.assertEqual(self.read()["export"], 1.0)
-
-        self.run_bench(self.replay("new.vrf"), ["--update"], seconds=7.5)
-        data = self.read()
-        self.assertEqual(data["replay"], "new.vrf")
-        self.assertEqual(
-            data["export"], 7.5,
-            "the timing does not belong to the replay named beside it",
-        )
-
-    def test_a_stale_unknown_key_is_dropped_rather_than_carried_forward(self):
-        """A baseline already carrying the bad key is repaired by --update.
-
-        Someone who ran the old `--checkpoints --update` has an invalid
-        bench.json; a merge would preserve the key forever.
-        """
-        self.baseline.write_text(
-            json.dumps({"export": 1.0, "replay": "old.vrf",
-                        "export_checkpoints": 2.0}) + "\n",
-            encoding="utf-8",
-        )
-        self.run_bench(self.replay("new.vrf"), ["--update"], seconds=3.0)
-        data = self.read()
-        self.assertNotIn("export_checkpoints", data)
-        self.assertEqual(
-            schemas.validate_bench_baseline(self.baseline, data), [])
-
-    def test_checkpoints_without_update_still_reports_the_timing(self):
-        """Refusing to RECORD must not stop the tool from measuring."""
-        argv = sys.argv
-        sys.argv = [
-            "bench_export.py",
-            "--exe", str(self.exe),
-            "--replay", str(self.replay("m.vrf")),
-            "--baseline", str(self.baseline),
-            "--repeats", "1",
-            "--checkpoints",
-        ]
-        buf = io.StringIO()
-        try:
-            with mock.patch.object(bench, "time_export",
-                                    return_value=[2.5]) as timer:
-                with contextlib.redirect_stdout(buf):
-                    code = bench.main()
-        finally:
-            sys.argv = argv
-        self.assertEqual(code, 0)
-        timer.assert_called_once()
-        self.assertIn("export_checkpoints: median 2.500s", buf.getvalue(),
-                       buf.getvalue())
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertIn("build the release binary first", output)

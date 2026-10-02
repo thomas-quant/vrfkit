@@ -1,45 +1,298 @@
 //! The overlay table's resolution order, and the hash index's agreement
 //! with the binary search it replaced.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::checksum_table::CHECKSUM_TYPES;
-use crate::decode::FieldType;
+use crate::decode::{DecodeError, FieldType, decode_field};
 use crate::overlay::{
-    OverlayEntry, OverlayHandleEntry, OverlayStats, OverlayTable, apply_overlay,
-    apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
+    OverlayEntry, OverlayHandleEntry, OverlayResult, OverlayStats, OverlayTable, apply_overlay,
+    apply_overlay_with_checksum, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
+use crate::scoped_types::SCOPED_TYPES;
+use crate::types::{RotatorQuantization, VectorQuantization};
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
+use vrf_testkit::{BitWrite, BitWriter};
 
-const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
+/// The table production resolves through: every entry and the explicit-handle
+/// fallback. One static, so its hash index is built once for the suite.
+pub(super) static TABLE: OverlayTable =
+    OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+
+/// The table entry for `(group, field)`, reported at the caller's line.
+#[track_caller]
+fn assert_typed(group: &str, field: &str, want: Option<FieldType>) {
+    assert_eq!(TABLE.lookup(group, field), want, "{group} {field}");
+}
+
+/// The checksum table's answer for `checksum`, reported at the caller's line.
+#[track_caller]
+fn assert_checksum(checksum: u32, want: Option<FieldType>) {
+    assert_eq!(lookup_checksum(checksum), want, "{checksum}");
+}
+
+/// What [`TABLE`] resolves `field` of `group` to, with no handle.
+pub(super) fn resolve(group: &str, field: &str, checksum: Option<u32>) -> Option<FieldType> {
+    resolve_field_type_with_checksum(&TABLE, group, Some(field), None, checksum)
+}
+
+/// A `/test` entry, for the synthetic tables below.
+const fn entry(field_name: &'static str, field_type: FieldType) -> OverlayEntry {
+    OverlayEntry {
+        group_path: "/test",
+        field_name,
+        field_type,
+    }
+}
+
+/// A `/test` explicit-handle entry.
+const fn at(handle: u32, field_name: &'static str) -> OverlayHandleEntry {
+    OverlayHandleEntry {
+        group_path: "/test",
+        handle,
+        field_name,
+    }
+}
+
+/// One field through `table` as the export path applies it, into fresh stats;
+/// no `handle` is the name-only [`apply_overlay`] path.
+fn run(
+    table: &OverlayTable,
+    group: &str,
+    name: Option<&str>,
+    handle: Option<u32>,
+    checksum: Option<u32>,
+    raw: Option<&[u8]>,
+    bits: u32,
+) -> (Option<OverlayResult>, OverlayStats) {
+    let mut stats = OverlayStats::default();
+    let state = group_hash_state(group);
+    let result = match handle {
+        None => apply_overlay(table, group, state, name, raw, bits, &mut stats),
+        Some(handle) => apply_overlay_with_checksum(
+            table, group, state, name, handle, checksum, raw, bits, &mut stats,
+        ),
+    };
+    (result, stats)
+}
+
+/// One field through [`TABLE`] with every key the export path has, counted
+/// into `stats`. The overlay declining the field fails the test.
+#[track_caller]
+pub(super) fn apply_scoped(
+    stats: &mut OverlayStats,
+    group: &str,
+    field: &str,
+    handle: u32,
+    checksum: u32,
+    raw: &[u8],
+    bits: u32,
+) -> OverlayResult {
+    let (applied, counts) = run(
+        &TABLE,
+        group,
+        Some(field),
+        Some(handle),
+        Some(checksum),
+        Some(raw),
+        bits,
+    );
+    stats.merge_counts_from(&counts);
+    let Some(applied) = applied else {
+        // In the body, not a closure, so #[track_caller] names the test's line.
+        panic!("{group} {field}: the overlay declined it");
+    };
+    applied
+}
+
+pub(super) const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
 const BOMB_PS: &str = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C";
-const SWIFT_GS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits\
+pub(super) const SWIFT_GS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits\
 /Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C";
 const SWIFT_PS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits\
 /Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
+const PLAY_CONTINUOUS: &str =
+    "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect";
+const STOP_CONTINUOUS: &str =
+    "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect";
+const FROM_CLIENT: &str =
+    "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient";
+const REPLAY_AT_LOCATION: &str =
+    "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation";
+const DAMAGE_BASE: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base";
+const DAMAGE_POINT: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point";
+const FORCE_APPLY: &str =
+    "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
+const FORCE_REMOVE: &str =
+    "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule";
+const HAWK: &str = "/Game/Characters/Guide/S0/Ability_E/\
+Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
+const SEEKER_NADE: &str = "/Game/Characters/AggroBot/S0/Ability_Q/\
+Pawn_Aggrobot_SeekerNade.Pawn_Aggrobot_SeekerNade_C";
+const CLAY_SATCHEL_ABILITY: &str =
+    "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C";
+const CLAY_SATCHEL: &str = "/Game/Characters/Clay/S0/Ability_Q/\
+Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C";
+const CLAY_BOOMBOT: &str =
+    "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C";
+const HEAL_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal";
+const DECAY_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay";
 
-/// A Bomb class is already canonical and must not be rewritten.
 #[test]
-fn canonical_group_leaves_a_bomb_class_alone() {
-    assert_eq!(canonical_group(BOMB_GS), BOMB_GS);
-    assert_eq!(canonical_group(BOMB_PS), BOMB_PS);
-    assert_eq!(
-        canonical_group("/Game/Whatever.Whatever_C"),
-        "/Game/Whatever.Whatever_C"
-    );
+fn scoped_bytes_decode_exactly_and_reject_a_wider_payload() {
+    let mut stats = OverlayStats::default();
+    let value = apply_scoped(&mut stats, BOMB_PS, "B", 39, 379198054, &[255], 8);
+    assert_eq!(value.value_i64, Some(255));
+    let rejected = apply_scoped(&mut stats, BOMB_PS, "B", 39, 379198054, &[255, 0, 0, 0], 32);
+    assert_eq!(rejected.value_i64, None);
+    assert_eq!(stats.decoded_ok, 1);
+    assert_eq!(stats.decoded_err, 1);
 }
 
+/// Every scoped identity resolves to its own type, and only at its exact
+/// identity. The table and its aliases resolve a name before `SCOPED_TYPES`, so
+/// an entry whose group has a same-name table entry is never read, silently;
+/// and without its checksum, with a neighbouring one, under another name or on
+/// a group nothing declares, an entry must add nothing an unrelated group would
+/// not get: a Blueprint renames, retypes or moves properties between builds.
+/// The lookup is a binary search on `(name, group, checksum)`, so the order is
+/// asserted too.
 #[test]
-fn canonical_group_maps_the_swiftplay_siblings() {
+fn no_scoped_identity_is_shadowed_by_the_table() {
+    for pair in SCOPED_TYPES.windows(2) {
+        let (a, b) = (
+            (pair[0].0, pair[0].1, pair[0].2),
+            (pair[1].0, pair[1].1, pair[1].2),
+        );
+        assert!(a < b, "SCOPED_TYPES not strictly sorted: {a:?} then {b:?}");
+    }
+    let elsewhere = |name, checksum| resolve("/Unobserved", name, checksum);
+    for &(name, group, checksum, field_type) in &SCOPED_TYPES {
+        let id = format!("{name} / {group} / {checksum}");
+        let own = resolve(group, name, Some(checksum));
+        assert_eq!(own, Some(field_type), "unreachable scoped identity {id}");
+        for (probe, other) in [
+            (name, None),
+            (name, Some(checksum ^ 1)),
+            ("Unobserved", Some(checksum)),
+        ] {
+            let got = resolve(group, probe, other);
+            assert_eq!(got, elsewhere(probe, other), "{id}: {probe} {other:?}");
+        }
+        let alone = elsewhere(name, Some(checksum));
+        assert_eq!(
+            alone,
+            elsewhere(name, None),
+            "{id}: typed by checksum alone"
+        );
+    }
+}
+
+/// Payloads an independent parser's tests recorded from replay 42e03082 (not
+/// in the local corpus), decoded through the scoped identities: exact widths,
+/// exact values.
+#[test]
+fn recorded_raze_payloads_decode_through_their_scoped_identities() {
+    let mut stats = OverlayStats::default();
+    let seed = apply_scoped(
+        &mut stats,
+        CLAY_SATCHEL_ABILITY,
+        "CosmeticRandomSeed",
+        56,
+        2_863_861_815,
+        &[0xE1, 0xE9, 0x4B, 0x40],
+        32,
+    );
+    assert_eq!(seed.value_i64, Some(1_078_716_897));
+    let offset = apply_scoped(
+        &mut stats,
+        CLAY_SATCHEL,
+        "LocationOffset",
+        5,
+        111_823_753,
+        &[0xD3, 0x20, 0x67, 0xB7, 0xA8, 0x97, 0x48, 0x00],
+        64,
+    );
+    assert_eq!(offset.value_str.as_deref(), Some("(-782.71,-1366.59,5.8)"));
+    let rotation = apply_scoped(
+        &mut stats,
+        CLAY_SATCHEL,
+        "RotationOffset",
+        7,
+        1_473_289_183,
+        &[0x01, 0x80, 0xEE, 0x27, 0xF7, 0xFF, 0x07],
+        51,
+    );
+    assert_eq!(
+        rotation.value_str.as_deref(),
+        Some("rot(90,284.03503,359.989)")
+    );
+    // `ModuleType` resolves through its table entry (EnumByte); the recorded
+    // 3-bit payload must still read 2.
+    let module_type = apply_scoped(
+        &mut stats,
+        FORCE_APPLY,
+        "ModuleType",
+        1,
+        3_263_282_135,
+        &[0x02],
+        3,
+    );
+    assert_eq!(module_type.value_i64, Some(2));
+    assert_eq!(stats.decoded_ok, 4);
+    // The recorded truncation case: one byte cannot carry the rotator its
+    // presence bits announce. Rejected and counted, not truncated.
+    let truncated = apply_scoped(
+        &mut stats,
+        CLAY_SATCHEL,
+        "RotationOffset",
+        7,
+        1_473_289_183,
+        &[0x01],
+        8,
+    );
+    assert_eq!(truncated.value_str, None);
+    assert_eq!(stats.decoded_err, 1);
+}
+
+/// The player state's `D` word, one of four `uint32` FGuid members scoped per
+/// group and checksum, end to end (scoped lookup, the `UInt32` read,
+/// `value_i64`), with a high-bit word staying positive: `Int32` would read the
+/// real value 0xe28c69d7 as -494114345, a plausible wrong number a width check
+/// alone accepts. Any other width is a decode error, not a truncated or padded
+/// value.
+#[test]
+fn player_state_guid_parts_decode_unsigned_and_exactly() {
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, raw: &[u8], bits| {
+        apply_scoped(&mut stats, group, "D", 210, 1_032_080_829, raw, bits).value_i64
+    };
+    for group in [BOMB_PS, SWIFT_PS] {
+        assert_eq!(
+            apply(group, &[0xd7, 0x69, 0x8c, 0xe2], 32),
+            Some(3_800_852_951)
+        );
+        assert_eq!(apply(group, &[0xd7, 0x69, 0x8c], 24), None, "{group}");
+        assert_eq!(
+            apply(group, &[0xd7, 0x69, 0x8c, 0xe2, 0x00], 40),
+            None,
+            "{group}"
+        );
+    }
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 4));
+}
+
+/// Only the two Swiftplay siblings map to their Bomb twins; a Bomb class and
+/// the suffixed forms stay as they are (see `GROUP_ALIASES`). Pinned so a later
+/// "make it consistent" edit has to argue with a test.
+#[test]
+fn canonical_group_maps_only_the_swiftplay_siblings() {
     assert_eq!(canonical_group(SWIFT_GS), BOMB_GS);
     assert_eq!(canonical_group(SWIFT_PS), BOMB_PS);
-}
-
-/// Suffixed forms are deliberately NOT aliased: the table holds no entries for
-/// the Bomb spellings of `_ClassNetCache` or `<Class>:<Function>`, so aliasing
-/// them would be an untested claim buying nothing. Pinned so a later "make it
-/// consistent" edit has to argue with a test.
-#[test]
-fn canonical_group_does_not_alias_the_suffixed_forms() {
+    for path in [BOMB_GS, BOMB_PS, "/Game/Whatever.Whatever_C"] {
+        assert_eq!(canonical_group(path), path);
+    }
     for suffix in ["_ClassNetCache", ":SomeFunction"] {
         let path = format!("{SWIFT_GS}{suffix}");
         assert_eq!(canonical_group(&path), path, "{suffix} should not alias");
@@ -51,10 +304,9 @@ fn canonical_group_does_not_alias_the_suffixed_forms() {
 /// exactly once, under the Bomb game state.
 #[test]
 fn a_swiftplay_field_resolves_through_its_bomb_twin() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     for field in ["ChosenCeremonyForRound", "RoundResults", "BombState"] {
-        let bomb = resolve_field_type(&table, BOMB_GS, Some(field), None);
-        let swift = resolve_field_type(&table, SWIFT_GS, Some(field), None);
+        let bomb = resolve_field_type(&TABLE, BOMB_GS, Some(field), None);
+        let swift = resolve_field_type(&TABLE, SWIFT_GS, Some(field), None);
         assert_eq!(swift, bomb, "{field} must resolve the same on both classes");
         assert!(bomb.is_some(), "{field} should be in the table at all");
     }
@@ -63,15 +315,14 @@ fn a_swiftplay_field_resolves_through_its_bomb_twin() {
 /// The alias must not invent types. A name in neither class stays unresolved.
 #[test]
 fn the_alias_does_not_invent_a_type() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     assert_eq!(
-        resolve_field_type(&table, SWIFT_GS, Some("NoSuchFieldAnywhere"), None),
+        resolve_field_type(&TABLE, SWIFT_GS, Some("NoSuchFieldAnywhere"), None),
         None,
     );
     // and an unaliased group gains nothing
     assert_eq!(
         resolve_field_type(
-            &table,
+            &TABLE,
             "/Game/Nope.Nope_C",
             Some("ChosenCeremonyForRound"),
             None
@@ -80,585 +331,545 @@ fn the_alias_does_not_invent_a_type() {
     );
 }
 
+/// Both tables' contract: strictly sorted by their key, which
+/// the reference binary searches need, and no key twice (a duplicate could
+/// resolve differently in the hash index and in the search).
 #[test]
 fn table_is_sorted() {
-    let table = &OVERLAY_TABLE;
-    for window in table.windows(2) {
-        let cmp = window[0]
-            .group_path
-            .cmp(window[1].group_path)
-            .then_with(|| window[0].field_name.cmp(window[1].field_name));
-        assert!(
-            cmp.is_lt() || cmp.is_eq(),
-            "table not sorted at {:?} vs {:?}",
-            (window[0].group_path, window[0].field_name),
-            (window[1].group_path, window[1].field_name)
-        );
-    }
-}
-
-#[test]
-fn lookup_finds_known_field() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let ft = table.lookup(
-        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
-        "CompetitiveTier",
-    );
-    assert_eq!(ft, Some(FieldType::Int32));
-}
-
-/// Live per-player economy is replicated under `MoneyManagementComponent` on
-/// BOTH 13.01 and 13.02, but no C# descriptor declares the group, so without
-/// these entries the fields ship untyped even though their raw bits decode to
-/// real credits -- `Money` is 800 across all actors at pistol-round start and
-/// runs 0..9000 in multiples of 50; `StartOfRoundMoney` is 800 active / 0
-/// inactive; `TotalMoneyGranted` is cumulative 800..34200. `StartOfRoundMoney`'s
-/// type is descriptor-corroborated (declared Int32 under OwnerExclusivePlayerInfo
-/// at OwnerExclusivePlayerInfoDescriptor.cs:93, a separate end-of-round path).
-/// See tools/apply_type_corrections.py ADDITIONS.
-#[test]
-fn money_management_economy_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let group = "/Script/ShooterGame.MoneyManagementComponent";
-    assert_eq!(table.lookup(group, "Money"), Some(FieldType::Int32));
+    let unsorted = OVERLAY_TABLE
+        .windows(2)
+        .position(|w| (w[0].group_path, w[0].field_name) >= (w[1].group_path, w[1].field_name));
     assert_eq!(
-        table.lookup(group, "StartOfRoundMoney"),
-        Some(FieldType::Int32)
+        unsorted, None,
+        "OVERLAY_TABLE not strictly sorted at that index"
     );
+    let unsorted = OVERLAY_HANDLE_TABLE
+        .windows(2)
+        .position(|w| (w[0].group_path, w[0].handle) >= (w[1].group_path, w[1].handle));
     assert_eq!(
-        table.lookup(group, "TotalMoneyGranted"),
-        Some(FieldType::Int32)
+        unsorted, None,
+        "OVERLAY_HANDLE_TABLE not strictly sorted at that index"
     );
 }
 
-/// Concussion state is replicated under a SHARED component path
-/// (`/Game/Characters/Components/Comp_Actor_Concussable.Comp_Actor_Concussable_C`)
-/// that is attached to every player character -- it is NOT agent-specific.
-/// On the 98605b1b Demos export the component appears on 9 distinct actors
-/// spanning eight agents (Phoenix, Breach, Smonk, Clay, Guide, Wushu, Terra,
-/// Pandemic, Deadeye) plus Guide's PossessableScout pawn, and the field
-/// names and bit widths are identical on every one of them.
-///
-/// The widths are self-checking across all 375 rows: ConcussStartTime and
-/// ConcussEndTime are 32 bits on all 39 rows each (Float), and ConcussLevel
-/// is 64 bits on all 297 rows (Double). Read as Float, the start/end times
-/// are game-seconds (389.5/392.0 ... 1916.7/1919.2 -- the ~2.5 s gap is the
-/// concussion duration); read as Double, ConcussLevel runs the 0..1
-/// intensity ramp. No descriptor declares this group, so the entries are
-/// ADDITIONS in the same wire-evidence class as `Money` and `Ping`.
+/// Pins no other guard holds. The rows are what `apply_type_corrections.py
+/// --check` does not verify: descriptor-declared types, the bare `EffectID`
+/// donor (its EXPECTED substring also matches the RPC groups), and receivers
+/// typed only by checksum, where a same-name entry (`None` here) would shadow
+/// the checksum. The checksums are learned types CI's one-group checksum guard
+/// cannot see; `None` where the donors disagree, so the checksum stays dropped.
 #[test]
-fn concussion_fields_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let group = "/Game/Characters/Components/Comp_Actor_Concussable\
-.Comp_Actor_Concussable_C";
-    assert_eq!(
-        table.lookup(group, "ConcussStartTime"),
-        Some(FieldType::Float)
-    );
-    assert_eq!(
-        table.lookup(group, "ConcussEndTime"),
-        Some(FieldType::Float)
-    );
-    assert_eq!(table.lookup(group, "ConcussLevel"), Some(FieldType::Double));
-}
-
-/// `Comp_AbilityFuelSystem` is a generic component attached to a handful of
-/// fuel-burning ability actors -- on 98605b1b that is Sage/Guide's heal
-/// (`Ability_Guide_4_Heal`) and Viper/Pandemic's smoke screen. It is
-/// per-ability, not per-player, but the component path is shared so a single
-/// entry covers every actor that carries it.
-///
-/// CurrentFuel is 64 bits on all 5702 rows and reads as Double a smooth
-/// 1.0 -> 0.0 drain (1.0, 0.9993, 0.9909, 0.9824, ...). IsFuelDraining is
-/// 1 bit on all 60 rows, raw 0x00/0x01 -- an unambiguous Bool. The task note
-/// guessed CurrentFuel as Float, but the wire is 64-bit; Double is what
-/// decodes. No descriptor declares this group, so these are ADDITIONS.
-#[test]
-fn ability_fuel_fields_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let group = "/Game/Characters/Components/Comp_AbilityFuelSystem\
-.Comp_AbilityFuelSystem_C";
-    assert_eq!(table.lookup(group, "CurrentFuel"), Some(FieldType::Double));
-    assert_eq!(table.lookup(group, "IsFuelDraining"), Some(FieldType::Bool));
-}
-
-/// `Ping` on BombPlayerState is a 16-bit LE unsigned integer that behaves
-/// like latency in milliseconds (min ~6, p50 ~15, p90 ~19, max ~473 on
-/// 02d4d478). No descriptor declares it, but the wire evidence is
-/// overwhelming and the encoding was settled
-/// (docs/archive/PROJECT_STATUS.md 18). Typed as `SerializedInt{65536}`
-/// (16 bits LSB-first) -- the same wire-evidence ADDITION class as `Money`.
-#[test]
-fn ping_latency_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
-            "Ping"
+fn pins_no_other_guard_holds() {
+    use FieldType::{Bool, Double, EnumByte, FName, Int32, Int64, ObjectNetGuid, VectorDouble};
+    const VIPER: &str = "/Game/Characters/Pandemic/S0/Ability_E/\
+GameObject_Pandemic_E_SmokeScreenManager.GameObject_Pandemic_E_SmokeScreenManager_C\
+:MulticastAddSmokeScreenPoint";
+    const CAGE_TRAP: &str = "/Game/Characters/Gumshoe/S0/Ability_4/\
+Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C";
+    const TRIP_WIRE: &str = "/Game/Characters/Gumshoe/S0/Ability_E/\
+GameObject_Gumshoe_E_TripWire.GameObject_Gumshoe_E_TripWire_C";
+    const SECOND_WIRE: &str = "/Game/Characters/Gumshoe/S0/Ability_E/\
+GameObject_Gumshoe_E_TripWire_SecondWire.GameObject_Gumshoe_E_TripWire_SecondWire_C";
+    const TRIP_ABILITY: &str = "/Game/Characters/Gumshoe/S0/Ability_E/\
+Ability_Gumshoe_E_TripWire.Ability_Gumshoe_E_TripWire_C";
+    for (group, field, want) in [
+        (BOMB_PS, "CompetitiveTier", Some(Int32)),
+        (
+            REPLAY_AT_LOCATION,
+            "Rotation",
+            Some(FieldType::RotationShort),
         ),
-        Some(FieldType::SerializedInt { max: 65536 })
-    );
-}
-
-#[test]
-fn equippable_used_is_an_object_net_guid() {
-    // The C# descriptor attaches a custom decoder
-    // (DamageParameters.cs:51 -> ValorantPayloadDecoders.Equippable), which
-    // extract_descriptors.py cannot see through, so it lands in table.rs as
-    // Raw. That decoder is exactly archive.ReadIntPacked(), i.e. our
-    // ObjectNetGuid. Leaving it Raw forces consumers to guess the encoding;
-    // the adapter guessed a fixed 16-bit LE integer and produced values that
-    // were never valid NetGUIDs. tools/apply_type_corrections.py restores
-    // the real type.
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    for group in [
-        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
-        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
+        (
+            "/Script/ShooterGame.AmmoComponent",
+            "AuthResourceAmount",
+            Some(Int32),
+        ),
+        (
+            DAMAGE_BASE,
+            "bDeathMontageEffectOverrideIsQueued",
+            Some(Bool),
+        ),
+        (
+            DAMAGE_POINT,
+            "bDeathMontageEffectOverrideIsQueued",
+            Some(Bool),
+        ),
+        (VIPER, "Translation", Some(VectorDouble)),
+        (VIPER, "Scale3D", Some(VectorDouble)),
+        // Cypher's pre-13.01 paths keep their entries.
+        (TRIP_WIRE, "Deployed", Some(Bool)),
+        (SECOND_WIRE, "Deployed", Some(Bool)),
+        (TRIP_ABILITY, "CreatedByCharacter", Some(ObjectNetGuid)),
+        (CAGE_TRAP, "CreatedByCharacter", Some(ObjectNetGuid)),
+        (
+            CAGE_TRAP,
+            "RelativeScale3D",
+            Some(FieldType::VectorNetQuantize { scale: 100 }),
+        ),
+        // Donors that must agree, or the checksum is dropped again.
+        (PLAY_CONTINUOUS, "AllianceFilter", Some(EnumByte)),
+        (
+            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayOneShotEffect",
+            "AllianceFilter",
+            Some(EnumByte),
+        ),
+        (
+            "/Script/ShooterGame.EffectManagerComponent",
+            "EffectID",
+            Some(Int64),
+        ),
+        (FROM_CLIENT, "AllianceFilter", None),
+        (FORCE_REMOVE, "ModuleType", None),
+        (STOP_CONTINUOUS, "EffectID", None),
+        // The component's own property, which the RPC parameter's entry must
+        // not reach.
+        (
+            "/Script/ShooterGame.ForceModuleManagerComponent",
+            "RespawnNumber",
+            None,
+        ),
+    ] {
+        assert_typed(group, field, want);
+    }
+    for (group, field, checksum, want) in [
+        (FROM_CLIENT, "AllianceFilter", 2270825073, EnumByte),
+        (FORCE_REMOVE, "ModuleType", 3263282135, EnumByte),
+        (STOP_CONTINUOUS, "EffectID", 2340855891, Int64),
     ] {
         assert_eq!(
-            table.lookup(group, "EquippableUsed"),
-            Some(FieldType::ObjectNetGuid),
-            "EquippableUsed must decode as a net GUID in {group}",
+            resolve(group, field, Some(checksum)),
+            Some(want),
+            "{group} {field}"
         );
     }
-}
-
-#[test]
-fn damage_geometry_fields_are_quantized_vectors() {
-    // Same trap as EquippableUsed: DamageParameters attaches
-    // ValorantPayloadDecoders.VectorNetQuantize* to these four, so
-    // extract_descriptors.py cannot see the type and they land as Raw --
-    // even though vrf-decode already implements the exact quantization.
-    // Scales are the C# call sites: VectorNetQuantize = 1,
-    // VectorNetQuantize100 = 100, VectorNetQuantizeNormal = unit vector.
-    const BASE: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base";
-    const POINT: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point";
-
-    // DamageOrigin is on the shared base; the impact geometry only exists
-    // for point damage, which is why the two groups differ here.
-    let expected = [
-        (
-            BASE,
-            "DamageOrigin",
-            FieldType::VectorNetQuantize { scale: 100 },
-        ),
-        (
-            POINT,
-            "DamageOrigin",
-            FieldType::VectorNetQuantize { scale: 100 },
-        ),
-        (
-            POINT,
-            "DamageImpactLocation",
-            FieldType::VectorNetQuantize { scale: 1 },
-        ),
-        (
-            POINT,
-            "DamageImpactBoneRelativeLocation",
-            FieldType::VectorNetQuantize { scale: 1 },
-        ),
-        (POINT, "DamageDirection", FieldType::VectorNetQuantizeNormal),
-        (
-            POINT,
-            "DamageImpactNormal",
-            FieldType::VectorNetQuantizeNormal,
-        ),
-    ];
-
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    for (group, field, want) in expected {
-        assert_eq!(table.lookup(group, field), Some(want), "{field} in {group}");
+    for (checksum, want) in [
+        // DeathMontageEffectOverride and its Context.
+        (1712763745, Some(ObjectNetGuid)),
+        (2397897524, Some(ObjectNetGuid)),
+        (255019476, Some(FName)),          // OriginalBuyerTeam
+        (677106858, Some(Double)),         // HawkFlash Banking
+        (2270825073, Some(EnumByte)),      // AllianceFilter
+        (1051633025, Some(ObjectNetGuid)), // the weapon RPCs' EffectManagerComponent
+        (3263282135, Some(EnumByte)),      // the force module's ModuleType
+        // AuthEquipSpeed and the inventory's two correction counters.
+        (3151779304, Some(EnumByte)),
+        (3198546915, Some(Int32)),
+        (1076231069, Some(Int32)),
+        // Cypher's trap fields other than `Deployed`.
+        (2035145197, None),
+        (1992268157, None),
+        (2749104612, None), // ReplicatedMovement: short and byte donors
+    ] {
+        assert_checksum(checksum, want);
     }
-}
-
-#[test]
-fn overlay_falls_back_to_the_b_prefixed_boolean_name() {
-    // The C# descriptors bind by handle and treat the name as a label, so
-    // one spells a boolean `bDeathMontageEffectOverrideIsQueued` while the
-    // replay declares it without the prefix. A name-keyed lookup misses,
-    // and the field stayed raw on 581 rows.
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "bIsQueued",
-        field_type: FieldType::Bool,
-    }];
-    let table = OverlayTable::new(entries);
-    let mut stats = OverlayStats::default();
-    let data = [0x01u8];
-    let result = apply_overlay(
-        &table,
-        "/test",
-        group_hash_state("/test"),
-        Some("IsQueued"),
-        Some(&data),
-        1,
-        &mut stats,
+    assert!(
+        !OVERLAY_TABLE
+            .iter()
+            .any(|e| e.field_type == FieldType::UInt64),
+        "no entry should still read an int64 property as UInt64"
     );
-    assert_eq!(
-        result.and_then(|r| r.value_bool),
-        Some(true),
-        "the unprefixed wire name must resolve to the b-prefixed entry",
-    );
-}
-
-#[test]
-fn overlay_falls_back_to_an_explicit_property_handle_when_the_wire_name_differs() {
-    const GROUP: &str =
-        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation";
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: GROUP,
-        field_name: "Location",
-        field_type: FieldType::VectorDouble,
-    }];
-    let handle_entries: &[OverlayHandleEntry] = &[OverlayHandleEntry {
-        group_path: GROUP,
-        handle: 26,
-        field_name: "Location",
-    }];
-    let table = OverlayTable::with_handles(entries, handle_entries);
-    let mut data = Vec::new();
-    data.extend_from_slice(&1.25f64.to_le_bytes());
-    data.extend_from_slice(&(-2.5f64).to_le_bytes());
-    data.extend_from_slice(&3.75f64.to_le_bytes());
-    let mut stats = OverlayStats::default();
-
-    let result = apply_overlay_with_handle(
-        &table,
-        GROUP,
-        group_hash_state(GROUP),
-        Some("248"),
-        26,
-        Some(&data),
-        192,
-        &mut stats,
-    );
-
-    assert_eq!(
-        result.and_then(|value| value.value_str),
-        Some("(1.25,-2.5,3.75)".to_owned()),
-    );
-    assert_eq!(stats.decoded_ok, 1);
-    assert_eq!(stats.not_in_table, 0);
 }
 
 #[test]
 fn overlay_uses_an_explicit_property_handle_when_the_wire_name_is_missing() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "Health",
-        field_type: FieldType::Int32,
-    }];
-    let handle_entries: &[OverlayHandleEntry] = &[OverlayHandleEntry {
-        group_path: "/test",
-        handle: 9,
-        field_name: "Health",
-    }];
-    let table = OverlayTable::with_handles(entries, handle_entries);
-    let mut stats = OverlayStats::default();
+    const ENTRIES: &[OverlayEntry] = &[entry("Health", FieldType::Int32)];
+    const HANDLES: &[OverlayHandleEntry] = &[at(9, "Health")];
+    let table = OverlayTable::with_handles(ENTRIES, HANDLES);
     let data = 100i32.to_le_bytes();
-
-    let result = apply_overlay_with_handle(
-        &table,
-        "/test",
-        group_hash_state("/test"),
-        None,
-        9,
-        Some(&data),
-        32,
-        &mut stats,
-    );
-
+    let (result, stats) = run(&table, "/test", None, Some(9), None, Some(&data), 32);
     assert_eq!(result.and_then(|value| value.value_i64), Some(100));
-    assert_eq!(stats.decoded_ok, 1);
-    assert_eq!(stats.no_field_name, 0);
-    assert_eq!(stats.not_in_table, 0);
+    let counts = (stats.decoded_ok, stats.no_field_name, stats.not_in_table);
+    assert_eq!(counts, (1, 0, 0));
 }
 
 #[test]
 fn overlay_keeps_direct_name_lookup_ahead_of_the_handle_fallback() {
-    let entries: &[OverlayEntry] = &[
-        OverlayEntry {
-            group_path: "/test",
-            field_name: "DeclaredName",
-            field_type: FieldType::Int32,
-        },
-        OverlayEntry {
-            group_path: "/test",
-            field_name: "RuntimeName",
-            field_type: FieldType::Bool,
-        },
+    const ENTRIES: &[OverlayEntry] = &[
+        entry("DeclaredName", FieldType::Int32),
+        entry("RuntimeName", FieldType::Bool),
     ];
-    let handle_entries: &[OverlayHandleEntry] = &[OverlayHandleEntry {
-        group_path: "/test",
-        handle: 9,
-        field_name: "DeclaredName",
-    }];
-    let table = OverlayTable::with_handles(entries, handle_entries);
-    let mut stats = OverlayStats::default();
-
-    let result = apply_overlay_with_handle(
+    const HANDLES: &[OverlayHandleEntry] = &[at(9, "DeclaredName")];
+    let table = OverlayTable::with_handles(ENTRIES, HANDLES);
+    let (result, stats) = run(
         &table,
         "/test",
-        group_hash_state("/test"),
         Some("RuntimeName"),
-        9,
+        Some(9),
+        None,
         Some(&[1]),
         1,
-        &mut stats,
     );
-
     assert_eq!(result.and_then(|value| value.value_bool), Some(true));
     assert_eq!(stats.decoded_ok, 1);
 }
 
-/// A replay that declares a REAL, different name at a handle must not be typed
-/// through the descriptor's stale mapping for that handle.
-///
-/// This is how a game patch moves a property: the descriptor still maps handle
-/// 7 to `OldField: Int32`, the replay now declares `NewField` there and sends a
-/// `Float`. Both name probes miss, and the handle fallback used to reuse the
-/// stale entry -- so `1.0f32` came out as `value_i64 = 1065353216`, consuming
-/// all 32 bits, with `decoded_ok` incremented and `Decode errors` still zero.
-/// A confident wrong number, which is the one outcome this crate refuses.
+/// A REAL, different name declared at a handle is not typed through the
+/// descriptor's stale mapping: a patch moving `OldField: Int32` to `NewField`
+/// (a `Float`) would read `1.0f32` as 1065353216 with `Decode errors` at zero
+/// (docs/OVERLAY_RESOLUTION.md "Fail-closed on a handle conflict").
 #[test]
 fn a_conflicting_declared_name_refuses_the_stale_handle_mapping() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "OldField",
-        field_type: FieldType::Int32,
-    }];
-    let handle_entries: &[OverlayHandleEntry] = &[OverlayHandleEntry {
-        group_path: "/test",
-        handle: 7,
-        field_name: "OldField",
-    }];
-    let table = OverlayTable::with_handles(entries, handle_entries);
-    let mut stats = OverlayStats::default();
+    const ENTRIES: &[OverlayEntry] = &[entry("OldField", FieldType::Int32)];
+    const HANDLES: &[OverlayHandleEntry] = &[at(7, "OldField")];
+    let table = OverlayTable::with_handles(ENTRIES, HANDLES);
     let data = 1.0f32.to_le_bytes();
-
-    let result = apply_overlay_with_handle(
+    let (result, stats) = run(
         &table,
         "/test",
-        group_hash_state("/test"),
         Some("NewField"),
-        7,
+        Some(7),
+        None,
         Some(&data),
         32,
-        &mut stats,
     );
-
     assert!(result.is_none(), "must not type a conflicting declaration");
     assert_eq!(stats.decoded_ok, 0, "1065353216 must not be reported");
     assert_eq!(stats.handle_conflicts_refused, 1, "{stats:?}");
     assert_eq!(stats.not_in_table, 1, "the field is untyped, not failed");
 }
 
-/// The refusal must NOT fire on a bare decimal wire name. `"248"` is the
-/// decimal spelling of a hardcoded Unreal FName index the replay never resolves
-/// to text -- it declares nothing, so it cannot conflict, and the handle
-/// fallback is the only thing that can type such a field.
-///
-/// A guard for the case pinned by
-/// `overlay_falls_back_to_an_explicit_property_handle_when_the_wire_name_differs`.
+/// The refusal must NOT fire on a bare decimal wire name: `"248"`, an
+/// unresolved hardcoded FName index, declares nothing, and the handle fallback
+/// is the only thing that can type such a field.
 #[test]
 fn a_bare_fname_index_still_reaches_the_handle_fallback() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "Health",
-        field_type: FieldType::Int32,
-    }];
-    let handle_entries: &[OverlayHandleEntry] = &[OverlayHandleEntry {
-        group_path: "/test",
-        handle: 7,
-        field_name: "Health",
-    }];
-    let table = OverlayTable::with_handles(entries, handle_entries);
+    const ENTRIES: &[OverlayEntry] = &[entry("Health", FieldType::Int32)];
+    const HANDLES: &[OverlayHandleEntry] = &[at(7, "Health")];
+    let table = OverlayTable::with_handles(ENTRIES, HANDLES);
     let data = 100i32.to_le_bytes();
-
     for wire_name in ["248", "0"] {
-        let mut stats = OverlayStats::default();
-        let result = apply_overlay_with_handle(
+        let (result, stats) = run(
             &table,
             "/test",
-            group_hash_state("/test"),
             Some(wire_name),
-            7,
+            Some(7),
+            None,
             Some(&data),
             32,
-            &mut stats,
         );
-        assert_eq!(
-            result.and_then(|v| v.value_i64),
-            Some(100),
-            "wire name {wire_name}"
-        );
+        let value = result.and_then(|v| v.value_i64);
+        assert_eq!(value, Some(100), "wire name {wire_name}");
         assert_eq!(stats.handle_conflicts_refused, 0, "wire name {wire_name}");
     }
 }
 
-/// The `b`-prefix probe resolves before the handle fallback is consulted, so a
-/// `bFoo`/`Foo` spelling difference never reaches the new refusal. A guard:
-/// this passed before the change and must keep passing.
+/// The `b`-prefix probe resolves before the handle fallback, so a `bFoo`/`Foo`
+/// spelling difference never reaches the refusal.
 #[test]
 fn a_b_prefixed_spelling_difference_is_not_treated_as_a_conflict() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "bIsQueued",
-        field_type: FieldType::Bool,
-    }];
-    let handle_entries: &[OverlayHandleEntry] = &[OverlayHandleEntry {
-        group_path: "/test",
-        handle: 7,
-        field_name: "bIsQueued",
-    }];
-    let table = OverlayTable::with_handles(entries, handle_entries);
-    let mut stats = OverlayStats::default();
-
-    let result = apply_overlay_with_handle(
+    const ENTRIES: &[OverlayEntry] = &[entry("bIsQueued", FieldType::Bool)];
+    const HANDLES: &[OverlayHandleEntry] = &[at(7, "bIsQueued")];
+    let table = OverlayTable::with_handles(ENTRIES, HANDLES);
+    let (result, stats) = run(
         &table,
         "/test",
-        group_hash_state("/test"),
         Some("IsQueued"),
-        7,
+        Some(7),
+        None,
         Some(&[1]),
         1,
-        &mut stats,
     );
-
     assert_eq!(result.and_then(|v| v.value_bool), Some(true));
     assert_eq!(stats.handle_conflicts_refused, 0, "{stats:?}");
 }
 
 #[test]
-fn lookup_returns_none_for_unknown() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let ft = table.lookup("nonexistent", "field");
-    assert_eq!(ft, None);
-}
-
-#[test]
-fn apply_overlay_decodes_int32() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "Health",
-        field_type: FieldType::Int32,
-    }];
-    let table = OverlayTable::new(entries);
-    let mut stats = OverlayStats::default();
-    let data = 100i32.to_le_bytes();
-    let result = apply_overlay(
-        &table,
-        "/test",
-        group_hash_state("/test"),
-        Some("Health"),
-        Some(&data),
-        32,
-        &mut stats,
-    );
-    assert!(result.is_some());
-    let r = result.unwrap();
-    assert_eq!(r.value_i64, Some(100));
-    assert_eq!(stats.decoded_ok, 1);
-}
-
-#[test]
 fn apply_overlay_returns_none_for_no_field_name() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "Health",
-        field_type: FieldType::Int32,
-    }];
-    let table = OverlayTable::new(entries);
-    let mut stats = OverlayStats::default();
-    let result = apply_overlay(
-        &table,
-        "/test",
-        group_hash_state("/test"),
-        None,
-        Some(&[0; 4]),
-        32,
-        &mut stats,
-    );
+    const ENTRIES: &[OverlayEntry] = &[entry("Health", FieldType::Int32)];
+    let table = OverlayTable::new(ENTRIES);
+    let (result, stats) = run(&table, "/test", None, None, None, Some(&[0; 4]), 32);
     assert!(result.is_none());
     assert_eq!(stats.no_field_name, 1);
 }
 
+/// A zero-bit payload is the value 0 for `EnumRemainingBits` (see
+/// `scalar::decode_enum_remaining_bits`) and a `ZeroBits` failure for every
+/// other type; a field with no payload takes the same arm, and is `ZeroBits`
+/// for every type once it claims a nonzero width.
 #[test]
-fn apply_overlay_graceful_on_decode_failure() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "Broken",
-        field_type: FieldType::FString, // needs more than 1 bit
-    }];
-    let table = OverlayTable::new(entries);
-    let mut stats = OverlayStats::default();
-    let data = [0x01u8]; // only 1 bit -- FString needs at least 32 bits for length
-    let result = apply_overlay(
-        &table,
-        "/test",
-        group_hash_state("/test"),
-        Some("Broken"),
-        Some(&data),
-        1,
-        &mut stats,
-    );
-    // Should return Some but with all values None (decode failure)
-    assert!(result.is_some());
-    let r = result.unwrap();
-    assert_eq!(r.value_i64, None);
-    assert_eq!(r.value_str, None);
-    assert_eq!(stats.decoded_err, 1);
-}
-
-/// Byte-sized properties nested inside replicated arrays are written with
-/// only their significant bits, so the decoder must take its width from the
-/// payload rather than assuming 8.
-///
-/// This is not hypothetical: `CombatReport` `AssistType` arrives as a 5-bit
-/// payload, and a fixed 8-bit read left all 364 of its rows in a real replay
-/// untyped while every neighbouring field decoded fine.
-#[test]
-fn byte_takes_its_width_from_the_payload() {
-    use crate::decode::{DecodedValue, FieldType, decode_field};
-
-    // 5 significant bits holding 9 (0b01001), padded to one byte.
-    let data = [0b0000_1001u8];
-    for width in [1u32, 3, 5, 8] {
-        let v = decode_field(FieldType::EnumByte, &data, width)
-            .unwrap_or_else(|e| panic!("width {width} should decode: {e:?}"));
-        let mask = ((1u16 << width) - 1) as u8;
-        let expected = i64::from(0b0000_1001u8 & mask);
-        assert_eq!(v, DecodedValue::I64(expected), "width {width}");
+fn a_zero_bit_payload_is_zero_only_for_enum_remaining_bits() {
+    const ENTRIES: &[OverlayEntry] = &[
+        entry("Empty", FieldType::Int32),
+        entry("Zero", FieldType::EnumRemainingBits),
+    ];
+    let table = OverlayTable::new(ENTRIES);
+    let empty: &[u8] = &[];
+    for (field, raw_bits, bit_count, want) in [
+        ("Zero", Some(empty), 0, Some(0)),
+        ("Zero", None, 0, Some(0)),
+        ("Zero", None, 8, None),
+        ("Empty", Some(empty), 0, None),
+        ("Empty", None, 8, None),
+    ] {
+        let case = format!("{field} {raw_bits:?} {bit_count}");
+        let (r, stats) = run(
+            &table,
+            "/test",
+            Some(field),
+            None,
+            None,
+            raw_bits,
+            bit_count,
+        );
+        let columns = r.expect("a typed field is attempted").into_columns();
+        assert_eq!(columns, (want, None, None, None), "{case}");
+        let kinds: Vec<String> = stats
+            .error_report
+            .top_n(usize::MAX)
+            .iter()
+            .map(|row| row.error_kind.to_string())
+            .collect();
+        if want.is_some() {
+            assert_eq!((stats.decoded_ok, stats.decoded_err), (1, 0), "{case}");
+            assert!(kinds.is_empty(), "{case}: {kinds:?}");
+        } else {
+            assert_eq!((stats.decoded_ok, stats.decoded_err), (0, 1), "{case}");
+            assert_eq!(kinds, ["ZeroBits"], "{case}");
+        }
     }
 }
 
-/// A payload wider than a byte is not a byte field. Truncating to the low 8
-/// bits would emit a plausible wrong number, so it is reported instead.
+/// The error report's `kind` is the only column that says WHY a field failed,
+/// so each failure must print the label of its own cause, asserted on the
+/// printed label an operator reads. Every `DecodeError` variant the overlay can
+/// meet has a case, checked by the test itself: `decode_field` names the
+/// variant each fixture fails with, and the variants reached must equal the
+/// list the wildcard-free match below is generated from.
 #[test]
-fn byte_rejects_payloads_wider_than_eight_bits() {
-    use crate::decode::{FieldType, decode_field};
+fn the_error_report_names_the_cause_of_each_failure() {
+    /// A field payload: its bytes and its bit count.
+    type Payload = (Vec<u8>, u32);
+    // Generated from one list, so the list and the match cannot disagree.
+    macro_rules! variants {
+        ($($variant:ident),+ $(,)?) => {
+            (
+                [$(stringify!($variant)),+],
+                |err: &DecodeError| -> &'static str {
+                    match err {
+                        $(DecodeError::$variant { .. } => stringify!($variant),)+
+                    }
+                },
+            )
+        };
+    }
+    let (every_variant, variant_of) = variants!(
+        BitIo,
+        NotFullyConsumed,
+        RawOrSkip,
+        UnsignedOverflow,
+        NonFiniteComponent,
+        InvalidQuantizationScale,
+        InvalidFNameNumber,
+        UnsupportedTextHistory,
+        ByteArrayLengthCapExceeded,
+        FTextTree,
+    );
+    static ENTRIES: [OverlayEntry; 16] = [
+        entry("BadTextBool", FieldType::FTextTree),
+        entry("BadUtf8", FieldType::FString),
+        entry("ByteArrayOverCap", FieldType::ByteArray { max_bytes: 1 }),
+        entry(
+            "ByteArrayOverlongPrefix",
+            FieldType::ByteArray { max_bytes: 8 },
+        ),
+        entry("EmptyFText", FieldType::FText),
+        entry("LongInt", FieldType::Int32),
+        entry("LongTextString", FieldType::FTextTree),
+        entry("NaNVector", FieldType::VectorNetQuantize { scale: 100 }),
+        entry("NegativeFNameNumber", FieldType::FName),
+        entry("OverlongPrefix", FieldType::FString),
+        entry("RunawayIntPacked", FieldType::ObjectNetGuid),
+        entry("ShortInt", FieldType::Int32),
+        entry("U64PastI64", FieldType::UInt64),
+        entry("UnseenTextHistory", FieldType::FTextTree),
+        entry(
+            "ZeroQuantizeScale",
+            FieldType::VectorNetQuantize { scale: 0 },
+        ),
+        entry("ZeroSerializedIntMax", FieldType::SerializedInt { max: 0 }),
+    ];
+    // An inline FName (hardcoded bit clear), "Source", instance number -1.
+    let fname = BitWriter::new()
+        .bit(false)
+        .fstring("Source")
+        .i32(-1)
+        .finish();
+    // A 7-bit SerializedInt(128) header of 0 -- no component bits, no extra
+    // info -- takes the raw-f32 fallback, and the first word is a NaN.
+    let nan_vector = BitWriter::new()
+        .bits(0, 7)
+        .u32(0x7fc0_0000)
+        .f32(1.0)
+        .f32(2.0)
+        .finish();
+    let bytes = |data: &[u8]| (data.to_vec(), data.len() as u32 * 8);
+    // (field, payload, variant decode_field fails with, printed label)
+    let cases: Vec<(&str, Payload, &str, &str)> = vec![
+        // The payload is shorter than the type: a real EOF.
+        ("ShortInt", bytes(&[0x01, 0x00]), "BitIo", "EOF"),
+        // The type finished with bits to spare.
+        (
+            "LongInt",
+            bytes(&[0x01, 0, 0, 0, 0]),
+            "NotFullyConsumed",
+            "Residual",
+        ),
+        // Length 3, then three bytes that are not UTF-8: consumed exactly,
+        // nothing ran out.
+        (
+            "BadUtf8",
+            bytes(&[0x03, 0, 0, 0, 0xff, 0xfe, 0x00]),
+            "BitIo",
+            "Malformed",
+        ),
+        // A length prefix of 100 with one byte behind it.
+        (
+            "OverlongPrefix",
+            bytes(&[0x64, 0, 0, 0, 0x41]),
+            "BitIo",
+            "Malformed",
+        ),
+        // The same cause in a byte array: a count of 4, within the cap of 8,
+        // with one byte behind it.
+        (
+            "ByteArrayOverlongPrefix",
+            bytes(&[0x08, 0xaa]),
+            "BitIo",
+            "Malformed",
+        ),
+        // Three declared where the table allows one, and no byte behind
+        // them: the cap is checked first, so the table constant is what the
+        // report names.
+        (
+            "ByteArrayOverCap",
+            bytes(&[0x06]),
+            "ByteArrayLengthCapExceeded",
+            "Rejected",
+        ),
+        // Five IntPacked bytes that never clear the continuation bit.
+        ("RunawayIntPacked", bytes(&[0xff; 5]), "BitIo", "Malformed"),
+        // The cap's boundary: two declared where the table allows one.
+        (
+            "ByteArrayOverCap",
+            bytes(&[0x04, 0xaa, 0xbb]),
+            "ByteArrayLengthCapExceeded",
+            "Rejected",
+        ),
+        // Reads fine; the value has no i64 spelling.
+        (
+            "U64PastI64",
+            bytes(&[0, 0, 0, 0, 0, 0, 0, 0x80]),
+            "UnsignedOverflow",
+            "Rejected",
+        ),
+        // A table parameter no value can be read against. No bit is wrong.
+        ("ZeroSerializedIntMax", bytes(&[0x00]), "BitIo", "Rejected"),
+        // The same for a quantized vector's divisor.
+        (
+            "ZeroQuantizeScale",
+            bytes(&[0x00]),
+            "InvalidQuantizationScale",
+            "Rejected",
+        ),
+        // A valid empty tree: no string-table key to return.
+        (
+            "EmptyFText",
+            bytes(&[0, 0, 0, 0, 0xff, 0, 0, 0, 0]),
+            "UnsupportedTextHistory",
+            "Rejected",
+        ),
+        // The full-tree reader's own causes, sorted the same way: a history
+        // it has never seen laid out is refused ...
+        (
+            "UnseenTextHistory",
+            bytes(&[0, 0, 0, 0, 5]),
+            "FTextTree",
+            "Rejected",
+        ),
+        // ... and an archive bool that is neither 0 nor 1 breaks the framing.
+        (
+            "BadTextBool",
+            bytes(&[1, 0, 0, 0, 4, 3, 0, 0, 0, 0, 0, 0, 0xf0, 0x3f, 2, 0, 0, 0]),
+            "FTextTree",
+            "Malformed",
+        ),
+        // A string-table name of 1,000 bytes in a 201-bit window, as for
+        // `OverlongPrefix`.
+        (
+            "LongTextString",
+            BitWriter::new()
+                .u32(0)
+                .u8(11)
+                .bit(false)
+                .i32(1000)
+                .repeat(false, 128)
+                .finish(),
+            "FTextTree",
+            "Malformed",
+        ),
+        // Read in full; the value has no JSON spelling.
+        ("NaNVector", nan_vector, "NonFiniteComponent", "Rejected"),
+        // Read in full; a negative instance number has no display spelling.
+        (
+            "NegativeFNameNumber",
+            fname,
+            "InvalidFNameNumber",
+            "Rejected",
+        ),
+    ];
+    let table = OverlayTable::new(&ENTRIES);
+    let mut printed = Vec::new();
+    for (field, (data, bits), variant, _) in &cases {
+        let field_type = ENTRIES
+            .iter()
+            .find(|entry| entry.field_name == *field)
+            .map(|entry| entry.field_type)
+            .unwrap_or_else(|| panic!("{field}: no entry"));
+        let err = decode_field(field_type, data, *bits)
+            .expect_err(&format!("{field}: the fixture must not decode"));
+        assert_eq!(variant_of(&err), *variant, "{field}: {err:?}");
 
-    let data = [0xFFu8, 0xFF];
-    // 12 bits declared: the nominal 8-bit read leaves 4 unconsumed, which
-    // decode_field turns into an error rather than a truncated value.
-    assert!(decode_field(FieldType::Byte, &data, 12).is_err());
+        let (result, stats) = run(&table, "/test", Some(field), None, None, Some(data), *bits);
+        let columns = result.map(OverlayResult::into_columns);
+        assert_eq!(
+            columns,
+            Some((None, None, None, None)),
+            "{field}: must fail to decode"
+        );
+        assert_eq!(stats.decoded_err, 1, "{field}");
+        let rows = stats.error_report.top_n(2);
+        assert_eq!(rows.len(), 1, "{field}: one bucket");
+        printed.push((*field, rows[0].error_kind.to_string()));
+    }
+    let wanted: Vec<(&str, String)> = cases
+        .iter()
+        .map(|(field, _, _, want)| (*field, (*want).to_owned()))
+        .collect();
+    assert_eq!(printed, wanted);
+
+    // `Raw` and `Skip` return before `decode_field` is reached, so its
+    // `RawOrSkip` arm cannot fire from the overlay and has no case.
+    let reached: BTreeSet<&str> = cases.iter().map(|(_, _, variant, _)| *variant).collect();
+    let expected: BTreeSet<&str> = every_variant
+        .into_iter()
+        .filter(|variant| *variant != "RawOrSkip")
+        .collect();
+    assert_eq!(
+        reached, expected,
+        "every DecodeError the overlay can meet needs a case"
+    );
 }
 
 /// The hash index must answer exactly what the binary search answered, on
-/// every key in the generated table and on keys that are not in it.
-///
-/// A wrong overlay type moves NO summary counter -- the row still emits and
-/// the block still walks -- so nothing but an equivalence check like this
-/// one would catch an index that quietly disagrees on a handful of entries.
+/// every key in the table and on keys that are not in it. A wrong
+/// overlay type moves NO counter, so only this equivalence would catch an
+/// index that quietly disagrees on a handful of entries.
 #[test]
 fn the_hash_index_answers_exactly_what_the_binary_search_answered() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-
     for entry in &OVERLAY_TABLE {
-        // Every real key.
         assert_eq!(
-            table.lookup(entry.group_path, entry.field_name),
-            table.lookup_by_binary_search(entry.group_path, entry.field_name),
+            TABLE.lookup(entry.group_path, entry.field_name),
+            TABLE.lookup_by_binary_search(entry.group_path, entry.field_name),
             "direct lookup disagrees for {}::{}",
             entry.group_path,
             entry.field_name,
@@ -673,8 +884,8 @@ fn the_hash_index_answers_exactly_what_the_binary_search_answered() {
                 .unwrap_or(entry.field_name),
         ] {
             assert_eq!(
-                table.lookup_b_prefixed(entry.group_path, probe),
-                table.lookup_b_prefixed_by_binary_search(entry.group_path, probe),
+                TABLE.lookup_b_prefixed(entry.group_path, probe),
+                TABLE.lookup_b_prefixed_by_binary_search(entry.group_path, probe),
                 "b-prefixed lookup disagrees for {}::b{}",
                 entry.group_path,
                 probe,
@@ -689,439 +900,299 @@ fn the_hash_index_answers_exactly_what_the_binary_search_answered() {
             (entry.group_path, ""),
         ] {
             assert_eq!(
-                table.lookup(group, name),
-                table.lookup_by_binary_search(group, name),
+                TABLE.lookup(group, name),
+                TABLE.lookup_by_binary_search(group, name),
                 "miss disagrees for {group}::{name}",
             );
             assert_eq!(
-                table.lookup_b_prefixed(group, name),
-                table.lookup_b_prefixed_by_binary_search(group, name),
+                TABLE.lookup_b_prefixed(group, name),
+                TABLE.lookup_b_prefixed_by_binary_search(group, name),
                 "b-prefixed miss disagrees for {group}::b{name}",
             );
         }
     }
 }
 
-/// Same equivalence for the 84-entry handle fallback table, including
-/// handles that are not declared for a group that is.
+/// Same equivalence for the handle fallback table, including handles that are
+/// not declared for a group that is.
 #[test]
 fn the_handle_index_answers_exactly_what_the_binary_search_answered() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-
     for entry in &OVERLAY_HANDLE_TABLE {
         for handle in [entry.handle, entry.handle.wrapping_add(1000), u32::MAX, 0] {
             assert_eq!(
-                table.lookup_handle(entry.group_path, handle),
-                table.lookup_handle_by_binary_search(entry.group_path, handle),
+                TABLE.lookup_handle(entry.group_path, handle),
+                TABLE.lookup_handle_by_binary_search(entry.group_path, handle),
                 "handle lookup disagrees for {}::{handle}",
                 entry.group_path,
             );
         }
         assert_eq!(
-            table.lookup_handle("/Game/NoSuchGroupPathAnywhere", entry.handle),
+            TABLE.lookup_handle("/Game/NoSuchGroupPathAnywhere", entry.handle),
             None,
         );
     }
 }
 
-/// `BlindManagerComponent.LongestActiveBlindDuration` is a 32-bit float giving
-/// the longest active flash-blind duration in seconds (0.0..2.1 on observed
-/// data). Common to all player characters. Typed as Float.
+/// The four engine object references resolve by name once the table has
+/// missed on the group and its alias (see `ENGINE_OBJECT_REFS`).
 #[test]
-fn blind_duration_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.BlindManagerComponent",
-            "LongestActiveBlindDuration"
-        ),
-        Some(FieldType::Float)
-    );
-}
-
-/// `MulticastNotifyHeal` and `MulticastNotifyOverhealDecay` are RPC parameter
-/// blocks whose group paths the wire registers as
-/// `/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal` and
-/// `:MulticastNotifyOverhealDecay`. The DamageableComponent C# descriptor
-/// (DamageableComponentClassNetCacheDescriptor.cs) only declares the two
-/// `MulticastNotifyDamage_*` handles, so the heal/decay parameter groups ship
-/// untyped even though their scalars decode cleanly. The RPC sink resolves
-/// these under their colon-group path with the bare parameter name, the same
-/// shape as the EquippableUsed correction.
-///
-/// On the 98605b1b Demos export `HealTaken` is 32 bits on all 1252 rows and
-/// reads as Float a 0.05..400 heal magnitude -- the 0x3f800000 bit pattern
-/// (1.0f, the IEEE-754 identity) recurs, which is a float signature no int
-/// read produces. `DecayApplied` is 32 bits on all 699 rows and reads as Float
-/// a 0.07..50 overheal-decay amount, clustering tightly around 0.195 (a
-/// per-tick decay). No descriptor declares either field, so these are
-/// ADDITIONS in the same wire-evidence class as `Money` and `Ping`.
-#[test]
-fn heal_and_overheal_decay_scalars_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
-            "HealTaken"
-        ),
-        Some(FieldType::Float)
-    );
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
-            "DecayApplied"
-        ),
-        Some(FieldType::Float)
-    );
-}
-
-/// `PlayerScoreComponent.Score` is the per-player combat score. No C#
-/// descriptor declares the group. On 98605b1b it is 32 bits on all 430 rows.
-/// Read as Float the bytes are denormal slop (~1e-44) -- the float read
-/// rejects itself -- but read as Int32 the values run 21..5833 with 415
-/// distinct values, exactly the shape of a cumulative combat score across a
-/// full match. Typed as Int32. ADDITION, same wire-evidence class as `Money`.
-#[test]
-fn player_score_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup("/Script/ShooterGame.PlayerScoreComponent", "Score"),
-        Some(FieldType::Int32)
-    );
-}
-
-/// The replay scoreboard publishes authoritative cumulative K/D/A counters
-/// through this component. Each value is a 32-bit little-endian integer; if
-/// these remain Raw, downstream consumers are forced to reconstruct the
-/// scoreboard from lossy kill RPCs instead of using the server totals.
-#[test]
-fn basic_combat_stats_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let group = "/Script/ShooterGame.BasicCombatStatsComponent";
-    for field in ["AggregateKills", "AggregateDeaths", "AggregateAssists"] {
-        assert_eq!(
-            table.lookup(group, field),
-            Some(FieldType::Int32),
-            "{field}"
-        );
-    }
-}
-
-/// `ZoomMultiplierComponent` drives the ADS/scope FOV transition. No C#
-/// descriptor declares the group, so its properties ship raw even though the
-/// values are textbook floats. On 98605b1b all five fields below are 32 bits
-/// on every row with zero NaN:
-///   - SourceFov/TargetFov: 20.6..103.0, and 103.0 is Valorant's documented
-///     default hip-fire FOV (the mode the player is in when not ADS), so a
-///     wrong type cannot produce it.
-///   - SourceFov1P/TargetFov1P: 5.0..70.0, and 70.0 is the default 1P FOV.
-///   - TotalTransitionTimeDuration: 0.0..0.25, the ADS transition time.
-///
-/// SourceZoomLevel/TargetZoomLevel are deliberately NOT typed: ~70% of their
-/// rows are the 0xFFFFFFFF sentinel, which Float reads as NaN, and the rest
-/// are 0.0, so the field is an enum-or-sentinel, not a clean float. These
-/// five are ADDITIONS, same wire-evidence class as `Money`.
-#[test]
-fn zoom_multiplier_fov_fields_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let group = "/Script/ShooterGame.ZoomMultiplierComponent";
-    assert_eq!(table.lookup(group, "SourceFov"), Some(FieldType::Float));
-    assert_eq!(table.lookup(group, "TargetFov"), Some(FieldType::Float));
-    assert_eq!(table.lookup(group, "SourceFov1P"), Some(FieldType::Float));
-    assert_eq!(table.lookup(group, "TargetFov1P"), Some(FieldType::Float));
-    assert_eq!(
-        table.lookup(group, "TotalTransitionTimeDuration"),
-        Some(FieldType::Float)
-    );
-}
-
-/// `UsableComponent` drives every hold-to-interact object: spike plant/defuse,
-/// ultimate-orb pickup, doors. No C# descriptor declares the group. On a bomb
-/// replay `HighestProgress` is 32 bits on ~12k rows and reads as Float a clean
-/// 0..1 ramp advancing 1/128 per tick (a u32 read is non-monotonic; only the
-/// float read is linear), and `bIsActive` is a single 0x01 bit on ~150 rows --
-/// the "someone is interacting" flag. ADDITIONS, same wire-evidence class as
-/// `Money`.
-#[test]
-fn usable_component_interaction_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let group = "/Script/ShooterGame.UsableComponent";
-    assert_eq!(
-        table.lookup(group, "HighestProgress"),
-        Some(FieldType::Float)
-    );
-    assert_eq!(table.lookup(group, "bIsActive"), Some(FieldType::Bool));
-}
-
-/// Ammo used to need a hand-written handle name and no longer does.
-///
-/// `MagazineAmmo` and `ReserveAmmo` are bare groups the replay never names --
-/// every row is handle 2 with field_name None -- so `HANDLE_ADDITIONS` called
-/// handle 2 `AmmoCount` and typed it Int32. The cooked game says both are
-/// `AmmoComponent`, which the replay *does* declare, with handle 2 as
-/// `AuthResourceAmount`. The leaf remap in `vrfkit`'s `sink/paths.rs` sends
-/// them there, so the guess is gone and the real declaration does the work.
-///
-/// What is pinned here is the destination: the group the remap targets carries
-/// the name and the type, so a regression in the table shows up as this test
-/// rather than as silently unnamed handles.
-#[test]
-fn the_ammo_component_declares_the_handle_the_bare_groups_land_on() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    const GROUP: &str = "/Script/ShooterGame.AmmoComponent";
-    assert_eq!(
-        table.lookup(GROUP, "AuthResourceAmount"),
-        Some(FieldType::Int32),
-    );
-
-    let mut stats = OverlayStats::default();
-    let data = 12i32.to_le_bytes();
-    let result = apply_overlay_with_handle(
-        &table,
-        GROUP,
-        group_hash_state(GROUP),
-        Some("AuthResourceAmount"),
-        2,
-        Some(&data),
-        32,
-        &mut stats,
-    );
-    assert_eq!(result.and_then(|v| v.value_i64), Some(12));
-    assert_eq!(stats.decoded_ok, 1);
-    assert_eq!(stats.not_in_table, 0);
-}
-
-/// `FiniteSpeedMovementComponent` drives projectile travel. No C# descriptor
-/// declares the group. `MaximumRange` is the projectile's max travel distance
-/// in Unreal units: 32 bits on all 11699 rows on 98605b1b, reads as Float a
-/// 397.6..49986.1 range with the mode at ~19993 UU (~500 m), which is the
-/// right order of magnitude for a Valorant projectile. Typed as Float.
-/// (bIsActive is deliberately NOT typed despite a clean 1-bit width: all 574
-/// rows are 0x01, so the field carries no information a consumer can use, and
-/// widening the table for a constant is not worth it.) ADDITION, same
-/// wire-evidence class as `Money`.
-#[test]
-fn finite_speed_movement_max_range_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.FiniteSpeedMovementComponent",
-            "MaximumRange"
-        ),
-        Some(FieldType::Float)
-    );
-}
-
-/// `Owner`, `Instigator`, `AttachParent` and `Controller` are `AActor` /
-/// `USceneComponent` object references Unreal replicates on every actor, always
-/// as a NetGUID. The C# descriptors declare them only for the classes they
-/// happen to cover, so on 02d4d478 they are typed on 129 group/field pairs
-/// (4,601 rows) and untyped on 203 more (6,048 rows) -- same four names, same
-/// encoding, no table entry. The type does not vary by class, so it resolves by
-/// name once the table has missed on both the group and its alias.
-#[test]
-fn an_engine_object_ref_resolves_on_a_group_the_table_never_saw() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+fn the_engine_fallback_covers_every_one_of_the_four_names() {
     const BOMB_EQUIPPABLE: &str = "/Game/Equippables/Bomb/BombEquippable.BombEquippable_C";
     assert_eq!(
-        table.lookup(BOMB_EQUIPPABLE, "Owner"),
+        TABLE.lookup(BOMB_EQUIPPABLE, "Owner"),
         None,
         "not in the table"
     );
-    assert_eq!(
-        resolve_field_type(&table, BOMB_EQUIPPABLE, Some("Owner"), None),
-        Some(FieldType::ObjectNetGuid),
-    );
-}
-
-#[test]
-fn the_engine_fallback_covers_every_one_of_the_four_names() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    for name in ["Owner", "Instigator", "AttachParent", "Controller"] {
-        assert_eq!(
-            resolve_field_type(&table, "/Game/NeverSeen.NeverSeen_C", Some(name), None),
-            Some(FieldType::ObjectNetGuid),
-            "{name} should resolve by name",
-        );
+    for group in ["/Game/NeverSeen.NeverSeen_C", BOMB_EQUIPPABLE] {
+        for name in ["Owner", "Instigator", "AttachParent", "Controller"] {
+            assert_eq!(
+                resolve_field_type(&TABLE, group, Some(name), None),
+                Some(FieldType::ObjectNetGuid),
+                "{name} should resolve by name on {group}",
+            );
+        }
     }
 }
 
 /// The fallback is a fixed list, not "anything that looks like a reference".
 #[test]
 fn the_engine_fallback_does_not_invent_other_names() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     for name in ["OwnerId", "Owner2", "MyOwner", "Parent", "Target"] {
         assert_eq!(
-            resolve_field_type(&table, "/Game/NeverSeen.NeverSeen_C", Some(name), None),
+            resolve_field_type(&TABLE, "/Game/NeverSeen.NeverSeen_C", Some(name), None),
             None,
             "{name} must stay unresolved",
         );
     }
 }
 
-/// A declared entry still wins: the fallback only runs after the table misses,
-/// so a class that really does spell one of these names differently keeps its
-/// declared type.
-#[test]
-fn a_table_entry_outranks_the_engine_fallback() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "Owner",
-        field_type: FieldType::Raw,
-    }];
-    let table = OverlayTable::new(entries);
-    assert_eq!(
-        resolve_field_type(&table, "/test", Some("Owner"), None),
-        Some(FieldType::Raw),
-    );
-}
-
-/// The 192-bit RPC vectors. Unreal splits an `FTransform` parameter into three
-/// separate double vectors on this wire, and no descriptor declares any of
-/// them, so 54,859 rows on 02d4d478 arrived raw. Read as 3 x f64 they are
-/// unambiguous -- `Scale3D` is exactly (1,1,1) on every row, which no other
-/// split produces. ADDITIONS, same wire-evidence class as `Money`.
-///
-/// The replay's own `compatible_checksum` agrees with the grouping and was not
-/// used to derive it: `248` is 598402184 wherever it appears, `249` is
-/// 747197698, `Translation` 2235276067, `Scale3D` 2983776962.
-#[test]
-fn the_rpc_transform_vectors_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    for (group, field) in [
-        (
-            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
-            "Scale3D",
-        ),
-        (
-            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
-            "Translation",
-        ),
-        (
-            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
-            "249",
-        ),
-        (
-            "/Script/ShooterGame.LocationalEffectManagerComponent:ClientPlayOneShotEffectAtLocation",
-            "248",
-        ),
-        (
-            "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombPlantedRPC",
-            "PlantLocation",
-        ),
-        (
-            "/Game/GameModes/Bomb/BombDestination.BombDestination_C:MulticastActivateBombSiteEffects",
-            "BombLocation",
-        ),
-    ] {
-        assert_eq!(
-            table.lookup(group, field),
-            Some(FieldType::VectorDouble),
-            "{group}:{field}",
-        );
-    }
-}
-
-/// The decode that makes the reading unambiguous: the bytes below are the
-/// `Scale3D` payload every row carries, and only a 3 x f64 split reads them as
-/// (1,1,1). Six f32s would give (0, 1.875, 0, 1.875, 0, 1.875).
-#[test]
-fn a_192_bit_rpc_vector_decodes_as_three_doubles() {
-    const GROUP: &str = "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let mut stats = OverlayStats::default();
-    let mut bits = Vec::new();
-    for _ in 0..3 {
-        bits.extend_from_slice(&1.0f64.to_le_bytes());
-    }
-    let result = apply_overlay(
-        &table,
-        GROUP,
-        group_hash_state(GROUP),
-        Some("Scale3D"),
-        Some(&bits),
-        192,
-        &mut stats,
-    );
-    assert_eq!(result.and_then(|v| v.value_str).as_deref(), Some("(1,1,1)"));
-    assert_eq!(stats.decoded_ok, 1);
-    assert_eq!(stats.decoded_err, 0);
-}
-
-/// Checksum propagation: a parameter no descriptor declares takes the type of
-/// a declared field sharing its `compatible_checksum`.
-///
-/// `PlayerID` on `ReplayPlayerController:ClientReplayReceiveInputEvent`
-/// `ProcessingCapture` is undeclared, and `BombPlayerState_C.PlayerId` is
-/// declared `Int32`. They share checksum 2396673102, and reading the
-/// undeclared rows as `Int32` yields exactly the ten values the declared column
-/// holds.
+/// Checksum propagation: the undeclared `PlayerID` of
+/// `ReplayPlayerController:ClientReplayReceiveInputEventProcessingCapture`
+/// shares checksum 2396673102 with the declared Int32
+/// `BombPlayerState_C.PlayerId`, and read as Int32 its rows hold exactly the
+/// declared column's ten values. A Cypher trap wire under a path no build has
+/// shipped resolves `Deployed` the same way.
 #[test]
 fn a_checksum_types_a_field_the_table_never_declared() {
     const UNDECLARED: &str =
         "/Script/ShooterGame.ReplayPlayerController:ClientReplayReceiveInputEventProcessingCapture";
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    assert_eq!(table.lookup(UNDECLARED, "PlayerID"), None, "not declared");
+    const FUTURE_WIRE: &str = "/Game/Characters/Gumshoe/S0/Ability_C/\
+GameObject_Gumshoe_C_TripWire.GameObject_Gumshoe_C_TripWire_C";
+    assert_eq!(TABLE.lookup(UNDECLARED, "PlayerID"), None, "not declared");
     assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
-            UNDECLARED,
-            Some("PlayerID"),
-            None,
-            Some(2396673102)
-        ),
+        resolve(UNDECLARED, "PlayerID", Some(2396673102)),
         Some(FieldType::Int32),
     );
-}
-
-/// The checksum runs last, so anything the table declares still wins.
-#[test]
-fn a_declared_entry_outranks_the_checksum() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "PlayerID",
-        field_type: FieldType::Raw,
-    }];
-    let table = OverlayTable::new(entries);
+    assert_eq!(TABLE.lookup(FUTURE_WIRE, "Deployed"), None, "not declared");
     assert_eq!(
-        resolve_field_type_with_checksum(&table, "/test", Some("PlayerID"), None, Some(2396673102)),
-        Some(FieldType::Raw),
+        resolve(FUTURE_WIRE, "Deployed", Some(3902815170)),
+        Some(FieldType::Bool)
     );
 }
 
-/// A checksum nothing donated types nothing -- the map asserts only what it
-/// learned.
+/// A declared entry outranks the engine references and the checksum, which run
+/// only after the table misses, so a declared `Owner` or `PlayerID` keeps its
+/// type. Declared `Raw` or `Skip` is a decision not to decode, reported only by
+/// `raw_or_skip`, so that counter must move once per field.
 #[test]
-fn an_unlearned_checksum_resolves_nothing() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
-            "/Game/Nope.Nope_C",
-            Some("Whatever"),
-            None,
-            Some(1)
-        ),
-        None,
-    );
-}
-
-/// The safety property: a checksum whose donors disagree is not in the table at
-/// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 18 groups and `ShortComponents`
-/// on 6, which differ in width, so guessing would desync the block rather than
-/// read a wrong value.
-#[test]
-fn checksums_whose_donors_disagree_are_omitted() {
-    for (checksum, why) in [
-        (
-            2749104612u32,
-            "ReplicatedMovement: Byte vs Short components",
-        ),
-        (2270825073, "AllianceFilter: EnumByte vs EnumRemainingBits"),
-    ] {
-        assert_eq!(lookup_checksum(checksum), None, "{why}");
+fn a_declared_entry_outranks_the_engine_and_checksum_fallbacks() {
+    static RAW: [OverlayEntry; 2] = [
+        entry("Owner", FieldType::Raw),
+        entry("PlayerID", FieldType::Raw),
+    ];
+    static SKIP: [OverlayEntry; 2] = [
+        entry("Owner", FieldType::Skip),
+        entry("PlayerID", FieldType::Skip),
+    ];
+    for (entries, field_type) in [(&RAW, FieldType::Raw), (&SKIP, FieldType::Skip)] {
+        let table = OverlayTable::new(entries);
+        assert_eq!(
+            resolve_field_type(&table, "/test", Some("Owner"), None),
+            Some(field_type)
+        );
+        // This checksum types an undeclared `PlayerID` as `Int32` elsewhere.
+        let donated = Some(2396673102);
+        assert_eq!(
+            resolve_field_type_with_checksum(&table, "/test", Some("PlayerID"), None, donated),
+            Some(field_type),
+        );
+        let (result, stats) = run(&table, "/test", Some("Owner"), None, None, Some(&[1]), 1);
+        assert!(result.is_none(), "{field_type:?} must not be decoded");
+        let counts = (
+            stats.raw_or_skip,
+            stats.decoded_ok,
+            stats.decoded_err,
+            stats.not_in_table,
+            stats.no_field_name,
+            stats.handle_conflicts_refused,
+        );
+        assert_eq!(counts, (1, 0, 0, 0, 0, 0), "{stats:?}");
     }
+}
+
+/// Every group the overlay assigns a `RepMovement` type (table or scoped), by
+/// the location level `tools/check_rep_movement_levels.py` measures for it.
+const REP_MOVEMENT_LOCATION_EVIDENCE: [(VectorQuantization, &[&str]); 2] = [
+    (
+        VectorQuantization::RoundTwoDecimals,
+        &[
+            SEEKER_NADE,
+            "/Game/Characters/BountyHunter/S0/Ability_4/Pawn_BountyHunter_4_WolfHound.Pawn_BountyHunter_4_WolfHound_C",
+            "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C",
+            CLAY_BOOMBOT,
+            "/Game/Characters/Guide/S0/Ability_X/Pawn_Guide_X_Pack.Pawn_Guide_X_Pack_C",
+            "/Game/Characters/Killjoy/S0/Ability_E/Pawn_Killjoy_E_Turret.Pawn_Killjoy_E_Turret_C",
+            "/Game/Characters/Killjoy/S0/Ability_Q/Pawn_Killjoy_Q_StealthAlarmbot.Pawn_Killjoy_Q_StealthAlarmbot_C",
+            "/Game/Characters/Pine/S0/Ability_E/Pawn_Pine_E_RadEater.Pawn_Pine_E_RadEater_C",
+            "/Game/Characters/Stealth/S0/Ability_4/Pawn_Stealth_4_Decoy_V2.Pawn_Stealth_4_Decoy_V2_C",
+            "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterMoving_FakeTP.Pawn_Stealth_E_TeleporterMoving_FakeTP_C",
+            "/Game/Characters/Stealth/S0/Ability_E/Pawn_Stealth_E_TeleporterStationary_FakeTP.Pawn_Stealth_E_TeleporterStationary_FakeTP_C",
+        ],
+    ),
+    (
+        VectorQuantization::RoundWholeNumber,
+        &[
+            "/Game/Characters/AggroBot/S0/Ability_4/Projectile_Aggrobot_C_ExplodeyPatch.Projectile_Aggrobot_C_ExplodeyPatch_C",
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_Aggrobot_Zamboni_Rocket.Projectile_Aggrobot_Zamboni_Rocket_C",
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_DiscTurret_PowerWave.Projectile_E_Aggrobot_DiscTurret_PowerWave_C",
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_OrbSpawner.Projectile_E_Aggrobot_OrbSpawner_C",
+            "/Game/Characters/BountyHunter/S0/Ability_E/Projectile_E_BountyHunter_Divebomb.Projectile_E_BountyHunter_Divebomb_C",
+            "/Game/Characters/BountyHunter/S0/Ability_Q/Projectile_Q_BountyHunter_TetherGrenade_SphereExpansion.Projectile_Q_BountyHunter_TetherGrenade_SphereExpansion_C",
+            "/Game/Characters/Breach/S0/Ability_4/Projectile_Breach_4_FusionBlast.Projectile_Breach_4_FusionBlast_C",
+            "/Game/Characters/Breach/S0/Ability_Q/Projectile_Breach_Q_ThroughWalls_Flash.Projectile_Breach_Q_ThroughWalls_Flash_C",
+            "/Game/Characters/Cable/S0/Ability_4/Projectile_Cable_4_NetToss.Projectile_Cable_4_NetToss_C",
+            "/Game/Characters/Cable/S0/Ability_4/Projectile_NetToss.Projectile_NetToss_C",
+            "/Game/Characters/Cable/S0/Ability_E/Projectile_CableJam_InAir.Projectile_CableJam_InAir_C",
+            "/Game/Characters/Cashew/S0/Ability_Q/Projectile_Cashew_Q_ShellShockGrenade.Projectile_Cashew_Q_ShellShockGrenade_C",
+            "/Game/Characters/Cashew/S0/Ability_Q/Projectile_Cashew_Q_ShellShockGrenade_Bounce.Projectile_Cashew_Q_ShellShockGrenade_Bounce_C",
+            "/Game/Characters/Cashew/S0/Ability_X/GameObject_Cashew_X_SegmentManager.GameObject_Cashew_X_SegmentManager_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_ProjectilePrimary.Projectile_Clay_4_ProjectilePrimary_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_ProjectileSecondary.Projectile_Clay_4_ProjectileSecondary_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_Primary.Projectile_Clay_4_Projectile_Primary_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_Secondary.Projectile_Clay_4_Projectile_Secondary_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_SecondarySpawner.Projectile_Clay_4_Projectile_SecondarySpawner_C",
+            "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_SecondarySpawner.Projectile_Clay_4_SecondarySpawner_C",
+            "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C",
+            "/Game/Characters/Clay/S0/Ability_X/Projectile_Clay_X_Rocket.Projectile_Clay_X_Rocket_C",
+            "/Game/Characters/Deadeye/S0/Ability_4/Projectile_Deadeye_4_Trap_Dart.Projectile_Deadeye_4_Trap_Dart_C",
+            "/Game/Characters/Grenadier/S0/Ability_4/Projectile_C_Grenadier_Flash.Projectile_C_Grenadier_Flash_C",
+            "/Game/Characters/Grenadier/S0/Ability_4/Projectile_C_Grenadier_Flash_Underhand.Projectile_C_Grenadier_Flash_Underhand_C",
+            "/Game/Characters/Grenadier/S0/Ability_E/Gameobject_Grenadier_E_SuppressionPulse.Gameobject_Grenadier_E_SuppressionPulse_C",
+            "/Game/Characters/Grenadier/S0/Ability_E/Projectile_Grenadier_E_SuppressionBlade.Projectile_Grenadier_E_SuppressionBlade_C",
+            "/Game/Characters/Grenadier/S0/Ability_Q/Projectile_Grenadier_Q_SemtexBasic.Projectile_Grenadier_Q_SemtexBasic_C",
+            HAWK,
+            "/Game/Characters/Gumshoe/S0/Ability_E/Projectile_Gumshoe_E_CameraTrackingDart.Projectile_Gumshoe_E_CameraTrackingDart_C",
+            "/Game/Characters/Gumshoe/S0/Ability_Q/Projectile_Gumshoe_Q_CameraTrackingDart.Projectile_Gumshoe_Q_CameraTrackingDart_C",
+            "/Game/Characters/Gumshoe/S0/Ability_Q/Zone_Gumshoe_Q_Cage.Zone_Gumshoe_Q_Cage_C",
+            "/Game/Characters/Hunter/S0/Ability_4/AnimationUpdatePrototype/Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance.Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance_C",
+            "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
+            "/Game/Characters/Hunter/S0/Ability_Q/Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C",
+            "/Game/Characters/Iris/S0/Ability_4/GameObject_Thumper_Concuss.GameObject_Thumper_Concuss_C",
+            "/Game/Characters/Iris/S0/Ability_4/GameObject_Thumper_Heal.GameObject_Thumper_Heal_C",
+            "/Game/Characters/Iris/S0/Ability_4/Projectile_Thumper_Concuss.Projectile_Thumper_Concuss_C",
+            "/Game/Characters/Iris/S0/Ability_4/Projectile_Thumper_Heal.Projectile_Thumper_Heal_C",
+            "/Game/Characters/Killjoy/S0/Ability_4/Projectile_Killjoy_4_RemoteBees_MultiDetonate.Projectile_Killjoy_4_RemoteBees_MultiDetonate_C",
+            "/Game/Characters/Mage/S0/Ability_4/Projectile_Mage_4_SplashGrenade.Projectile_Mage_4_SplashGrenade_C",
+            "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
+            "/Game/Characters/Mage/S0/Ability_E/Projectile_Mage_E_WorldSmoke.Projectile_Mage_E_WorldSmoke_C",
+            "/Game/Characters/Mage/S0/Ability_Q/Projectile_Mage_Q_Wall.Projectile_Mage_Q_Wall_C",
+            "/Game/Characters/Nox/S0/Ability_4/Projectile_Nox_BarbedWire.Projectile_Nox_BarbedWire_C",
+            "/Game/Characters/Pandemic/S0/Ability_4/Projectile_Pandemic_4_SmokeGrenade.Projectile_Pandemic_4_SmokeGrenade_C",
+            "/Game/Characters/Pandemic/S0/Ability_E/Projectile_Pandemic_E_SmokeScreen_NoCollision.Projectile_Pandemic_E_SmokeScreen_NoCollision_C",
+            "/Game/Characters/Pandemic/S0/Ability_Q/Projectile_Pandemic_Q_AcidGrenade.Projectile_Pandemic_Q_AcidGrenade_C",
+            "/Game/Characters/Phoenix/S0/Ability_4/Production/Projectile_Phoenix_4_Molotov_Production.Projectile_Phoenix_4_Molotov_Production_C",
+            "/Game/Characters/Phoenix/S0/Ability_E/Production/Projectile_Phoenix_E_FlareCurve_Synced.Projectile_Phoenix_E_FlareCurve_Synced_C",
+            "/Game/Characters/Phoenix/S0/Ability_E/Production/Projectile_Phoenix_E_FlareCurve_Synced_Right.Projectile_Phoenix_E_FlareCurve_Synced_Right_C",
+            "/Game/Characters/Phoenix/S0/Ability_Q/Production/Projectile_Phoenix_Q_FlameWall_ThroughWall.Projectile_Phoenix_Q_FlameWall_ThroughWall_C",
+            "/Game/Characters/Pine/S0/Ability_E/Projectile_Pine_E_RadEaterSpawner.Projectile_Pine_E_RadEaterSpawner_C",
+            "/Game/Characters/Pine/S0/Ability_Q/Projectile_Pine_Q_TrapGrenade.Projectile_Pine_Q_TrapGrenade_C",
+            "/Game/Characters/Pine/S0/Ability_Q/Projectile_Pine_Q_TrapGrenadeUnderhand.Projectile_Pine_Q_TrapGrenadeUnderhand_C",
+            "/Game/Characters/Sarge/S0/Ability_Molotov/Projectile_Sarge_Q_Molotov_Production.Projectile_Sarge_Q_Molotov_Production_C",
+            "/Game/Characters/Sarge/S0/Ability_SpeedStim/Projectile_Sarge_E_SpeedStim.Projectile_Sarge_E_SpeedStim_C",
+            "/Game/Characters/Sequoia/S0/Ability_Q/Projectile_Sequoia_Q_FragileMissile.Projectile_Sequoia_Q_FragileMissile_C",
+            "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
+            "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
+            "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+            "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/Projectile_Smonk_DecayNade.Projectile_Smonk_DecayNade_C",
+            "/Game/Characters/Sprinter/S0/Ability_4/Projectile_Neon_C_Tunnel.Projectile_Neon_C_Tunnel_C",
+            "/Game/Characters/Sprinter/S0/Ability_4/Projectile_Neon_C_Tunnel_Cosmetic.Projectile_Neon_C_Tunnel_Cosmetic_C",
+            "/Game/Characters/Sprinter/S0/Ability_Q/Projectile_Sprinter_4_GroundStrike.Projectile_Sprinter_4_GroundStrike_C",
+            "/Game/Characters/Stealth/S0/Ability_Q/Projectile_Stealth_Q_BounceFlash.Projectile_Stealth_Q_BounceFlash_C",
+            "/Game/Characters/Terra/S0/Ability_4/GameObject_Terra_C_TimeSlowGrenade_Explosion.GameObject_Terra_C_TimeSlowGrenade_Explosion_C",
+            "/Game/Characters/Terra/S0/Ability_4/Projectile_Terra_C_TimeSlowGrenade.Projectile_Terra_C_TimeSlowGrenade_C",
+            "/Game/Characters/Thorne/S0/Ability_4/Projectile_Thorne_4_SlowFIeld_Production.Projectile_Thorne_4_SlowFIeld_Production_C",
+            "/Game/Characters/Vampire/S0/Ability_4/Projectile_Vampire_4_NearsightAoE.Projectile_Vampire_4_NearsightAoE_C",
+            "/Game/Characters/Wraith/S0/Ability_4/Projectile_Wraith_4_Smoke.Projectile_Wraith_4_Smoke_C",
+            "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+            "/Game/Characters/Wraith/S0/Ability_Q/Projectile_Wraith_Q_NearsightMissile.Projectile_Wraith_Q_NearsightMissile_C",
+            "/Game/Characters/Wushu/S0/Ability_4/Projectile_Wushu_4_Smoke.Projectile_Wushu_4_Smoke_C",
+            "/Game/Weapons/WeaponPickups/EquippablePickupProjectile.EquippablePickupProjectile_C",
+        ],
+    ),
+];
+
+/// Every `RepMovement` type the overlay can assign carries its measured level,
+/// and no unlisted group gets one: the level is not on the wire, so Unreal's
+/// default (`RoundWholeNumber`) is a prior, not a measurement. The table and the
+/// scoped types are held to the list by group, checksum propagation by admitting
+/// no `RepMovement`. Short rotators and two-decimal locations go together (pawns).
+#[test]
+fn every_rep_movement_entry_carries_its_measured_location_level() {
+    let table = OVERLAY_TABLE.iter().map(|e| (e.group_path, e.field_type));
+    let scoped = SCOPED_TYPES
+        .iter()
+        .map(|&(_, group, _, field_type)| (group, field_type));
+    let mut declared: BTreeMap<&str, VectorQuantization> = BTreeMap::new();
+    let mut short = BTreeSet::new();
+    for (group, field_type) in table.chain(scoped) {
+        if let FieldType::RepMovement { rotation, location } = field_type {
+            let previous = declared.insert(group, location);
+            assert!(
+                previous.is_none() || previous == Some(location),
+                "{group}: RepMovement declared at two location levels"
+            );
+            if rotation == RotatorQuantization::ShortComponents {
+                short.insert(group);
+            }
+        }
+    }
+    let mut measured = BTreeMap::new();
+    for (level, groups) in REP_MOVEMENT_LOCATION_EVIDENCE {
+        for &group in groups {
+            let twice = measured.insert(group, level).is_some();
+            assert!(!twice, "{group}: the evidence list names it twice");
+        }
+    }
+    let two_decimals: BTreeSet<&str> = measured
+        .iter()
+        .filter(|&(_, &level)| level == VectorQuantization::RoundTwoDecimals)
+        .map(|(&group, _)| group)
+        .collect();
+    assert_eq!(
+        short, two_decimals,
+        "short rotators and two decimals differ"
+    );
+    for (group, level) in &declared {
+        assert_eq!(
+            measured.get(group),
+            Some(level),
+            "{group}: declared {level:?}; the measured level differs or was never recorded"
+        );
+    }
+    for group in measured.keys() {
+        assert!(
+            declared.contains_key(group),
+            "{group}: measured but no route assigns it a RepMovement type"
+        );
+    }
+    // The name rule the checksum map would apply is closed for this field
+    // (donors disagree), so the table is the only route to a RepMovement type.
+    assert!(
+        CHECKSUM_TYPES
+            .iter()
+            .all(|(_, t)| !matches!(t, FieldType::RepMovement { .. })),
+        "a checksum-propagated RepMovement type would bypass the per-class evidence"
+    );
 }
 
 /// The map is only useful if it holds something; a silently empty generated
@@ -1132,328 +1203,96 @@ fn the_checksum_table_is_populated_and_sorted() {
     assert!(CHECKSUM_TYPES.windows(2).all(|w| w[0].0 < w[1].0));
 }
 
-/// `StopMovementTime` is the other half of a pair whose `StartMovementTime` is
-/// already Float: same RPC family, 32 bits on all 13,316 rows, and the same
-/// shape read as f32 -- a -1.0 sentinel on 5,371 of them and 0.76..136.98 on
-/// the rest, against -1.0..1771.83 for the declared sibling.
-///
-/// `HandleNumber` identifies a force module so a later Remove/Cleanup RPC can
-/// name it. Read as u32 its 3,741 rows hold 1..765 with every value present --
-/// a dense sequential id, which no other reading of those bits produces.
-///
-/// One entry each: checksum propagation carries `StopMovementTime` to
-/// `ReplayStopContinuousEffectAtLocation` (244888268) and `HandleNumber` to
-/// `NetMulticastRemoveForceModule` (3336285386).
+/// The scoped heal and overheal-decay references decode through the ordinary
+/// packed-NetGUID reader, with the payload consumed exactly. The 24-bit window
+/// is the widest seen on these parameters (50,360 = 56 + 9*128 + 3*16384,
+/// low-bit continuation); the single zero byte is the null reference, which
+/// decodes to 0 -- Unreal's null NetGUID, as the damage-side references export
+/// it -- not to an actor.
 #[test]
-fn the_movement_time_pair_and_force_module_handle_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
-            "StopMovementTime"
-        ),
-        Some(FieldType::Float),
-    );
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-            "HandleNumber"
-        ),
-        Some(FieldType::Int32),
-    );
-}
-
-/// Which named area of the map a player is standing in -- "A Site", "Mid",
-/// "Heaven", the callouts the game itself announces.
-///
-/// The group only became reachable when the `CalloutRegionTracker` leaf was
-/// remapped to its native class. The field is an `ObjectNetGuid`: unpacking the
-/// raw bits of all 1,957 non-zero rows and resolving them through
-/// `net_guids.parquet` gives 1,957 of 1,957 a `CalloutRegion_*` path, over 22
-/// distinct regions. Nothing else in the export says where a player is in map
-/// terms rather than in centimetres.
-#[test]
-fn the_callout_region_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.CalloutRegionTrackingComponent",
-            "CurrentRegion"
-        ),
-        Some(FieldType::ObjectNetGuid),
-    );
-}
-
-/// The per-cast ability log -- who cast what, when, and where.
-///
-/// This repo twice concluded there is no exact cast count on the wire. There
-/// is: `Comp_AbilityStatisticsReplicator` replicates one record per cast, and
-/// vrfkit was already flattening it into `AbilityCastsThisRound[i].<member>`
-/// rows. Every value arrived raw, so a survey that scans the typed columns
-/// walked straight past a fully named array.
-///
-/// The member names carry Blueprint property GUIDs. Those are stable --
-/// byte-identical on 13.01 and 13.02 -- which is what makes pinning them safe.
-///
-/// Each member is corroborated by something outside itself: `Player`'s 352
-/// values are all UUIDs and all match a `manifest.players.subject`, `Round`
-/// covers exactly 0..17 for an 18-round match, `CastLocation` reads as 3 x f64
-/// inside the map bounds `movement.parquet` describes, and `Slot` takes four
-/// values for three abilities plus an ultimate.
-#[test]
-fn the_ability_cast_log_is_typed() {
-    const GROUP: &str = "/Game/Characters/_Core/Comp_AbilityStatisticsReplicator\
-.Comp_AbilityStatisticsReplicator_C";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    for (field, expected) in [
-        (
-            "Player_11_0963330440D68BDF1A8E34B035420342",
-            FieldType::FString,
-        ),
-        ("Slot_12_22D571914FAFD5F0EBD400B7E2F28B36", FieldType::Byte),
-        (
-            "Round_22_905E6CC0448D2C6270A94C9690101E49",
-            FieldType::Int32,
-        ),
-        (
-            "CastTime_4_5AE288704801A9B74D6D159DFC2BD147",
-            FieldType::Float,
-        ),
-        (
-            "CastLocation_21_61F4B6BC47A10FE8CD34D29141FC9B88",
-            FieldType::VectorDouble,
-        ),
-    ] {
-        assert_eq!(table.lookup(GROUP, field), Some(expected), "{field}");
-    }
-}
-
-/// Both smoke walls are typed, not just the one that was noticed.
-///
-/// `MulticastAddSmokeScreenPoint` is declared by two classes -- Viper's
-/// `SmokeScreenManager` and Phoenix's `FlameWallManager` -- and only Viper's
-/// was in the table. Phoenix's `Translation` and `Scale3D` came out null on
-/// 2,791 rows across 31 replays with decode errors at 0, and because Viper's
-/// side decoded fine the ability looked handled.
-///
-/// The checksum fallback could not rescue it and should not have: Unreal gives
-/// the two classes' properties different checksums (2794273677 / 1639439377
-/// against Viper's 2235276067 / 2983776962), so it refused rather than
-/// guessing -- fail-closed working exactly as designed, which is why this
-/// needed a name-level fix.
-///
-/// The bar for admitting them is the repo's usual one, read off the wire:
-/// every row is 192 bits (3 x f64), `Translation` decodes to map coordinates
-/// (7211.7, 1670.3, 96.0), and `Scale3D` is (1,1,1) on every row -- a value no
-/// other reading produces.
-#[test]
-fn both_classes_declaring_the_smoke_point_rpc_are_typed() {
-    const VIPER: &str = "/Game/Characters/Pandemic/S0/Ability_E/\
-GameObject_Pandemic_E_SmokeScreenManager.GameObject_Pandemic_E_SmokeScreenManager_C\
-:MulticastAddSmokeScreenPoint";
-    const PHOENIX: &str = "/Game/Characters/Phoenix/S0/Ability_Q/Production/\
-GameObject_Phoenix_Q_FlameWallManager_Production.\
-GameObject_Phoenix_Q_FlameWallManager_Production_C:MulticastAddSmokeScreenPoint";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    for group in [VIPER, PHOENIX] {
-        for field in ["Translation", "Scale3D"] {
-            assert_eq!(
-                table.lookup(group, field),
-                Some(FieldType::VectorDouble),
-                "{group} {field}"
-            );
-        }
-    }
-}
-
-/// The weapon classes declare the same property as everything else.
-///
-/// `"215"` and `"216"` are not handles -- they are field *names*, the decimal
-/// spelling of a hardcoded Unreal FName index the replay never resolves to
-/// text. 353 groups decode them; 17 weapon groups did not, because `table.rs`
-/// pinned those to `Raw` and a name hit wins before the checksum fallback is
-/// ever consulted. 48,010 rows over 20 replays.
-///
-/// The checksums settle it: `1710918439` and `4109980037` on every group,
-/// decoding or not, at a uniform 3 bits, and where it decodes the value is
-/// always 3 and 1. Same checksum means Unreal hashed the same property, so
-/// `Raw` on a weapon was never a different type -- it was a guess. The comment
-/// that introduced it said "Weapons use Raw (correct)" and nothing had checked.
-#[test]
-fn the_weapon_classes_type_215_and_216_like_everything_else() {
-    const WEAPONS: [&str; 3] = [
-        "/Game/Equippables/Guns/Rifles/AK/AssaultRifle_AK.AssaultRifle_AK_C",
-        "/Game/Equippables/Guns/Sidearms/BasePistol/BasePistol.BasePistol_C",
-        "/Game/Equippables/Melee/Ability_Melee_Base.Ability_Melee_Base_C",
-    ];
-    const ALREADY_TYPED: &str = "/Game/GameModes/Bomb/TimedBomb.TimedBomb_C";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    for group in WEAPONS.iter().chain(std::iter::once(&ALREADY_TYPED)) {
-        for field in ["215", "216"] {
-            assert_eq!(
-                table.lookup(group, field),
-                Some(FieldType::EnumRemainingBits),
-                "{group} {field}"
-            );
-        }
-    }
-}
-
-/// The parameter after `248` is the rotation, on all five RPCs that send it.
-///
-/// `248` is already typed `VectorDouble` -- the placement location -- and `249`
-/// follows it, unnamed, on 441,814 rows over 20 replays. Three things settle
-/// it. The widths are 3, 19, 35 and 51 bits, which is exactly
-/// `3 + 16 x (flags set)` for `RotationShort`'s three conditional components
-/// and nothing else. Decoding all 441,814 that way consumes every payload
-/// exactly, with no leftover on any of the four widths. And the same UFunction
-/// declares this parameter by name on builds where the replay names it: the
-/// table already carries `ReplayPlayContinuousEffectAtLocation.Rotation` as
-/// `RotationShort`.
-///
-/// It is not the other `249`. That one is a `VectorDouble` under a different
-/// checksum; this family shares 2526428638 and is 19 bits, not 192.
-#[test]
-fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
-    const GROUPS: [&str; 5] = [
-        "/Script/ShooterGame.LocationalEffectManagerComponent:ClientPlayOneShotEffectAtLocation",
-        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
-        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayOneShotEffectAtLocation",
-        "/Script/ShooterGame.EffectManagerComponent:ReplayRecordOneShotEffect",
-        "/Script/ShooterGame.EffectManagerComponent:ReplayRecordContinuousEffect",
-    ];
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    for group in GROUPS {
-        assert_eq!(
-            table.lookup(group, "249"),
-            Some(FieldType::RotationShort),
-            "{group}"
-        );
-    }
-    // The location it pairs with, unchanged, on the four that send it numbered.
-    // `ReplayPlayContinuousEffectAtLocation` is the exception and the reason
-    // this typing is safe: that one names both parameters, and its `Rotation`
-    // is already `RotationShort`. The numbered spelling now agrees with the
-    // named one on the same function.
-    for group in GROUPS {
-        if group.ends_with("ReplayPlayContinuousEffectAtLocation") {
-            assert_eq!(
-                table.lookup(group, "Rotation"),
-                Some(FieldType::RotationShort),
-                "{group} names its rotation and must still agree"
-            );
-            continue;
-        }
-        assert_eq!(
-            table.lookup(group, "248"),
-            Some(FieldType::VectorDouble),
-            "{group} 248"
-        );
-    }
-}
-
-/// The RNG component's seed is an Int32.
-///
-/// 120,853 rows, one group, one checksum, 32 bits on every row, and 120,852 of
-/// the 120,853 values distinct across the full i32 range -- which is what a
-/// seed looks like and what nothing else does. The sibling
-/// `AuthInitialRandomSeed` on the same component matches in width and in that
-/// near-total distinctness.
-///
-/// Int32 over UInt32 is not settled by the data -- the same 32 bits read either
-/// way -- and follows Unreal's `FRandomStream`, whose seed is an `int32`.
-#[test]
-fn the_random_number_generator_seed_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.NetworkedRandomNumberGeneratorComponent",
-            "AuthCurrentRandomSeed"
-        ),
-        Some(FieldType::Int32)
-    );
-}
-
-/// The life-change array walks into its four members, on real wire bytes.
-///
-/// `docs/DATA.md`'s health section rests on these and nothing shipped could
-/// read them -- the array arrived as one opaque blob, so every figure in that
-/// section came from a script outside the repository. The fixtures here are
-/// actual payloads from a 13.02 replay.
-///
-/// The local handles differ per RPC, which is the reason for three schemas.
-/// `MulticastNotifyHeal` also names its parameter `LifeChangeBySection` rather
-/// than `LifeChangeEvents`, so a dispatch keyed on the array's name alone
-/// would miss two of the five functions entirely.
-#[test]
-#[cfg(feature = "array")]
-fn the_life_change_array_walks_into_its_members() {
-    use crate::{
-        ArrayDecodeStats, LIFE_CHANGE_BY_SECTION_SCHEMA, LIFE_CHANGE_DAMAGE_SCHEMA,
-        LIFE_CHANGE_SECTION_SCHEMA, decode_struct_array,
+fn heal_and_decay_references_decode_packed_guids_exactly() {
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, field: &str, handle: u32, checksum: u32, raw: &[u8], bits| {
+        apply_scoped(&mut stats, group, field, handle, checksum, raw, bits).value_i64
     };
-
-    // MulticastNotifyDamage_Point.LifeChangeEvents, one element.
-    let damage: Vec<u8> = vec![
-        0x02, 0x02, 0x16, 0x20, 0xE5, 0x3E, 0x18, 0x40, 0x00, 0x80, 0x0E, 0x44, 0x1A, 0x40, 0x00,
-        0x00, 0xF0, 0xC1, 0x1C, 0x02, 0x01, 0x00, 0x00,
-    ];
-    // MulticastNotifyHeal.LifeChangeBySection, one element.
-    let heal: Vec<u8> = vec![
-        0x02, 0x02, 0x06, 0x20, 0x29, 0x14, 0x08, 0x40, 0xFF, 0x0F, 0x08, 0x42, 0x0A, 0x40, 0x00,
-        0x00, 0x80, 0x3F, 0x0C, 0x02, 0x01, 0x00, 0x00,
-    ];
-
-    for (label, raw, bits, schema, want) in [
-        (
-            "damage",
-            &damage,
-            177u32,
-            &LIFE_CHANGE_DAMAGE_SCHEMA,
-            [
-                "ChangedComponent",
-                "LifeResult",
-                "DeltaLife",
-                "bAliveAfterChange",
-            ],
-        ),
-        (
-            "heal",
-            &heal,
-            177,
-            &LIFE_CHANGE_BY_SECTION_SCHEMA,
-            [
-                "ChangedComponent",
-                "LifeResult",
-                "DeltaLife",
-                "bAliveAfterChange",
-            ],
-        ),
-    ] {
-        let mut stats = ArrayDecodeStats::default();
-        let fields = decode_struct_array(raw, bits, Some(schema), &[], &mut stats);
-        assert_eq!(stats.errors, 0, "{label} decoded with errors");
-        assert_eq!(fields.len(), 4, "{label}: {fields:?}");
-        for (field, name) in fields.iter().zip(want) {
-            assert!(
-                field.path.ends_with(name),
-                "{label}: {} vs {name}",
-                field.path
-            );
-        }
-    }
-
-    // The section schema numbers from 1, so it must not be interchangeable.
-    let mut stats = ArrayDecodeStats::default();
-    let wrong = decode_struct_array(
-        &damage,
-        177,
-        Some(&LIFE_CHANGE_SECTION_SCHEMA),
-        &[],
-        &mut stats,
+    let pawn = apply(
+        HEAL_PARAMS,
+        "EventInstigatorPawn",
+        8,
+        3_901_949_544,
+        &[0x71, 0x13, 0x06],
+        24,
     );
-    assert!(
-        wrong.iter().all(|f| !f.path.ends_with("LifeResult")),
-        "the wrong schema must not happen to name the members: {wrong:?}"
+    assert_eq!(pawn, Some(50_360));
+    let null = apply(DECAY_PARAMS, "DecayCauser", 9, 3_648_603_088, &[0x00], 8);
+    assert_eq!(null, Some(0));
+    // A byte the packed value never claims is a residual, not a value.
+    let residual = apply(
+        HEAL_PARAMS,
+        "EventInstigator",
+        7,
+        3_087_885_251,
+        &[0x71, 0x13, 0x06, 0x00],
+        32,
     );
+    assert_eq!(residual, None);
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 1));
+}
+
+/// The bomb-objective and ult-orb RPC parameters, each decoded from a payload
+/// cut from a 13.06 replay. The references are packed NetGUIDs consumed
+/// exactly; `PlantSite` is read at its 2-bit wire width, the width of every
+/// row that carries it (an absent row is the default site 0).
+#[test]
+fn bomb_objective_and_orb_rpc_parameters_decode_their_wire_payloads() {
+    const PLANTED: &str =
+        "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombPlantedRPC";
+    const DEFUSED: &str =
+        "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombDefusedRPC";
+    const ORB: &str = "/Game/BaseGameState.BaseGameState_C:OrbPickedUpRPC";
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, field: &str, handle: u32, checksum: u32, raw: &[u8], bits| {
+        apply_scoped(&mut stats, group, field, handle, checksum, raw, bits).value_i64
+    };
+    let planter = apply(PLANTED, "BombPlanter", 1, 2_737_763_130, &[0x0d, 0x0e], 16);
+    assert_eq!(planter, Some(902));
+    assert_eq!(
+        apply(PLANTED, "PlantSite", 2, 2_721_616_182, &[0x02], 2),
+        Some(2)
+    );
+    assert_eq!(
+        apply(PLANTED, "PlantSite", 2, 2_721_616_182, &[0x01], 2),
+        Some(1)
+    );
+    let defuser = apply(
+        DEFUSED,
+        "DefusingCharacter",
+        0,
+        2_403_630_779,
+        &[0xf5, 0x14],
+        16,
+    );
+    assert_eq!(defuser, Some(1402));
+    let gatherer = apply(ORB, "Orb Gatherer", 0, 2_930_585_102, &[0x65, 0x12], 16);
+    assert_eq!(gatherer, Some(1202));
+    let orb = apply(
+        ORB,
+        "Collectable Orb",
+        1,
+        2_066_098_074,
+        &[0x85, 0x09, 0x04],
+        24,
+    );
+    assert_eq!(orb, Some(33_346));
+    // A byte the packed value never claims is a residual, not a value.
+    let residual = apply(
+        PLANTED,
+        "BombPlanter",
+        1,
+        2_737_763_130,
+        &[0x0d, 0x0e, 0x00],
+        24,
+    );
+    assert_eq!(residual, None);
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (6, 1));
 }

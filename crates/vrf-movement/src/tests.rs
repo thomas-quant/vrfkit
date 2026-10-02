@@ -1,499 +1,436 @@
-//! Decoder tests: build a full RPC payload bit by bit, then decode it.
-//!
-//! These live in their own module because they exercise the whole stack --
-//! `rpc` framing down through `moves` into `primitives` -- so they belong to
-//! none of those modules individually. The `BitWriter` below is the inverse of
-//! the reader under test and is deliberately written out rather than shared
-//! with `vrf-bitio`: a bug mirrored in both would cancel out.
+//! Decoder tests: build a whole RPC payload bit by bit with vrf-testkit's
+//! writer, not `vrf-bitio`, so a bug mirrored in both cannot cancel out.
 use vrf_bitio::BitReader;
+use vrf_testkit::{BitWrite, BitWriter, pack};
 
-use crate::error::MovementError;
-use crate::moves::{MOVEMENT_MAGIC, next_marker};
+use crate::moves::MOVEMENT_MAGIC;
 use crate::rpc::{
     COMPONENT_DATA_STREAM_HANDLE, REMOTE_CHARACTER_UPDATES_HANDLE,
     SHOOTER_CHARACTER_NET_GUID_HANDLE, decode_movement_rpc,
 };
+use crate::types::{MovementMove, RpcDecodeResult};
 
-/// Helper: build a bit vector from individual bit values, then convert to bytes.
-struct BitWriter {
-    bits: Vec<bool>,
-}
-
-impl BitWriter {
-    fn new() -> Self {
-        Self { bits: Vec::new() }
-    }
-
-    fn write_bit(&mut self, v: bool) {
-        self.bits.push(v);
-    }
-
-    fn write_bits_u64(&mut self, value: u64, count: u32) {
-        for i in 0..count {
-            self.bits.push((value >> i) & 1 != 0);
-        }
-    }
-
-    fn write_u8(&mut self, v: u8) {
-        self.write_bits_u64(u64::from(v), 8);
-    }
-
-    fn write_u16(&mut self, v: u16) {
-        self.write_bits_u64(u64::from(v), 16);
-    }
-
-    fn write_u32(&mut self, v: u32) {
-        self.write_bits_u64(u64::from(v), 32);
-    }
-
-    fn write_f32(&mut self, v: f32) {
-        self.write_u32(v.to_bits());
-    }
-
-    fn write_int_packed(&mut self, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            self.write_u8(next_byte);
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn write_serialized_int(&mut self, value: u32, max_value: u32) {
-        let mut written_value = 0u32;
-        let mut mask = 1u32;
-        while written_value.saturating_add(mask) < max_value {
-            let bit = (value & mask) != 0;
-            self.write_bit(bit);
-            if bit {
-                written_value |= mask;
-            }
-            mask <<= 1;
-        }
-    }
-
-    fn write_other(&mut self, other: &BitWriter) {
-        self.bits.extend_from_slice(&other.bits);
-    }
-
-    fn bit_count(&self) -> u32 {
-        self.bits.len() as u32
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let byte_count = self.bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in self.bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
-}
-
-/// Build a single move payload (variant 0 or variant 1).
+/// One move record: movementState 3, position `(x, y, z)` as 3 x f32, and for
+/// variant 1 the velocity (4, 5, 6) at scale 10.
 fn build_move(variant1: bool, timestamp: u32, x: f32, y: f32, z: f32) -> BitWriter {
+    build_move_with(variant1, timestamp, (x, y, z), 2, None, false)
+}
+
+/// [`build_move`] with the three header values that carry posture set by the
+/// caller: the rotation-yaw-multiplier byte, the optional byte, and flag48.
+fn build_move_with(
+    variant1: bool,
+    timestamp: u32,
+    (x, y, z): (f32, f32, f32),
+    rotation_yaw_multiplier: u8,
+    optional_byte: Option<u8>,
+    flag48: bool,
+) -> BitWriter {
     let mut w = BitWriter::new();
-
-    // 25-bit header: moveType(1) + rotationYawMultiplier(8) + movementState(8) + unused(8)
-    w.write_bit(variant1); // moveType
-    w.write_u8(2); // rotationYawMultiplier
-    w.write_u8(3); // movementState
-    w.write_u8(0); // unused
-
-    // FixedVector rotationInput: 3 x u16 = 48 bits (all zero = center)
-    w.write_serialized_int(0x8000, 0x10000);
-    w.write_serialized_int(0x8000, 0x10000);
-    w.write_serialized_int(0x8000, 0x10000);
-
-    // Timestamp VLQ (= IntPacked)
-    w.write_int_packed(timestamp);
-
-    // Position: QuantizedVector(scaleFactor=100)
-    // Use componentBits=0, extraInfo=0 -> 3 x f32
-    w.write_serialized_int(0, 128); // info = 0 -> componentBits=0, extraInfo=0
-    w.write_f32(x);
-    w.write_f32(y);
-    w.write_f32(z);
-
-    // hasOptionalByte = false
-    w.write_bit(false);
-
-    // 33-bit flag+packedAngles: flag48(1) + packedAngles(32)
-    w.write_bit(false); // flag48
-    w.write_u32(0); // packedAngles (pitch=0, yaw=0)
-
-    if variant1 {
-        // variant1Flag + quantized velocity
-        w.write_bit(true);
-        // QuantizedVector(scaleFactor=10): componentBits=10, extraInfo=1
-        let info = 10u32 | (1 << 6); // componentBits=10, extraInfo=1
-        w.write_serialized_int(info, 128);
-        // 3 signed components of 10 bits each = 30 bits total
-        // velocity = (4.0, 5.0, 6.0) -> scaled by 10 = (40, 50, 60)
-        let vx = 40i64 as u64 & 0x3FF;
-        let vy = 50i64 as u64 & 0x3FF;
-        let vz = 60i64 as u64 & 0x3FF;
-        let packed = vx | (vy << 10) | (vz << 20);
-        w.write_bits_u64(packed, 30);
-    } else {
-        // variant0: 33-bit flag+angles
-        w.write_bit(false); // hasExternalCharacterRef = false
-        w.write_u32(0); // variant0PackedAngles
+    // Header (moveType, rotationYawMultiplier, movementState, unusedByte),
+    // rotationInput, timestamp, then position info 0: 3 x f32.
+    w.bit(variant1).u8(rotation_yaw_multiplier).u8(3).u8(0);
+    w.u16(0x8000).u16(0x8000).u16(0x8000).int_packed(timestamp);
+    w.serialized_int(0, 128).f32(x).f32(y).f32(z);
+    // hasOptionalByte (+ the byte), flag48, packedAngles.
+    w.bit(optional_byte.is_some());
+    if let Some(b) = optional_byte {
+        w.u8(b);
     }
-
-    // errorSentinel = false
-    w.write_bit(false);
-
+    w.bit(flag48).u32(0);
+    if variant1 {
+        // variant1Flag, then info componentBits 10 | extraInfo 1 and 40, 50, 60.
+        w.bit(true).serialized_int(10 | (1 << 6), 128);
+        w.bits(40, 10).bits(50, 10).bits(60, 10);
+    } else {
+        // hasExternalCharacterRef 0, then 32 bits of angles.
+        w.bit(false).u32(0);
+    }
+    w.bit(false); // errorSentinel
     w
 }
 
-/// Build a ComponentDataStream payload (direct, not byte-wrapped).
-fn build_component_data_stream(moves: &[BitWriter]) -> BitWriter {
-    let mut movement = BitWriter::new();
-    movement.write_u8(MOVEMENT_MAGIC);
+/// Bits after a real envelope; the decoder never reads them.
+const ENVELOPE_TRAILER_BITS: u32 = 24;
 
-    let mut marker: u8 = 1;
+/// A movement section: the magic, `moves` under markers 1 to 7 (then 1
+/// again), a `000` terminator, then `tail`.
+fn section(moves: &[BitWriter], tail: &[bool]) -> BitWriter {
+    let mut section = BitWriter::new();
+    section.u8(MOVEMENT_MAGIC);
     for (i, mv) in moves.iter().enumerate() {
-        movement.write_bits_u64(u64::from(marker), 3);
-        movement.write_other(mv);
-        if i + 1 < moves.len() {
-            marker = next_marker(marker);
-        }
+        section.bits(i as u64 % 7 + 1, 3).extend_bits(mv);
     }
-    // Terminal marker = 0 (only if we haven't hit padding)
-    if !moves.is_empty() {
-        movement.write_bits_u64(0, 3);
-    }
-
-    let mut payload = BitWriter::new();
-    payload.write_u16(movement.bit_count() as u16); // movementBitCount
-    payload.write_other(&movement);
-    payload
+    section.bits(0, 3).extend_bits(tail);
+    section
 }
 
-/// Build a full RPC payload with one character update.
-fn build_rpc_payload(shooter_guid: u32, component_stream: &BitWriter) -> BitWriter {
-    // Build the single update's property stream
+/// A direct component stream: `movementBitCount` is the section's length when
+/// `sized`, else 0 (the window runs to the end).
+fn component_stream(section: &[bool], sized: bool) -> BitWriter {
+    let mut stream = BitWriter::new();
+    stream.u16(if sized { section.len() as u16 } else { 0 });
+    stream.extend_bits(section);
+    stream
+}
+
+/// `payload`, whole bytes, in the envelope: a u16 byte count, the payload,
+/// then `trailer_bits` non-zero bits outside it.
+fn byte_wrapped(payload: &[bool], trailer_bits: u32) -> BitWriter {
+    assert_eq!(payload.len() % 8, 0, "an envelope holds whole bytes");
+    let mut stream = BitWriter::new();
+    stream.u16((payload.len() / 8) as u16).extend_bits(payload);
+    stream.extend((0..trailer_bits).map(|i| i % 3 == 0));
+    stream
+}
+
+/// The shape real replays use (crate docs, "Measured on real replays"):
+/// byte-wrapped, an open window, and after the last move the `000` terminator
+/// plus 8 to 15 non-zero bits to the byte boundary, within the 31 left unread.
+fn real_stream(moves: &[BitWriter], trailer_bits: u32) -> BitWriter {
+    let mut payload = component_stream(&section(moves, &[]), false);
+    let pad = 8 + (8 - payload.len() % 8) % 8;
+    payload.extend((0..pad).map(|i| i % 2 == 0));
+    byte_wrapped(&payload, trailer_bits)
+}
+
+/// The byte-wrapped section `magic 0x00`, which fails to decode.
+fn bad_magic_stream() -> BitWriter {
+    byte_wrapped(BitWriter::new().u16(0).u8(0x00), ENVELOPE_TRAILER_BITS)
+}
+
+/// One update: the shooter GUID field (handle 2, 32 bits), then `stream` as
+/// the ComponentDataStream (handle 3).
+fn update_with_stream(shooter_guid: u32, stream: &[bool]) -> BitWriter {
     let mut update = BitWriter::new();
-    // handle 2 (ShooterCharacterNetGuidValue): encodedHandle=3, payload=32 bits
-    update.write_int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
-    update.write_int_packed(32);
-    update.write_u32(shooter_guid);
-    // handle 3 (ComponentDataStream): encodedHandle=4, payload=stream bits
-    update.write_int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
-    update.write_int_packed(component_stream.bit_count());
-    update.write_other(component_stream);
-    // terminator
-    update.write_int_packed(0);
+    update
+        .int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1)
+        .int_packed(32)
+        .u32(shooter_guid)
+        .int_packed(COMPONENT_DATA_STREAM_HANDLE + 1)
+        .int_packed(stream.len() as u32)
+        .extend_bits(stream)
+        .int_packed(0);
+    update
+}
 
-    // Build the updates array
+/// An updates array declaring `updates.len()` and holding them in order.
+fn updates_array(updates: &[BitWriter]) -> BitWriter {
     let mut array = BitWriter::new();
-    array.write_int_packed(1); // updateCount = 1
-    array.write_int_packed(1); // encodedIndex = 1 -> index 0
-    array.write_other(&update);
-    array.write_int_packed(0); // array terminator
+    array.int_packed(updates.len() as u32);
+    for (i, update) in updates.iter().enumerate() {
+        array.int_packed(i as u32 + 1).extend_bits(update);
+    }
+    array.int_packed(0);
+    array
+}
 
-    // Build the RPC wrapper
+/// A RemoteCharacterUpdates array in the RPC envelope. The framing tests
+/// deform the array itself and call this directly.
+fn wrap_updates_array(array: &[bool]) -> BitWriter {
     let mut rpc = BitWriter::new();
-    rpc.write_bit(false); // first bit (consumed, value discarded per C# TryReadBit(out _))
-    // Property-style: handle 1 (RemoteCharacterUpdates)
-    rpc.write_int_packed(REMOTE_CHARACTER_UPDATES_HANDLE + 1); // encodedHandle = 2
-    rpc.write_int_packed(array.bit_count()); // payload bits
-    rpc.write_other(&array);
-    rpc.write_int_packed(0); // terminator
-
+    rpc.bit(false) // first bit, discarded
+        .int_packed(REMOTE_CHARACTER_UPDATES_HANDLE + 1)
+        .int_packed(array.len() as u32)
+        .extend_bits(array)
+        .int_packed(0);
     rpc
 }
 
-/// Wrap an already-built RemoteCharacterUpdates array in the RPC envelope.
-///
-/// `build_rpc_payload` builds the array too, which is what most tests want.
-/// The framing tests below need to deform the array itself, so the envelope is
-/// available on its own.
-fn wrap_updates_array(array: &BitWriter) -> BitWriter {
-    let mut rpc = BitWriter::new();
-    rpc.write_bit(false); // first bit, consumed and discarded
-    rpc.write_int_packed(REMOTE_CHARACTER_UPDATES_HANDLE + 1);
-    rpc.write_int_packed(array.bit_count());
-    rpc.write_other(array);
-    rpc.write_int_packed(0); // terminator
-    rpc
+/// A whole RPC with one update carrying `stream`.
+fn build_rpc_payload(shooter_guid: u32, stream: &[bool]) -> BitWriter {
+    wrap_updates_array(&updates_array(&[update_with_stream(shooter_guid, stream)]))
 }
 
 /// Decode a built payload, returning the result and the moves it emitted.
-fn decode(
-    rpc: &BitWriter,
-) -> (
-    crate::types::RpcDecodeResult,
-    Vec<crate::types::MovementMove>,
-) {
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, u64::from(rpc.bit_count())).unwrap();
+fn decode(rpc: &[bool]) -> (RpcDecodeResult, Vec<MovementMove>) {
+    let bytes = pack(rpc);
+    let mut reader = BitReader::with_bit_len(&bytes, rpc.len() as u64).unwrap();
     let mut moves = Vec::new();
     let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
     (result, moves)
 }
 
+/// `(sized tails, sized tail bits, open tails, open tail bits)`.
+fn tails(result: &RpcDecodeResult) -> (u32, u64, u32, u64) {
+    (
+        result.sized_section_tails,
+        result.sized_section_tail_bits,
+        result.open_section_tails,
+        result.open_section_tail_bits,
+    )
+}
+
+/// `(envelope trailer streams, envelope trailer bits)`.
+fn trailers(result: &RpcDecodeResult) -> (u32, u64) {
+    (
+        result.envelope_trailer_streams,
+        result.envelope_trailer_bits,
+    )
+}
+
 #[test]
 fn an_out_of_range_update_index_is_counted_not_discarded_in_silence() {
-    // updateCount is 1, so index 2 addresses an update the array never
-    // declared. The rest of the window cannot be located from there, so
-    // skipping it stays the right move -- but it used to be invisible:
-    // `Ok(update_count: 1, total_moves: 0, error_count: 0)` is exactly what a
-    // batch of empty-but-well-formed updates returns.
+    // updateCount 1, index 2, then a well-formed update only the index check
+    // refuses; uncounted, the lost update looks like none was sent.
+    let stream = real_stream(&[build_move(true, 7, 1.0, 2.0, 3.0)], ENVELOPE_TRAILER_BITS);
     let mut array = BitWriter::new();
-    array.write_int_packed(1); // updateCount = 1
-    array.write_int_packed(3); // encodedIndex = 3 -> index 2, out of range
-    array.write_u8(0xAA); // whatever follows is discarded
+    let update = update_with_stream(1111, &stream);
+    array.int_packed(1).int_packed(3).extend_bits(&update);
 
     let (result, moves) = decode(&wrap_updates_array(&array));
 
     assert_eq!(result.update_count, 1);
-    assert_eq!(result.total_moves, 0);
     assert!(moves.is_empty());
-    assert_eq!(
-        result.error_count, 1,
-        "the discarded array tail must reach the summary"
-    );
+    assert_eq!(result.error_count, 1, "the discarded array tail");
 }
 
 #[test]
 fn a_field_longer_than_the_update_window_is_counted() {
-    // A field declaring 128 payload bits with 8 left in the array means the
-    // framing no longer describes this payload. The decoder gives up on the
-    // window -- correctly, since it cannot find the next handle -- but used to
-    // report the give-up as a successful end-of-update, losing the second
-    // declared update with it.
+    // The framing no longer describes the payload, and the second declared
+    // update goes with the window.
     let mut array = BitWriter::new();
-    array.write_int_packed(2); // updateCount = 2
-    array.write_int_packed(1); // encodedIndex = 1 -> index 0
-    array.write_int_packed(6); // encodedHandle 6 -> handle 5, not decoded here
-    array.write_int_packed(128); // ... declaring 128 bits
-    array.write_u8(0); // ... with only 8 left
+    // updateCount 2, index 0, then handle 5 declaring 128 bits with 8 left.
+    array
+        .int_packed(2)
+        .int_packed(1)
+        .int_packed(6)
+        .int_packed(128)
+        .u8(0);
 
     let (result, moves) = decode(&wrap_updates_array(&array));
 
     assert_eq!(result.update_count, 2);
-    assert_eq!(result.total_moves, 0);
     assert!(moves.is_empty());
-    assert_eq!(
-        result.error_count, 1,
-        "an over-long field declaration must reach the summary"
-    );
+    assert_eq!(result.error_count, 1, "an over-long field declaration");
 }
 
 #[test]
-fn an_undersized_shooter_guid_field_and_its_orphaned_stream_are_counted() {
-    // A 31-bit GUID field is one bit short of the u32 it must carry, so the
-    // GUID stays `None` -- and the component stream that follows is then
-    // consumed without being decoded, because there is no character to
-    // attribute its moves to. Two separate losses, previously neither counted
-    // nor visible: the update returned successfully with zero moves.
-    let stream = build_component_data_stream(&[build_move(false, 7, 1.0, 2.0, 3.0)]);
-
-    let mut update = BitWriter::new();
-    update.write_int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
-    update.write_int_packed(31); // one bit short of a u32
-    update.write_bits_u64(0, 31);
-    update.write_int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
-    update.write_int_packed(stream.bit_count());
-    update.write_other(&stream);
-    update.write_int_packed(0);
-
-    let mut array = BitWriter::new();
-    array.write_int_packed(1);
-    array.write_int_packed(1);
-    array.write_other(&update);
-    array.write_int_packed(0);
-
-    let (result, moves) = decode(&wrap_updates_array(&array));
-
-    assert_eq!(result.total_moves, 0);
-    assert!(moves.is_empty());
-    assert_eq!(
-        result.error_count, 2,
-        "the undersized GUID and the stream it orphaned are counted separately"
+fn a_shooter_guid_field_not_32_bits_wide_and_its_orphaned_stream_are_counted() {
+    // Too narrow for its u32, or wider (a u32 read would keep the low 32
+    // bits): no GUID, so the stream after it is consumed undecoded.
+    let stream = real_stream(
+        &[build_move(false, 7, 1.0, 2.0, 3.0)],
+        ENVELOPE_TRAILER_BITS,
     );
+    for width in [31, 33] {
+        let mut update = BitWriter::new();
+        update
+            .int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1)
+            .int_packed(width)
+            .bits(0, width)
+            .int_packed(COMPONENT_DATA_STREAM_HANDLE + 1)
+            .int_packed(stream.bit_len())
+            .extend_bits(&stream)
+            .int_packed(0);
+
+        let (result, moves) = decode(&wrap_updates_array(&updates_array(&[update])));
+
+        assert!(moves.is_empty(), "{width} bits");
+        assert_eq!(result.error_count, 2, "{width} bits: the GUID, the stream");
+    }
 }
 
 #[test]
 fn a_component_stream_ahead_of_its_guid_is_counted() {
-    // Same loss from the other ordering: handle 3 arrives before handle 2, so
-    // the stream is consumed with no GUID in hand. The decoder is single-pass
-    // and cannot rewind, so dropping the stream is the honest outcome --
-    // reporting it as a clean zero-move update was not.
-    let stream = build_component_data_stream(&[build_move(false, 7, 1.0, 2.0, 3.0)]);
-
-    let mut update = BitWriter::new();
-    update.write_int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
-    update.write_int_packed(stream.bit_count());
-    update.write_other(&stream);
-    update.write_int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
-    update.write_int_packed(32);
-    update.write_u32(4321);
-    update.write_int_packed(0);
-
-    let mut array = BitWriter::new();
-    array.write_int_packed(1);
-    array.write_int_packed(1);
-    array.write_other(&update);
-    array.write_int_packed(0);
-
-    let (result, moves) = decode(&wrap_updates_array(&array));
-
-    assert_eq!(result.total_moves, 0);
-    assert!(moves.is_empty());
-    assert_eq!(result.error_count, 1, "the orphaned stream must be counted");
-}
-
-#[test]
-fn a_component_stream_shorter_than_its_u16_header_is_not_a_valid_empty_update() {
-    let mut update = BitWriter::new();
-    update.write_int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
-    update.write_int_packed(32);
-    update.write_u32(4321);
-    update.write_int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
-    update.write_int_packed(8);
-    update.write_u8(0x52); // fewer than the mandatory 16 header bits
-    update.write_int_packed(0);
-
-    let mut array = BitWriter::new();
-    array.write_int_packed(1);
-    array.write_int_packed(1);
-    array.write_other(&update);
-    array.write_int_packed(0);
-
-    let (result, moves) = decode(&wrap_updates_array(&array));
-
-    assert!(moves.is_empty());
-    assert_eq!(result.error_count, 1, "short component must be a loss");
-}
-
-#[test]
-fn a_malformed_trailing_padding_byte_is_counted() {
-    // After the array terminator exactly 8 bits remain, so the decoder spends
-    // them on an IntPacked. This one's continuation bit demands a sixth byte
-    // that the window does not have. The read's error was dropped with
-    // `let _ =`, so a payload whose tail does not parse reported success.
-    let mut array = BitWriter::new();
-    array.write_int_packed(0); // updateCount = 0
-    array.write_int_packed(0); // encodedIndex = 0 -> array terminator
-    array.write_u8(0x01); // continuation set, nothing follows
-
-    let (result, moves) = decode(&wrap_updates_array(&array));
-
-    assert_eq!(result.total_moves, 0);
-    assert!(moves.is_empty());
-    assert_eq!(
-        result.error_count, 1,
-        "a trailing byte that does not parse must reach the summary"
+    // Handle 3 before handle 2: a single pass cannot rewind to the GUID.
+    let stream = real_stream(
+        &[build_move(false, 7, 1.0, 2.0, 3.0)],
+        ENVELOPE_TRAILER_BITS,
     );
+    let mut update = BitWriter::new();
+    update
+        .int_packed(COMPONENT_DATA_STREAM_HANDLE + 1)
+        .int_packed(stream.bit_len())
+        .extend_bits(&stream)
+        .int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1)
+        .int_packed(32)
+        .u32(4321)
+        .int_packed(0);
+
+    let (result, moves) = decode(&wrap_updates_array(&updates_array(&[update])));
+
+    assert!(moves.is_empty());
+    assert_eq!(result.error_count, 1, "the orphaned stream");
 }
 
 #[test]
-fn decodes_single_variant0_move() {
-    let mv = build_move(false, 42, 1.25, 2.5, 3.75);
-    let stream = build_component_data_stream(&[mv]);
-    let rpc = build_rpc_payload(1234, &stream);
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
+fn a_stream_that_fails_to_decode_does_not_drop_the_updates_after_it() {
+    // The decoder is past the whole length-delimited stream before reading
+    // it, so a failure inside costs only that stream.
+    let short_header = BitWriter::new().u8(0x52).clone(); // under 16 bits
+    let good = real_stream(&[build_move(true, 7, 1.0, 2.0, 3.0)], ENVELOPE_TRAILER_BITS);
+    for (name, bad) in [
+        ("bad magic", bad_magic_stream()),
+        ("short header", short_header),
+    ] {
+        let array = updates_array(&[
+            update_with_stream(1111, &bad),
+            update_with_stream(2222, &good),
+        ]);
 
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
+        let (result, moves) = decode(&wrap_updates_array(&array));
 
-    assert_eq!(result.total_moves, 1);
-    assert_eq!(result.update_count, 1);
+        assert_eq!(result.update_count, 2, "{name}");
+        assert_eq!(result.error_count, 1, "{name}: the failed stream, once");
+        assert_eq!(result.total_moves, 1, "{name}: the next update's move");
+        assert_eq!(moves.len(), 1, "{name}");
+        assert_eq!(moves[0].shooter_character_net_guid, 2222, "{name}");
+    }
+}
+
+#[test]
+fn bits_after_the_updates_array_terminator_are_counted_unless_one_int_packed() {
+    // Behind the zero index only 8 bits that parse as an IntPacked are
+    // expected; anything else is lost updates or a drifted cursor.
+    let stream = real_stream(&[build_move(true, 7, 1.0, 2.0, 3.0)], ENVELOPE_TRAILER_BITS);
+    let mut update = BitWriter::new();
+    update
+        .int_packed(1)
+        .extend_bits(&update_with_stream(1111, &stream));
+    let byte = |b| BitWriter::new().u8(b).clone();
+    for (name, declared, after, errors) in [
+        ("an IntPacked", 0, byte(0x02), 0),
+        ("a byte asking for another", 0, byte(0x01), 1),
+        ("16 bits", 0, BitWriter::new().u16(0xBEEF).clone(), 1),
+        ("a real update", 1, update, 1),
+    ] {
+        let mut array = BitWriter::new();
+        array.int_packed(declared).int_packed(0).extend_bits(&after);
+
+        let (result, moves) = decode(&wrap_updates_array(&array));
+
+        assert!(moves.is_empty(), "{name}");
+        assert_eq!(result.error_count, errors, "{name}");
+    }
+}
+
+#[test]
+fn keeps_the_posture_bits_of_the_header() {
+    // Walk key (16) and full crouch (2) in the multiplier byte, with bit 7 set
+    // so the signed read is exercised; a crouch-progress byte; flag48 set.
+    // Then a plain move after it: if the optional byte were not consumed the
+    // second move's marker and position would be read from the wrong bits.
+    let posture = build_move_with(true, 7, (1.0, 2.0, 3.0), 0x80 | 16 | 2, Some(14), true);
+    let plain = build_move(false, 8, 10.0, 11.0, 12.0);
+    let stream = real_stream(&[posture, plain], ENVELOPE_TRAILER_BITS);
+    let (result, moves) = decode(&build_rpc_payload(4321, &stream));
+
     assert_eq!(result.error_count, 0);
-    assert_eq!(moves.len(), 1);
-    assert_eq!(moves[0].shooter_character_net_guid, 1234);
-    assert_eq!(moves[0].move_type, 0);
-    assert_eq!(moves[0].timestamp, 42);
-    assert!((moves[0].pos_x - 1.25).abs() < 0.001);
-    assert!((moves[0].pos_y - 2.5).abs() < 0.001);
-    assert!((moves[0].pos_z - 3.75).abs() < 0.001);
-    assert_eq!(moves[0].vel_x, 0.0);
-    assert_eq!(moves[0].vel_y, 0.0);
-    assert_eq!(moves[0].vel_z, 0.0);
-}
-
-#[test]
-fn decodes_single_variant1_move_with_velocity() {
-    let mv = build_move(true, 42, 1.25, 2.5, 3.75);
-    let stream = build_component_data_stream(&[mv]);
-    let rpc = build_rpc_payload(5678, &stream);
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
-
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
-
-    assert_eq!(result.total_moves, 1);
-    assert_eq!(moves[0].move_type, 1);
-    assert!((moves[0].vel_x - 4.0).abs() < 0.001);
-    assert!((moves[0].vel_y - 5.0).abs() < 0.001);
-    assert!((moves[0].vel_z - 6.0).abs() < 0.001);
-}
-
-#[test]
-fn decodes_two_moves_in_one_update() {
-    let mv1 = build_move(false, 42, 1.0, 2.0, 3.0);
-    let mv2 = build_move(false, 84, 10.0, 11.0, 12.0);
-    let stream = build_component_data_stream(&[mv1, mv2]);
-    let rpc = build_rpc_payload(9999, &stream);
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
-
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
-
-    assert_eq!(result.total_moves, 2);
     assert_eq!(moves.len(), 2);
-    assert_eq!(moves[0].timestamp, 42);
-    assert!((moves[0].pos_x - 1.0).abs() < 0.001);
-    assert_eq!(moves[1].timestamp, 84);
+    assert_eq!(moves[0].rotation_yaw_multiplier, (0x80u8 | 16 | 2) as i8);
+    assert_eq!(moves[0].rotation_yaw_multiplier & 16, 16);
+    assert_eq!(moves[0].optional_movement_raw_byte, Some(14));
+    assert!(moves[0].flag48);
+    assert!((moves[0].vel_x - 4.0).abs() < 0.001);
+
+    assert_eq!(moves[1].rotation_yaw_multiplier, 2);
+    assert_eq!(moves[1].optional_movement_raw_byte, None);
+    assert!(!moves[1].flag48);
+    assert_eq!(moves[1].timestamp, 8);
     assert!((moves[1].pos_x - 10.0).abs() < 0.001);
+    assert!((moves[1].pos_z - 12.0).abs() < 0.001);
+}
+
+#[test]
+fn decodes_both_move_variants_in_either_component_form() {
+    let moves = [
+        build_move(false, 42, 1.25, 2.5, 3.75),
+        build_move(true, 84, 10.0, 11.0, 12.0),
+    ];
+    let wrapped = real_stream(&moves, ENVELOPE_TRAILER_BITS);
+    let direct = component_stream(&section(&moves, &[]), true);
+    for (name, stream, envelope) in [("wrapped", wrapped, (1, 24)), ("direct", direct, (0, 0))] {
+        let (result, decoded) = decode(&build_rpc_payload(1234, &stream));
+
+        let counts = (result.total_moves, result.update_count, result.error_count);
+        assert_eq!(counts, (2, 1, 0), "{name}");
+        assert_eq!(trailers(&result), envelope, "{name}");
+        let got: Vec<_> = decoded
+            .iter()
+            .map(|m| {
+                let pos = [m.pos_x, m.pos_y, m.pos_z];
+                let vel = [m.vel_x, m.vel_y, m.vel_z];
+                let guid = m.shooter_character_net_guid;
+                (guid, m.move_type, m.timestamp, m.movement_state, pos, vel)
+            })
+            .collect();
+        let variant0 = (1234, 0, 42, 3, [1.25, 2.5, 3.75], [0.0; 3]);
+        let variant1 = (1234, 1, 84, 3, [10.0, 11.0, 12.0], [4.0, 5.0, 6.0]);
+        assert_eq!(got, [variant0, variant1], "{name}");
+    }
+}
+
+#[test]
+fn bits_after_the_top_level_zero_handle_are_counted() {
+    let mut rpc = wrap_updates_array(&updates_array(&[]));
+    rpc.u16(0xBEEF);
+    assert_eq!(decode(&rpc).0.error_count, 1);
 }
 
 #[test]
 fn empty_rpc_returns_zero() {
-    // Zero bits -> empty
-    let data = [0u8; 0];
-    let mut reader = BitReader::with_bit_len(&data, 0).unwrap();
-
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
+    let (result, moves) = decode(&BitWriter::new());
     assert_eq!(result.total_moves, 0);
     assert!(moves.is_empty());
 }
 
 #[test]
-fn invalid_magic_returns_error() {
-    // Build a stream with wrong magic
-    let mut movement = BitWriter::new();
-    movement.write_u8(0x00); // wrong magic
+fn section_tails_are_tallied_apart_by_window_and_never_as_errors() {
+    // Not errors, which would change which batches keep raw bits. In an open
+    // window what follows a zero marker may be other component data, so the
+    // two kinds are never summed.
+    let mv = || build_move(true, 10, 1.0, 2.0, 3.0);
+    let sized = |s: &[bool]| component_stream(s, true);
+    let open = |s: &[bool]| component_stream(s, false);
+    // A move or just the magic, then `000` and 40 set bits: over 31 bits
+    // after a move, so the zero marker is read.
+    let (after_move, after_magic) = (section(&[mv()], &[true; 40]), section(&[], &[true; 40]));
+    let no_magic = BitWriter::new().bits(0b10110, 5).clone();
+    let no_marker = BitWriter::new().u8(MOVEMENT_MAGIC).bits(0b11, 2).clone();
+    // Not tails: the real end, within 31 bits of the last move; an empty open
+    // window (no magic, but nothing unread); a section ending on its zero
+    // marker, after a move or after the magic.
+    let (ends, only_000) = (section(&[mv()], &[]), section(&[], &[]));
+    let real = real_stream(&[mv(), mv()], ENVELOPE_TRAILER_BITS);
+    for (name, stream, moves, expected) in [
+        ("sized, move", sized(&after_move), 1, (1, 40, 0, 0)),
+        ("sized, magic", sized(&after_magic), 0, (1, 40, 0, 0)),
+        ("no magic", sized(&no_magic), 0, (1, 5, 0, 0)),
+        ("no marker", sized(&no_marker), 0, (1, 2, 0, 0)),
+        ("open, move", open(&after_move), 1, (0, 0, 1, 40)),
+        ("real", real, 2, (0, 0, 0, 0)),
+        ("empty open window", open(&[]), 0, (0, 0, 0, 0)),
+        ("ends on 000", sized(&ends), 1, (0, 0, 0, 0)),
+        ("only 000", sized(&only_000), 0, (0, 0, 0, 0)),
+    ] {
+        let (result, decoded) = decode(&build_rpc_payload(77, &stream));
 
-    let mut payload = BitWriter::new();
-    payload.write_u16(movement.bit_count() as u16);
-    payload.write_other(&movement);
+        assert_eq!(decoded.len(), moves, "{name}");
+        assert_eq!(result.error_count, 0, "{name}");
+        assert_eq!(tails(&result), expected, "{name}");
+    }
+}
 
-    let rpc = build_rpc_payload(1234, &payload);
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
+#[test]
+fn every_envelope_and_the_bits_after_it_are_tallied_per_stream() {
+    // Summed per stream, not taken from the last one. Counted with nothing
+    // after it, so a vanished trailer reads as bits short of 24 per stream,
+    // and when the section inside fails.
+    let mv = || build_move(false, 9, 4.0, 5.0, 6.0);
+    let two = vec![real_stream(&[mv()], 24), real_stream(&[mv()], 13)];
+    let bare = vec![real_stream(&[mv()], 0)];
+    for (name, streams, moves, errors, expected) in [
+        ("24 and 13 bits", two, 2, 0, (2, 37)),
+        ("nothing after it", bare, 1, 0, (1, 0)),
+        ("a failed section", vec![bad_magic_stream()], 0, 1, (1, 24)),
+    ] {
+        let updates: Vec<_> = streams.iter().map(|s| update_with_stream(77, s)).collect();
 
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m));
-    // The error should be caught at the update level, incrementing error_count.
-    // Since we catch errors in decode_single_update, it returns Ok with error_count > 0.
-    match result {
-        Ok(r) => assert_eq!(r.error_count, 1),
-        Err(MovementError::InvalidMagic(0x00)) => {} // also acceptable
-        Err(e) => panic!("unexpected error: {e}"),
+        let (result, decoded) = decode(&wrap_updates_array(&updates_array(&updates)));
+
+        assert_eq!(decoded.len(), moves, "{name}");
+        assert_eq!(result.error_count, errors, "{name}");
+        assert_eq!(trailers(&result), expected, "{name}");
     }
 }

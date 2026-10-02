@@ -4,21 +4,21 @@
   "++Ares-Core+release-13.02": 1
  },
  "totals": {
-  "blocks": 774299,
-  "fields": 568557,
-  "rpcs": 408591,
+  "blocks": 779816,
+  "fields": 596441,
+  "rpcs": 409397,
   "malformed": 0,
-  "skipped": 23028982
+  "skipped": 25771077
  },
  "per_file": {
   "1.vrf": {
    "branch": "++Ares-Core+release-13.02",
-   "rate": "98.919512",
-   "blocks": 774299,
-   "fields": 568557,
-   "rpcs": 408591,
+   "rate": "100.000000",
+   "blocks": 779816,
+   "fields": 596441,
+   "rpcs": 409397,
    "malformed": 0,
-   "skipped": 23028982
+   "skipped": 25771077
   }
  }
 }

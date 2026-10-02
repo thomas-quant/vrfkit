@@ -1,256 +1,420 @@
-//! Arrow schema definitions for the five export tables.
-//!
-//! Schemas are defined once here so that writer and reader agree; the module is
-//! public so a consumer can validate a file it did not write against the same
-//! definition. The field metadata (e.g. `PARQUET:field_id`) is intentionally
-//! omitted -- Parquet assigns ordinal field IDs automatically, and manual IDs
-//! would only matter if we needed Iceberg-style schema evolution, which we
-//! don't.
-//!
-//! Every schema is compiled in whenever the `parquet` feature is on, including
-//! for tables whose writer feature is off: a schema is a few `Field`s and no
-//! code, and a caller reading `fields.parquet` should not have to enable the
-//! writer to get its column types.
+//! Arrow schemas of the 13 export tables, public so a consumer can check a
+//! file it did not write. Every schema compiles under `parquet` alone; a
+//! table's array builder compiles only with the features that write it.
 
 use arrow_schema::{DataType, Field, Schema};
 use std::sync::Arc;
 
-/// Schema for the `fields` table (long format).
-///
-/// Most rows represent one decoded field. A whole ClassNetCache block whose
-/// function table is unresolved is preserved as one explicitly marked row;
-/// it is not split into fabricated fields. The schema itself stays unchanged.
-///
-/// Column ordering is deliberate: the "address" columns come first (time,
-/// packet, channel, actor, group, handle, name) so that predicate pushdown on
-/// actor or group benefits from row-group statistics without reading value
-/// columns. The sparse value columns at the end compress to near-zero when
-/// null.
-pub fn fields_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("time_ms", DataType::UInt32, false),
-        Field::new("packet_id", DataType::UInt32, false),
-        Field::new("channel_index", DataType::UInt32, false),
-        Field::new("actor_net_guid", DataType::UInt32, false),
-        // Nullable: only subobject blocks carry one, and null must stay
-        // distinguishable from 0 (the engine's invalid-GUID sentinel).
-        Field::new("object_net_guid", DataType::UInt32, true),
-        // Dictionary<Int32, Utf8>: ~300 distinct group paths over 780k rows.
-        Field::new(
-            "group_path",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            false,
-        ),
-        Field::new("handle", DataType::UInt32, false),
-        // Nullable because the field name may be unknown (unmapped export index).
-        Field::new(
-            "field_name",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            true,
-        ),
-        // The replay's own `compatible_checksum` for this handle. Nullable, and
-        // the null is information: it means the replay declares no checksum
-        // here (array leaves and struct blobs are addressed inside a payload,
-        // not by a declared handle), not that the export failed to carry one.
-        // See `FieldRecord::compatible_checksum`.
-        Field::new("compatible_checksum", DataType::UInt32, true),
-        Field::new("bit_count", DataType::UInt32, false),
-        // Raw bit payload; nullable because zero-bit fields carry no data.
-        Field::new("raw_bits", DataType::Binary, true),
-        // Sparse typed-value overlay -- at most one of these is non-null per row.
-        Field::new("value_i64", DataType::Int64, true),
-        Field::new("value_f64", DataType::Float64, true),
-        Field::new("value_bool", DataType::Boolean, true),
-        // Dictionary<Int32, Utf8>: the decoded values repeat heavily (enum
-        // strings, JSON blobs), so a dictionary shrinks the column even though
-        // it is the highest-cardinality of the three string columns.
-        Field::new(
-            "value_str",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            true,
-        ),
-    ])
+/// Declares a table's columns once, in file order. `$schema()` is the Arrow
+/// schema and `$row::columns(rows)` builds the matching arrays, so a column's
+/// name, type and value cannot come apart (`RecordBatch::try_new` checks only
+/// types). `name?:` is nullable; `dict(d, b)` is `Dictionary<Int32, Utf8>`, its
+/// builder sized for `d` distinct values and `b` bytes a row.
+macro_rules! columns {
+    (
+        $(#[$doc:meta])* $vis:vis fn $schema:ident;
+        #[cfg($cfg:meta)] $row:ident {
+            $($name:ident $(?: $opt:ident)? $(: $kind:ident)? $(($($size:literal),*))?,)+
+        }
+    ) => {
+        $(#[$doc])*
+        $vis fn $schema() -> Schema {
+            Schema::new(vec![$(Field::new(
+                stringify!($name),
+                column!(@type $($opt)? $($kind)? $(($($size),*))?),
+                column!(@nullable $($opt)?),
+            )),+])
+        }
+
+        #[cfg($cfg)]
+        impl crate::record::$row {
+            pub(crate) fn columns<'a>(
+                rows: impl ExactSizeIterator<Item = &'a Self> + Clone,
+            ) -> Vec<arrow_array::ArrayRef> {
+                vec![$(column!(rows $name $(@opt $opt)? $(@kind $kind)? $(($($size),*))?)),+]
+            }
+        }
+    };
 }
 
-/// Schema for the `movement` table (fixed format: every row is identical
-/// structure, no nulls).
-///
-/// The coordinate system matches Unreal Engine's left-handed Z-up convention.
-/// Positions are in centimetres; yaw/pitch are in degrees, unsigned and
-/// wrapped to `[0, 360)` -- decoded from a `u16` scaled by `360/65536`, never
-/// negative. A downward pitch near straight-down does not read as a small
-/// negative number here; it wraps to a value near 360.
-/// Velocity is cm/s as reported by the replication channel.
-///
-/// The last three columns are appended rather than interleaved: existing
-/// consumers address movement columns positionally, so inserting `timestamp`
-/// next to `time_ms` (where it reads more naturally) would silently repoint
-/// every downstream `column(3)`/`column(8)` at the wrong data.
-///
-/// `mode_flags` is deliberately absent. The decoder exposes it on
-/// `MovementMove`, but it is assigned from the same local as `movement_state`
-/// at the struct's only construction site, so no code path can make the two
-/// differ -- exporting it would add a byte-identical column over ~1.8 M rows.
-pub fn movement_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("time_ms", DataType::UInt32, false),
-        Field::new("packet_id", DataType::UInt32, false),
-        Field::new("character_net_guid", DataType::UInt32, false),
-        Field::new("pos_x", DataType::Float32, false),
-        Field::new("pos_y", DataType::Float32, false),
-        Field::new("pos_z", DataType::Float32, false),
-        Field::new("yaw", DataType::Float32, false),
-        Field::new("pitch", DataType::Float32, false),
-        Field::new("vel_x", DataType::Float32, false),
-        Field::new("vel_y", DataType::Float32, false),
-        Field::new("vel_z", DataType::Float32, false),
-        // Server-assigned tick from the move header. Distinct from `time_ms`,
-        // which is the replay-relative packet time this crate stamps on.
-        Field::new("timestamp", DataType::UInt32, false),
-        // Move-header byte at bits [9..17]. Named for a posture it has never
-        // been observed to carry: constant 0 on all 1,034,035,170 exported
-        // movement rows across 527 corpus replays -- see
-        // `MovementRecord::movement_state`. Do not read posture out of
-        // it. One wire byte, so UInt8 -- widening would cost 3 bytes per row
-        // before compression for no added range.
-        Field::new("movement_state", DataType::UInt8, false),
-        // 0 = variant0 (no velocity on the wire), 1 = variant1 (velocity
-        // present). Effectively a bool, but kept as the decoder's u8 so the
-        // column stays a faithful copy of the wire value.
-        Field::new("move_type", DataType::UInt8, false),
-    ])
+/// One column of [`columns!`]: its Arrow type, its nullability, or its array.
+/// Non-null columns use `from_iter_values` and nullable ones `from_iter`, the
+/// calls the file bytes are pinned to.
+macro_rules! column {
+    (@nullable) => { false };
+    (@nullable $kind:ident) => { true };
+    (@type bool) => { DataType::Boolean };
+    (@type str) => { DataType::Utf8 };
+    (@type bytes) => { DataType::Binary };
+    (@type dict($distinct:literal, $bytes:literal)) => {
+        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+    };
+    (@type $prim:ident) => {
+        <column!(@prim $prim) as arrow_array::types::ArrowPrimitiveType>::DATA_TYPE
+    };
+    (@prim i8) => { arrow_array::types::Int8Type };
+    (@prim u8) => { arrow_array::types::UInt8Type };
+    (@prim u32) => { arrow_array::types::UInt32Type };
+    (@prim u64) => { arrow_array::types::UInt64Type };
+    (@prim i32) => { arrow_array::types::Int32Type };
+    (@prim i64) => { arrow_array::types::Int64Type };
+    (@prim f32) => { arrow_array::types::Float32Type };
+    (@prim f64) => { arrow_array::types::Float64Type };
+    (@array $array:expr) => { Arc::new($array) as arrow_array::ArrayRef };
+    (@dict $rows:ident, $distinct:literal, $bytes:literal, $values:expr) => {{
+        let mut builder =
+            arrow_array::builder::StringDictionaryBuilder::<arrow_array::types::Int32Type>::with_capacity(
+                $rows.len(),
+                $distinct,
+                $rows.len() * $bytes,
+            );
+        builder.extend($values);
+        column!(@array builder.finish())
+    }};
+    // Every bool form reaches the same builder through arrow's `BooleanAdapter`.
+    ($rows:ident $name:ident $(@opt)? $(@kind)? bool) => {
+        column!(@array arrow_array::BooleanArray::from_iter($rows.clone().map(|r| r.$name)))
+    };
+    ($rows:ident $name:ident @kind str) => {
+        column!(@array arrow_array::StringArray::from_iter_values($rows.clone().map(|r| &*r.$name)))
+    };
+    ($rows:ident $name:ident @opt str) => {
+        column!(@array arrow_array::StringArray::from_iter($rows.clone().map(|r| r.$name.as_deref())))
+    };
+    ($rows:ident $name:ident @kind bytes) => {
+        column!(@array arrow_array::BinaryArray::from_iter_values($rows.clone().map(|r| &*r.$name)))
+    };
+    ($rows:ident $name:ident @opt bytes) => {
+        column!(@array arrow_array::BinaryArray::from_iter($rows.clone().map(|r| r.$name.as_deref())))
+    };
+    ($rows:ident $name:ident @kind dict($distinct:literal, $bytes:literal)) => {
+        column!(@dict $rows, $distinct, $bytes, $rows.clone().map(|r| Some(&*r.$name)))
+    };
+    ($rows:ident $name:ident @opt dict($distinct:literal, $bytes:literal)) => {
+        column!(@dict $rows, $distinct, $bytes, $rows.clone().map(|r| r.$name.as_deref()))
+    };
+    ($rows:ident $name:ident @kind $prim:ident) => {
+        column!(@array arrow_array::PrimitiveArray::<column!(@prim $prim)>::from_iter_values(
+            $rows.clone().map(|r| r.$name),
+        ))
+    };
+    ($rows:ident $name:ident @opt $prim:ident) => {
+        column!(@array arrow_array::PrimitiveArray::<column!(@prim $prim)>::from_iter(
+            $rows.clone().map(|r| r.$name),
+        ))
+    };
 }
 
-/// Convenience: wrap a schema in an Arc (ArrowWriter expects `SchemaRef`).
-pub fn fields_schema_ref() -> Arc<Schema> {
-    Arc::new(fields_schema())
+/// Each schema's `Arc` twin, which `ArrowWriter` takes: one line a pairing, so
+/// a mismatched pair (all return `Arc<Schema>`) is visible.
+macro_rules! schema_refs {
+    ($($ref_fn:ident => $schema_fn:ident),+ $(,)?) => {
+        $(
+            pub fn $ref_fn() -> Arc<Schema> {
+                Arc::new($schema_fn())
+            }
+        )+
+    };
 }
 
-/// Convenience: wrap a schema in an Arc.
-pub fn movement_schema_ref() -> Arc<Schema> {
-    Arc::new(movement_schema())
+schema_refs! {
+    checkpoint_fields_schema_ref => checkpoint_fields_schema,
+    checkpoint_actors_schema_ref => checkpoint_actors_schema,
+    checkpoint_net_guids_schema_ref => checkpoint_net_guids_schema,
+    checkpoint_blocks_schema_ref => checkpoint_blocks_schema,
+    checkpoint_guid_entries_schema_ref => checkpoint_guid_entries_schema,
+    checkpoint_export_groups_schema_ref => checkpoint_export_groups_schema,
+    checkpoint_export_fields_schema_ref => checkpoint_export_fields_schema,
+    fields_schema_ref => fields_schema,
+    movement_schema_ref => movement_schema,
+    actors_schema_ref => actors_schema,
+    net_guids_schema_ref => net_guids_schema,
+    events_schema_ref => events_schema,
+    partials_schema_ref => partials_schema,
 }
 
-/// Schema for the `actors` table (one row per channel open or close).
-///
-/// This table makes actors visible even if they never replicate a single
-/// field -- e.g. weapon/ability instances, DefuserItem, HeavyArmorItem.
-/// Without it, only actors that produce at least one field row in
-/// `fields.parquet` can be resolved downstream.
-///
-/// Spawn location and rotation are nullable because static actors and
-/// channel-close rows do not carry spatial data.
-pub fn actors_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("time_ms", DataType::UInt32, false),
-        Field::new("packet_id", DataType::UInt32, false),
-        Field::new("channel_index", DataType::UInt32, false),
-        Field::new("actor_net_guid", DataType::UInt32, false),
-        // "open", "close", or "dormant" -- small cardinality, dictionary is overkill.
-        Field::new("event", DataType::Utf8, false),
-        // Nullable: class path may be unresolvable for some actors.
-        Field::new(
-            "class_path",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            true,
-        ),
-        // Nullable: archetype path may be absent (static actors).
-        Field::new(
-            "archetype_path",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            true,
-        ),
-        // Spawn location (nullable -- only present for dynamic actor opens).
-        Field::new("spawn_x", DataType::Float32, true),
-        Field::new("spawn_y", DataType::Float32, true),
-        Field::new("spawn_z", DataType::Float32, true),
-        // Spawn rotation (nullable).
-        Field::new("spawn_pitch", DataType::Float32, true),
-        Field::new("spawn_yaw", DataType::Float32, true),
-        Field::new("spawn_roll", DataType::Float32, true),
-    ])
+columns! {
+    /// The two identity columns every checkpoint schema starts with.
+    fn identity_schema;
+    #[cfg(feature = "checkpoint-context")]
+    CheckpointIdentity {
+        checkpoint_index: u32,
+        checkpoint_id: str,
+    }
 }
 
-/// Convenience: wrap actors schema in an Arc.
-pub fn actors_schema_ref() -> Arc<Schema> {
-    Arc::new(actors_schema())
+/// `base` with the two checkpoint identity columns in front of its own.
+fn checkpoint_schema(base: Schema) -> Schema {
+    Schema::new([identity_schema().fields().to_vec(), base.fields().to_vec()].concat())
 }
 
-/// Schema for the `net_guids` table (one row per registered NetGUID).
-///
-/// This is the replay's own object registry: which GUID maps to which object
-/// path, and which object contains it. `actors.parquet` only covers GUIDs that
-/// opened a channel, which excludes subobjects -- a weapon's `FiringState`
-/// appears in no other table. Without the outer chain there is no route from a
-/// shot event to the equippable that fired it.
-///
-/// `outer_net_guid` is nullable rather than zero-filled: GUID 0 is the engine's
-/// "invalid" sentinel, so collapsing "no outer declared" onto 0 would erase the
-/// distinction between an unknown parent and an explicitly invalid one.
-pub fn net_guids_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("net_guid", DataType::UInt32, false),
-        // Paths repeat heavily (175 GUIDs share "FiringState" in one match).
-        Field::new(
-            "path",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            false,
-        ),
-        Field::new("outer_net_guid", DataType::UInt32, true),
-    ])
+pub fn checkpoint_fields_schema() -> Schema {
+    checkpoint_schema(fields_schema())
 }
 
-/// Convenience: wrap net_guids schema in an Arc.
-pub fn net_guids_schema_ref() -> Arc<Schema> {
-    Arc::new(net_guids_schema())
+pub fn checkpoint_actors_schema() -> Schema {
+    checkpoint_schema(actors_schema())
 }
 
-/// Schema for the `events` table (one row per Event chunk).
-///
-/// Event chunks are the server's own labelled timeline -- the ground truth the
-/// rest of the pipeline only reconstructs indirectly from RPCs. The six header
-/// fields are decoded. For groups whose word count has been established, the
-/// inner payload's structural tag, FString and trailing f32 are also exposed;
-/// group-dependent words retain their neutral `word0`/`word1` names unless
-/// independent evidence establishes a meaning.
-///
-/// `raw_payload` remains the whole payload verbatim. Its word count is not
-/// self-describing (see `vrf_container::EventChunk`), so a group whose arity is
-/// unknown leaves all structural overlay columns null rather than guessing.
-///
-/// The six outer fields and `raw_payload` are non-nullable: an empty `metadata`
-/// is an empty string on the wire, and a zero-length payload is an empty blob.
-/// The structural overlay columns are nullable because an unknown or changed
-/// group deliberately falls back to raw-only preservation.
-pub fn events_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        // ~7 distinct groups over the whole file; dictionary is nearly free.
-        Field::new(
-            "group",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            false,
-        ),
-        Field::new("metadata", DataType::Utf8, false),
-        Field::new("time1", DataType::UInt32, false),
-        Field::new("time2", DataType::UInt32, false),
-        // The declared SizeInBytes, kept as the wire's i32. Redundant with
-        // `raw_payload`'s length by construction, but readable from row-group
-        // statistics without touching the binary column.
-        Field::new("payload_size", DataType::Int32, false),
-        Field::new("raw_payload", DataType::Binary, false),
-        // The first two payload words (after the u32 group tag), for groups
-        // whose word count is structurally fixed. Nullable: most groups carry
-        // zero or one. `raw_payload` still keeps every byte.
-        Field::new("word0", DataType::UInt32, true),
-        Field::new("word1", DataType::UInt32, true),
-        Field::new("payload_tag", DataType::UInt32, true),
-        Field::new("payload_name", DataType::Utf8, true),
-        Field::new("payload_seconds", DataType::Float32, true),
-    ])
+pub fn checkpoint_net_guids_schema() -> Schema {
+    checkpoint_schema(net_guids_schema())
 }
 
-/// Convenience: wrap events schema in an Arc.
-pub fn events_schema_ref() -> Arc<Schema> {
-    Arc::new(events_schema())
+pub fn checkpoint_blocks_schema() -> Schema {
+    checkpoint_schema(blocks_schema())
+}
+
+pub fn checkpoint_guid_entries_schema() -> Schema {
+    checkpoint_schema(guid_entries_schema())
+}
+
+pub fn checkpoint_export_groups_schema() -> Schema {
+    checkpoint_schema(export_groups_schema())
+}
+
+pub fn checkpoint_export_fields_schema() -> Schema {
+    checkpoint_schema(export_fields_schema())
+}
+
+columns! {
+    fn blocks_schema;
+    #[cfg(feature = "checkpoint-context")]
+    CheckpointBlockRecord {
+        block_index: u32,
+        time_ms: u32,
+        packet_id: u32,
+        channel_index: u32,
+        actor_net_guid: u32,
+        object_net_guid?: u32,
+        class_net_guid?: u32,
+        outer_net_guid?: u32,
+        has_rep_layout: bool,
+        is_actor: bool,
+        is_deleted: bool,
+        is_stably_named: bool,
+        delete_flags: u8,
+        resolved_group_path: str,
+        group_resolution_source: str,
+        group_declared: bool,
+        resolution_memo_hit: bool,
+        function_count: u32,
+        function_count_source: str,
+        actor_archetype_path?: str,
+        actor_archetype_outer_path?: str,
+        actor_guid_path?: str,
+        class_guid_path?: str,
+        object_guid_path?: str,
+        object_outer_path?: str,
+        field_row_start: u64,
+        field_row_count: u32,
+    }
+}
+
+columns! {
+    fn guid_entries_schema;
+    #[cfg(feature = "checkpoint-context")]
+    CheckpointGuidEntryRecord {
+        ordinal: u32,
+        net_guid: u32,
+        outer_net_guid: u32,
+        path_is_string: bool,
+        literal_path?: str,
+        name_index?: u32,
+        flags: u8,
+    }
+}
+
+columns! {
+    fn export_groups_schema;
+    #[cfg(feature = "checkpoint-context")]
+    CheckpointExportGroupRecord {
+        ordinal: u32,
+        path_name_index: u32,
+        group_path: str,
+        declared_slots: u32,
+    }
+}
+
+columns! {
+    fn export_fields_schema;
+    #[cfg(feature = "checkpoint-context")]
+    CheckpointExportFieldRecord {
+        group_ordinal: u32,
+        path_name_index: u32,
+        slot: u32,
+        handle: u32,
+        compatible_checksum: u32,
+        rendered_name: str,
+        exported_flag: u8,
+        fname_kind: u8,
+        fname_base?: str,
+        fname_index?: u32,
+        fname_number?: i32,
+    }
+}
+
+columns! {
+    /// Schema for the `fields` table (long format). An unresolved ClassNetCache
+    /// block is one explicitly marked row, not split into fabricated fields.
+    /// Address columns first, for predicate pushdown; the sparse value columns,
+    /// at most one non-null per row, last. Nulls: [`crate::record::FieldRecord`].
+    pub fn fields_schema;
+    #[cfg(any(feature = "fields", feature = "checkpoint-context"))]
+    FieldRecord {
+        time_ms: u32,
+        packet_id: u32,
+        channel_index: u32,
+        actor_net_guid: u32,
+        object_net_guid?: u32,
+        group_path: dict(256, 20),
+        handle: u32,
+        field_name?: dict(256, 16),
+        compatible_checksum?: u32,
+        bit_count: u32,
+        raw_bits?: bytes,
+        value_i64?: i64,
+        value_f64?: f64,
+        value_bool?: bool,
+        // A dictionary although the most varied string: enum strings and JSON repeat.
+        value_str?: dict(2048, 32),
+    }
+}
+
+columns! {
+    /// Schema for the `movement` table: every row dense, no nulls.
+    ///
+    /// Unreal's left-handed Z-up coordinates: positions in cm, velocity in cm/s,
+    /// yaw and pitch in degrees `[0, 360)` -- a `u16` scaled by `360/65536`, never
+    /// negative, so a downward pitch reads near 360, not as a small negative.
+    /// Consumers address these columns by position, so new ones are appended.
+    pub fn movement_schema;
+    #[cfg(feature = "movement")]
+    MovementRecord {
+        time_ms: u32,
+        packet_id: u32,
+        character_net_guid: u32,
+        pos_x: f32,
+        pos_y: f32,
+        pos_z: f32,
+        yaw: f32,
+        pitch: f32,
+        vel_x: f32,
+        vel_y: f32,
+        vel_z: f32,
+        // The move header's server tick; `time_ms` is the replay-relative packet time.
+        timestamp: u32,
+        // One wire byte each, kept as u8 (`move_type` is effectively a bool).
+        movement_state: u8,
+        move_type: u8,
+        // Move-header posture, appended. `rotation_yaw_multiplier` is header
+        // bits [1..9] signed as the C# parser types it; measured meaning: 16 =
+        // walk key held, 2 = fully crouched. The optional byte is present only
+        // while crouching (it counts the crouch transition; 0 when absent);
+        // `flag48` is the bit ahead of the packed angles, meaning unknown.
+        rotation_yaw_multiplier: i8,
+        has_optional_movement_value: bool,
+        optional_movement_raw_byte: u8,
+        flag48: bool,
+    }
+}
+
+columns! {
+    /// Schema for the `actors` table (one row per channel open, close or
+    /// dormancy). It shows actors that never replicate a field -- weapon and
+    /// ability instances, DefuserItem, HeavyArmorItem -- which `fields.parquet`
+    /// alone cannot resolve. Static actors and close rows have no spawn data.
+    pub fn actors_schema;
+    #[cfg(any(feature = "actors", feature = "checkpoint-context"))]
+    ActorRecord {
+        time_ms: u32,
+        packet_id: u32,
+        channel_index: u32,
+        actor_net_guid: u32,
+        // Plain Utf8 in Arrow; the Parquet column still gets a dictionary.
+        event: str,
+        class_path?: dict(128, 30),
+        archetype_path?: dict(128, 30),
+        spawn_x?: f32,
+        spawn_y?: f32,
+        spawn_z?: f32,
+        spawn_pitch?: f32,
+        spawn_yaw?: f32,
+        spawn_roll?: f32,
+        spawn_vx?: f32,
+        spawn_vy?: f32,
+        spawn_vz?: f32,
+    }
+}
+
+columns! {
+    /// Schema for the `net_guids` table (one row per registered NetGUID): the
+    /// object path and containing object. `actors.parquet` covers only GUIDs
+    /// that opened a channel, so a subobject such as a weapon's `FiringState`
+    /// appears nowhere else. `outer_net_guid` is null, not 0, when no outer is
+    /// declared: 0 is the engine's "invalid" sentinel, a different statement.
+    pub fn net_guids_schema;
+    #[cfg(any(feature = "net-guids", feature = "checkpoint-context"))]
+    NetGuidRecord {
+        net_guid: u32,
+        path: dict(1024, 40),
+        outer_net_guid?: u32,
+    }
+}
+
+columns! {
+    /// Schema for the `events` table (one row per Event chunk): the server's own
+    /// labelled timeline. The header fields and `raw_payload`, every byte
+    /// verbatim, are never null (an empty `metadata` or payload is empty).
+    ///
+    /// A payload's word count is not self-describing (`vrf_container::EventChunk`),
+    /// so the structural overlay (tag, words, FString, trailing f32) is filled
+    /// only for groups of established arity, and stays null rather than guessing
+    /// for an unknown or changed one.
+    pub fn events_schema;
+    #[cfg(feature = "events")]
+    EventRecord {
+        id: str,
+        group: dict(16, 24),
+        metadata: str,
+        time1: u32,
+        time2: u32,
+        // `raw_payload`'s length, readable from statistics.
+        payload_size: i32,
+        raw_payload: bytes,
+        word0?: u32,
+        word1?: u32,
+        payload_tag?: u32,
+        payload_name?: str,
+        payload_seconds?: f32,
+    }
+}
+
+columns! {
+    pub fn partials_schema;
+    #[cfg(feature = "partials")]
+    PartialRecord {
+        source: str,
+        checkpoint_id?: str,
+        payload_kind: str,
+        reason: str,
+        source_packet_id: i32,
+        source_payload_bit_offset: i64,
+        rejection_packet_id?: i32,
+        channel_index: u32,
+        channel_sequence: i32,
+        open: bool,
+        close: bool,
+        dormant: bool,
+        replication_paused: bool,
+        reliable: bool,
+        partial: bool,
+        partial_initial: bool,
+        partial_final: bool,
+        has_package_map_exports: bool,
+        has_must_be_mapped_guids: bool,
+        close_reason: u8,
+        source_payload_bit_count: i32,
+        bit_count: u64,
+        raw_bits: bytes,
+    }
 }

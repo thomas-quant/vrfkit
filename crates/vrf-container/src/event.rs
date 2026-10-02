@@ -1,9 +1,6 @@
-//! Event chunk parser.
-//!
-//! An Event chunk carries one entry from the server's own labelled game
-//! timeline: a round start, a character death, a spike plant. It is the only
-//! place in the file where the server names what happened -- everything else
-//! has to be reconstructed from replicated properties and RPCs.
+//! Event chunk parser. An Event chunk is one entry of the server's own labelled
+//! timeline (a round start, a death, a plant); the payload's shape is on
+//! [`EventChunk`].
 //!
 //! # Wire layout
 //!
@@ -16,41 +13,20 @@
 //! | ... | u32 | Time2 |
 //! | ... | i32 | SizeInBytes |
 //! | ... | [u8; SizeInBytes] | payload |
-//!
-//! Measured over 527 replays from releases 13.01, 13.02 and 13.04 (109,126
-//! Event chunks): every chunk is consumed exactly by this layout with no bytes
-//! left over, and Time1 always equals Time2. Checkpoint chunks open with the
-//! same six fields, so the framing is not Event-specific; this module parses
-//! Event chunks only.
-//!
-//! # Structural payload view
-//!
-//! The `SizeInBytes` payload has an observable shape:
-//!
-//! ```text
-//! [u32 group tag][N x u32 words][FString "EReplayEventGroup::<Name>"][f32 seconds]
-//! ```
-//!
-//! but it is not self-describing. `N` varies by group (0 for SpikePlanted, 1
-//! for RoundStart, 2 for CharacterDeath) and no count precedes the words, so a
-//! forward read cannot tell where they end. For the seven known groups, a
-//! fixed `N`, tag and public enum-name FString consumed all 109,126 payloads
-//! exactly across the three measured builds. That remains corpus evidence, not
-//! a self-describing format guarantee. [`parse_event_payload`] therefore
-//! requires the caller to supply an already-established `N`; the guarded
-//! [`parse_known_event_payload`] additionally requires the measured tag and
-//! name. The original payload is still handed to the caller byte for byte, and
-//! `trailing_bytes` reports anything the outer chunk layout does not account
-//! for rather than dropping it silently.
 
 use vrf_bitio::BitReader;
 
 use crate::error::ContainerError;
+use crate::io::{declared_body, read_fstring, read_i32, read_u32};
 use crate::limits::MAX_FSTRING_BYTES;
 
-/// A parsed Event chunk: the six header fields plus its raw payload.
-///
-/// `payload` borrows the chunk bytes; nothing is copied.
+/// A parsed Event chunk: the six header fields plus its raw payload, borrowed
+/// from the chunk bytes. The payload is
+/// `[u32 group tag][N x u32 words][FString "EReplayEventGroup::<Name>"][f32 seconds]`
+/// with no word count: `N` per group ([`KNOWN_EVENT_GROUPS`]) is measured, not a
+/// format guarantee. So [`parse_event_payload`] takes `N` from the caller and
+/// requires exact consumption, and [`parse_known_event_payload`] also requires
+/// the measured tag and name.
 #[derive(Debug, Clone)]
 pub struct EventChunk<'a> {
     /// Server-assigned event id, `<replay-guid>_<32 hex digits>` in every
@@ -58,105 +34,159 @@ pub struct EventChunk<'a> {
     pub id: String,
     /// Event group, e.g. `characterDeath`, `roundStarted`, `spikePlanted`.
     pub group: String,
-    /// Free-form metadata string. Frequently empty; empty is what the wire
-    /// says, not a missing value.
+    /// Free-form metadata; empty is what the wire says, not a missing value.
     pub metadata: String,
     /// First timestamp in milliseconds.
     pub time1: u32,
-    /// Second timestamp in milliseconds. Equal to `time1` in every corpus file,
-    /// but both are reported because the format keeps them separate.
+    /// Second timestamp in milliseconds; equal to `time1` in every corpus file.
     pub time2: u32,
     /// Declared payload size. Validated non-negative and within the chunk.
     pub size_in_bytes: i32,
     /// The payload bytes, exactly `size_in_bytes` of them.
     pub payload: &'a [u8],
-    /// Bytes after the payload that this layout does not account for. Zero for
-    /// all 109,126 corpus chunks; reported so a format change is counted
-    /// rather than discarded in silence.
+    /// Bytes after the payload this layout does not account for; 0 in all
+    /// 208,242 Event chunks of 1,014 replays, 11.06-13.06.
     pub trailing_bytes: usize,
 }
 
-/// The values whose wire types are structural once a group's word count is
-/// known.
-///
-/// The `words` remain deliberately unnamed: only a subset of Event groups has
-/// evidence for what each word means. `name` and `seconds` are likewise named
-/// after their wire types rather than assigned game semantics.
+/// An Event payload's values (shape on [`EventChunk`]), named by wire type: only
+/// some groups have evidence for what each word means.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventPayload {
-    /// Leading group tag.
     pub tag: u32,
     /// The caller-established number of group-dependent words.
     pub words: Vec<u32>,
-    /// FString following the group-dependent words.
     pub name: String,
-    /// Trailing single-precision seconds value.
     pub seconds: f32,
 }
 
-/// Return the corpus-established group-dependent word count for an Event
-/// group.
-///
-/// An unknown group returns `None`, not zero: zero is a measured layout for the
-/// spike groups, while `None` means no structural claim can yet be made.
+/// One Event group whose payload layout the corpus established. The only list
+/// is [`KNOWN_EVENT_GROUPS`], which `crates/vrfkit/tests/adapter_contract.rs`
+/// compares with `tools/to_valplay_bundle.py`'s allowlists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnownEventGroup {
+    /// The Event chunk's `group` string, exactly as the wire spells it.
+    pub group: &'static str,
+    /// Group-dependent `u32` words between the tag and the FString.
+    pub word_count: usize,
+    /// The public enum-name FString the payload must carry.
+    pub payload_name: &'static str,
+    /// The leading group tag.
+    pub payload_tag: u32,
+}
+
+/// Every Event group with a corpus-established payload layout.
+pub const KNOWN_EVENT_GROUPS: [KnownEventGroup; 7] = [
+    KnownEventGroup {
+        group: "characterDeath",
+        word_count: 2,
+        payload_name: "EReplayEventGroup::CharacterDeath",
+        payload_tag: 8,
+    },
+    KnownEventGroup {
+        group: "characterUltimateUsed",
+        word_count: 1,
+        payload_name: "EReplayEventGroup::CharacterUltimateUsed",
+        payload_tag: 11,
+    },
+    KnownEventGroup {
+        group: "roundStarted",
+        word_count: 1,
+        payload_name: "EReplayEventGroup::RoundStart",
+        payload_tag: 2,
+    },
+    KnownEventGroup {
+        group: "switchTeams",
+        word_count: 1,
+        payload_name: "EReplayEventGroup::SwitchTeams",
+        payload_tag: 3,
+    },
+    KnownEventGroup {
+        group: "spikePlanted",
+        word_count: 0,
+        payload_name: "EReplayEventGroup::SpikePlanted",
+        payload_tag: 4,
+    },
+    KnownEventGroup {
+        group: "spikeDefused",
+        word_count: 0,
+        payload_name: "EReplayEventGroup::SpikeDefused",
+        payload_tag: 5,
+    },
+    KnownEventGroup {
+        group: "spikeExploded",
+        word_count: 0,
+        payload_name: "EReplayEventGroup::SpikeExploded",
+        payload_tag: 6,
+    },
+];
+
+/// A `while` loop over bytes because the accessors are `const fn`: on MSRV 1.86
+/// neither iterators nor `==` on `&str`/`&[u8]` are const.
+const fn known_event_group(group: &str) -> Option<KnownEventGroup> {
+    let wanted = group.as_bytes();
+    let mut index = 0;
+    while index < KNOWN_EVENT_GROUPS.len() {
+        let entry = KNOWN_EVENT_GROUPS[index];
+        if bytes_equal(entry.group.as_bytes(), wanted) {
+            return Some(entry);
+        }
+        index += 1;
+    }
+    None
+}
+
+const fn bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// The corpus-established word count for an Event group. `None` (an unknown
+/// group) means no claim; `Some(0)` is the measured layout of the spike groups.
 #[must_use]
 pub const fn known_event_word_count(group: &str) -> Option<usize> {
-    match group.as_bytes() {
-        b"characterDeath" => Some(2),
-        b"characterUltimateUsed" | b"roundStarted" | b"switchTeams" => Some(1),
-        b"spikePlanted" | b"spikeDefused" | b"spikeExploded" => Some(0),
-        _ => None,
+    match known_event_group(group) {
+        Some(entry) => Some(entry.word_count),
+        None => None,
     }
 }
 
-/// Return the public enum-name FString measured for a known Event group.
-///
-/// Requiring this exact constant before exposing the FString prevents a future
-/// format change from turning an arbitrary payload string into a newly
-/// searchable column. The original bytes remain available in `raw_payload`.
+/// The public enum-name FString measured for a known Event group. Requiring it
+/// keeps an arbitrary payload string out of a searchable column.
 #[must_use]
 pub const fn known_event_payload_name(group: &str) -> Option<&'static str> {
-    match group.as_bytes() {
-        b"characterDeath" => Some("EReplayEventGroup::CharacterDeath"),
-        b"characterUltimateUsed" => Some("EReplayEventGroup::CharacterUltimateUsed"),
-        b"roundStarted" => Some("EReplayEventGroup::RoundStart"),
-        b"switchTeams" => Some("EReplayEventGroup::SwitchTeams"),
-        b"spikePlanted" => Some("EReplayEventGroup::SpikePlanted"),
-        b"spikeDefused" => Some("EReplayEventGroup::SpikeDefused"),
-        b"spikeExploded" => Some("EReplayEventGroup::SpikeExploded"),
-        _ => None,
+    match known_event_group(group) {
+        Some(entry) => Some(entry.payload_name),
+        None => None,
     }
 }
 
-/// Return the group tag measured across the supported corpus for a known
-/// Event group.
-///
-/// Each mapping was constant over 109,126 Event payloads spanning releases
-/// 13.01, 13.02 and 13.04. Keeping it beside the arity and enum-name guards
-/// makes a future enum reorder fail closed instead of publishing a stale tag.
+/// The group tag measured for a known Event group, so an enum reorder fails
+/// closed instead of publishing a stale tag.
 #[must_use]
 pub const fn known_event_payload_tag(group: &str) -> Option<u32> {
-    match group.as_bytes() {
-        b"characterDeath" => Some(8),
-        b"characterUltimateUsed" => Some(11),
-        b"roundStarted" => Some(2),
-        b"switchTeams" => Some(3),
-        b"spikePlanted" => Some(4),
-        b"spikeDefused" => Some(5),
-        b"spikeExploded" => Some(6),
-        _ => None,
+    match known_event_group(group) {
+        Some(entry) => Some(entry.payload_tag),
+        None => None,
     }
 }
 
-/// Whether the inner payload's seconds value agrees with the Event chunk's
-/// integer millisecond time.
-///
-/// Across 109,126 payloads from releases 13.01, 13.02 and 13.04, the maximum
-/// absolute difference was 0.999878 ms. A 1.001 ms bound allows exactly the
-/// observed integer-quantisation interval plus float noise, while rejecting a
-/// stale offset or a non-finite value.
+/// Bound for [`event_payload_seconds_matches_time`]: the largest
+/// `|seconds * 1000 - Time1|` over 208,242 Event chunks (1,014 replays,
+/// 11.06-13.06) is 0.999878 ms, the integer-ms quantisation; 1.001 adds float noise.
 pub const EVENT_PAYLOAD_TIME_TOLERANCE_MS: f64 = 1.001;
 
+/// Whether the inner payload's seconds value agrees with the Event chunk's
+/// integer millisecond time; a stale offset or a non-finite value does not.
 #[must_use]
 pub fn event_payload_seconds_matches_time(time_ms: u32, seconds: f32) -> bool {
     seconds.is_finite()
@@ -164,17 +194,12 @@ pub fn event_payload_seconds_matches_time(time_ms: u32, seconds: f32) -> bool {
             <= EVENT_PAYLOAD_TIME_TOLERANCE_MS
 }
 
-/// Parse an Event chunk's inner payload using an established word count.
-///
-/// Returns `None` if the count would run past the payload, any primitive is
-/// malformed, or the proposed layout leaves bytes behind. This is a guarded
-/// structural overlay: callers must retain the original payload, and a future
-/// build changing a group's arity cannot yield plausible values read from the
-/// following FString.
+/// Parse an Event chunk's inner payload with an established word count. `None`
+/// if the count runs past the payload, a primitive is malformed, or bytes are
+/// left over, so a changed arity cannot yield values read out of the FString.
 #[must_use]
 pub fn parse_event_payload(payload: &[u8], word_count: usize) -> Option<EventPayload> {
-    // tag + words + FString length + trailing f32. Checking the fixed minimum
-    // before allocating also bounds `word_count` by the input size.
+    // tag + words + FString length + f32, checked before allocating `words`.
     let fixed_bytes = 12usize.checked_add(word_count.checked_mul(4)?)?;
     if fixed_bytes > payload.len() {
         return None;
@@ -200,56 +225,40 @@ pub fn parse_event_payload(payload: &[u8], word_count: usize) -> Option<EventPay
     })
 }
 
-/// Parse the structural payload for a measured Event group.
-///
-/// The arity, stable tag and FString constant must all match. Unknown groups
-/// and changed layouts return `None`, leaving the caller to preserve only the
-/// raw payload and report the mismatch.
+/// Parse the payload of a measured Event group: arity, tag and enum-name
+/// FString must all match, else `None`.
 #[must_use]
 pub fn parse_known_event_payload(group: &str, payload: &[u8]) -> Option<EventPayload> {
-    let word_count = known_event_word_count(group)?;
-    let expected_name = known_event_payload_name(group)?;
-    let expected_tag = known_event_payload_tag(group)?;
-    let parsed = parse_event_payload(payload, word_count)?;
-    (parsed.name == expected_name && parsed.tag == expected_tag).then_some(parsed)
+    let known = known_event_group(group)?;
+    let parsed = parse_event_payload(payload, known.word_count)?;
+    (parsed.name == known.payload_name && parsed.tag == known.payload_tag).then_some(parsed)
 }
 
-/// Parse an Event chunk payload.
-///
-/// `payload` is the region `data[chunk.data_offset .. + chunk.size_in_bytes]`
-/// from a [`RawChunk`](crate::RawChunk) of type [`ChunkType::Event`](crate::ChunkType::Event).
+/// Parse an Event chunk: the region `data[chunk.data_offset .. + chunk.size_in_bytes]`
+/// of a [`RawChunk`](crate::RawChunk) of type [`ChunkType::Event`](crate::ChunkType::Event).
 ///
 /// # Errors
 ///
-/// Returns [`ContainerError::Truncated`] if any field runs past the end of the
-/// chunk, and [`ContainerError::InvalidEventPayloadSize`] if `SizeInBytes` is
-/// negative.
+/// [`ContainerError::FString`] if a string runs past the chunk,
+/// [`ContainerError::Truncated`] if another field or the payload does, and
+/// [`ContainerError::InvalidEventPayloadSize`] if `SizeInBytes` is negative.
 pub fn parse_event_chunk(payload: &[u8]) -> Result<EventChunk<'_>, ContainerError> {
     let mut reader = BitReader::new(payload);
 
-    let id = read_fstring(&mut reader, "event id")?;
-    let group = read_fstring(&mut reader, "event group")?;
-    let metadata = read_fstring(&mut reader, "event metadata")?;
+    let id = read_fstring(&mut reader, "event id", MAX_FSTRING_BYTES)?;
+    let group = read_fstring(&mut reader, "event group", MAX_FSTRING_BYTES)?;
+    let metadata = read_fstring(&mut reader, "event metadata", MAX_FSTRING_BYTES)?;
     let time1 = read_u32(&mut reader, "event time1")?;
     let time2 = read_u32(&mut reader, "event time2")?;
     let size_in_bytes = read_i32(&mut reader, "event payload size")?;
 
-    if size_in_bytes < 0 {
-        return Err(ContainerError::InvalidEventPayloadSize {
-            size: size_in_bytes,
-        });
-    }
-    let size = size_in_bytes as usize;
-
-    // Every read above is byte-granular, so the reader sits on a byte boundary.
-    let header_end = (reader.position() / 8) as usize;
-    if header_end > payload.len() || payload.len() - header_end < size {
-        return Err(ContainerError::Truncated {
-            context: "event payload",
-            needed: size,
-            available: payload.len().saturating_sub(header_end),
-        });
-    }
+    let (body, trailing_bytes) = declared_body(
+        payload,
+        &reader,
+        size_in_bytes,
+        |size| ContainerError::InvalidEventPayloadSize { size },
+        "event payload",
+    )?;
 
     Ok(EventChunk {
         id,
@@ -258,34 +267,7 @@ pub fn parse_event_chunk(payload: &[u8]) -> Result<EventChunk<'_>, ContainerErro
         time1,
         time2,
         size_in_bytes,
-        payload: &payload[header_end..header_end + size],
-        trailing_bytes: payload.len() - header_end - size,
+        payload: body,
+        trailing_bytes,
     })
-}
-
-// --- Helpers ------------------------------------------------------------------
-
-fn read_u32(reader: &mut BitReader<'_>, context: &'static str) -> Result<u32, ContainerError> {
-    reader.read_u32().map_err(|_| ContainerError::Truncated {
-        context,
-        needed: 4,
-        available: (reader.bits_remaining() / 8) as usize,
-    })
-}
-
-fn read_i32(reader: &mut BitReader<'_>, context: &'static str) -> Result<i32, ContainerError> {
-    reader.read_i32().map_err(|_| ContainerError::Truncated {
-        context,
-        needed: 4,
-        available: (reader.bits_remaining() / 8) as usize,
-    })
-}
-
-fn read_fstring(
-    reader: &mut BitReader<'_>,
-    context: &'static str,
-) -> Result<String, ContainerError> {
-    reader
-        .read_fstring(MAX_FSTRING_BYTES)
-        .map_err(|source| ContainerError::FString { context, source })
 }

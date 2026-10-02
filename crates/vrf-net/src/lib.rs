@@ -1,20 +1,9 @@
 //! Unreal Engine replication layer: packets -> bunches -> content blocks -> fields.
 //!
-//! # Design intent: exhaustive traversal without descriptors
-//!
-//! This crate intentionally does **not** skip any field payload. Every property
-//! and every RPC is emitted as `(handle, bit_count, raw_bits)` to the caller's
-//! sink. This is the reason this project exists as a new implementation rather
-//! than wrapping an existing one: a replay contains 780 000+ content blocks and
-//! 2 400 000+ movement samples, and the upstream parser's "skip if no
-//! descriptor" path means most of that data is silently discarded.
-//!
-//! Descriptor-free traversal is possible because the field stream is
-//! self-describing: each field carries its own handle and bit length, so the
-//! reader can always advance to the next field without knowing what type the
-//! current one is.
-//!
-//! # Layers
+//! No field payload is skipped, descriptor or not. Every property and RPC
+//! reaches the caller's sink as `(handle, bit_count, raw_bits)`, which works
+//! because the field stream is self-describing: each field carries its handle
+//! and length.
 //!
 //! ```text
 //! packet  : sentinel-trimmed byte slice -> bit stream
@@ -23,46 +12,14 @@
 //! field   : self-describing handle/size stream
 //! ```
 //!
-//! # What is *not* here (injected by the caller)
-//!
-//! - Export group path resolution (which names map to which handles)
-//! - Typed field decoding (interpreting raw bits as floats, vectors, etc.)
-//! - NetGuidCache storage (this crate calls a trait for path registration)
-//!
-//! # Error policy
+//! The caller injects export-group resolution (which names map to which
+//! handles), typed field decoding, and NetGuidCache storage (through
+//! [`net_guid::GuidPathSink`]).
 //!
 //! A malformed bunch is discarded and counted; it does not abort the replay.
-//! Silent skipping is forbidden: every discard increments a stat counter.
-//!
-//! # Module layout
-//!
-//! One module per layer above, plus the pieces they share:
-//!
-//! | module | layer |
-//! |---|---|
-//! | [`packet`] | sentinel sizing, bunch headers, partial-sequence tracking |
-//! | [`bunch`] | bunch header struct, partial reassembly |
-//! | [`pipeline`] | the reader that drives all of it, and the sink trait |
-//! | [`content`] | content block headers |
-//! | [`field`] | field and RPC streams |
-//! | [`net_guid`] | `InternalLoadObject` |
-//! | [`stats`] | counters and the diagnostic event log |
-//! | [`types`], [`error`] | shared wire types and the error enum |
-//!
-//! [`pipeline`] is itself split -- channel lifecycle, spawn data and the
-//! per-block framing loop are separate private submodules -- because those
-//! three run at rates three orders of magnitude apart and are read against
-//! different parts of the wire format. Its public surface is unchanged by that
-//! split.
-//!
-//! # Features
-//!
-//! - `diagnostics` (default): the per-failure event log in [`stats`]. Turning
-//!   it off removes [`stats::DiagnosticEvent`] and the machinery that builds
-//!   one; the counters that say *how much* was discarded stay in every build,
-//!   because losing them would mean losing data silently. Nothing else in this
-//!   crate is optional: packets, bunches, content blocks and fields are one
-//!   state machine and cannot be taken apart.
+//! Not every lost bit is tallied: a malformed packet's tail is counted only
+//! as a packet, a RepLayout-export bunch only as a bunch, and the payload
+//! after a cleanly read package-map export list not at all.
 
 #![forbid(unsafe_code)]
 
@@ -79,3 +36,78 @@ pub mod types;
 pub use error::NetError;
 pub use pipeline::{PLAYER_CONTROLLER_LEAF, ReplicationReader, ReplicationSink};
 pub use stats::NetStats;
+
+/// Bunch builders shared by this crate's unit tests, over `vrf_testkit`'s
+/// LSB-first bit writer.
+#[cfg(test)]
+mod test_bits {
+    use crate::types::{ChannelCloseReason, MAX_PACKET_SIZE_BITS};
+    pub use vrf_testkit::{BitWrite, BitWriter, pack};
+
+    /// Pack `bits` as one packet: the data, then the sentinel bit.
+    pub fn build_packet(bits: &[bool]) -> Vec<u8> {
+        let mut with_sentinel = bits.to_vec();
+        with_sentinel.push(true);
+        pack(&with_sentinel)
+    }
+
+    /// The header flags one synthetic bunch varies. The default is a
+    /// reliable bunch on channel 0 with every other flag clear.
+    #[derive(Default)]
+    pub struct BunchSpec {
+        pub ch_index: u32,
+        pub b_open: bool,
+        pub b_close: bool,
+        /// Close reason Dormancy rather than Destroyed; used only with `b_close`.
+        pub dormant: bool,
+        pub unreliable: bool,
+        pub b_has_package_map_exports: bool,
+        pub b_has_must_be_mapped_guids: bool,
+        pub b_partial: bool,
+        pub b_partial_initial: bool,
+        pub b_partial_final: bool,
+    }
+
+    /// Append one bunch header declaring `payload_bit_count` bits, in
+    /// `parse_bunch_header` order. The channel FName, hardcoded index 1, is
+    /// written when the bunch is reliable or opens its channel.
+    pub fn write_bunch_header(bits: &mut BitWriter, spec: &BunchSpec, payload_bit_count: u32) {
+        let b_control = spec.b_open || spec.b_close;
+        bits.bit(b_control);
+        if b_control {
+            bits.bit(spec.b_open).bit(spec.b_close);
+        }
+        if spec.b_close {
+            bits.serialized_int(u32::from(spec.dormant), ChannelCloseReason::MAX);
+        }
+        // bIsReplicationPaused, bReliable, ChIndex, the two GUID-list flags,
+        // bPartial, the VALORANT bit.
+        bits.bit(false)
+            .bit(!spec.unreliable)
+            .int_packed(spec.ch_index)
+            .bit(spec.b_has_package_map_exports)
+            .bit(spec.b_has_must_be_mapped_guids)
+            .bit(spec.b_partial)
+            .bit(false);
+        if spec.b_partial {
+            bits.bit(spec.b_partial_initial).bit(spec.b_partial_final);
+        }
+        if !spec.unreliable || spec.b_open {
+            bits.bit(true).int_packed(1);
+        }
+        bits.serialized_int(payload_bit_count, MAX_PACKET_SIZE_BITS);
+    }
+
+    /// Append one bunch: its header, then `payload`.
+    pub fn write_bunch(bits: &mut BitWriter, spec: &BunchSpec, payload: &[bool]) {
+        write_bunch_header(bits, spec, payload.len() as u32);
+        bits.extend_from_slice(payload);
+    }
+
+    /// One bunch, one packet.
+    pub fn build_bunch_packet(spec: &BunchSpec, payload: &[bool]) -> Vec<u8> {
+        let mut bits = BitWriter::new();
+        write_bunch(&mut bits, spec, payload);
+        build_packet(&bits)
+    }
+}

@@ -1,53 +1,114 @@
-//! Counters and the per-field breakdown an overlay pass accumulates.
-//!
-//! These are the export summary's only view of what the overlay did, and the
-//! error report is what tells an operator *which* field to look at rather than
-//! just how many failed. The reference replay currently records zero decode
-//! errors, so everything here except the plain counters is a cold path; it is
-//! written for clarity, not for speed.
+//! Counters and the per-field breakdown an overlay pass accumulates: the export
+//! summary's only view of the overlay, with the report saying *which* field
+//! failed. The reference replay records zero decode errors, so all but the
+//! plain counters is a cold path, written for clarity.
 
 use std::collections::HashMap;
 
-use crate::decode::FieldType;
+use vrf_bitio::BitError;
 
-/// Categorisation of a decode failure -- distinguishes root cause so the
-/// operator knows whether to fix the overlay type, the bit-count expectation,
-/// or something structural.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use crate::decode::{DecodeError, FieldType};
+use crate::ftext::FTextTreeError;
+
+/// Why a decode failed, so the operator knows whether to fix the overlay type,
+/// the bit-count expectation or something structural. It is the report's only
+/// per-cause column (`field_name` says which field), so every failure maps to
+/// its own cause through exhaustive matches with no wildcard: a new error
+/// variant has to be classified before it compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DecodeErrorKind {
-    /// BitReader reached EOF before the decoder finished consuming.
+    /// BitReader reached EOF before the decoder finished consuming: the type
+    /// needs more bits than the field carries.
     Eof,
-    /// Decoder finished but bits remained unconsumed.
+    /// Decoder finished but bits remained unconsumed: the type is narrower
+    /// than the field, or not its layout.
     Residual,
     /// Zero-bit payload with a non-zero-expecting type.
     ZeroBits,
+    /// The bits are not a valid encoding of the type: an IntPacked that never
+    /// terminates or overflows, a length prefix longer than the payload or its
+    /// cap, a string that is not UTF-8 or UTF-16, a framing rule the payload
+    /// breaks. `Eof` and `Residual` say the type and the field disagree about
+    /// length; this says the content itself is not the type.
+    Malformed,
+    /// The bits decoded, but to something the decoder refuses rather than
+    /// render wrong: an unsigned value past `i64::MAX`, a non-finite
+    /// component, an FText history or FName number with no display form, a
+    /// length over the table's configured cap -- or a table parameter (a zero
+    /// quantization scale or `SerializedInt` maximum) no value can be read
+    /// against. Usually a table entry to revisit rather than a wire problem.
+    Rejected,
 }
 
+/// `pad`, not `write_str`: the report prints this in a padded column, and
+/// `write_str` ignores the width it is formatted with.
 impl std::fmt::Display for DecodeErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Eof => f.write_str("EOF"),
-            Self::Residual => f.write_str("Residual"),
-            Self::ZeroBits => f.write_str("ZeroBits"),
-        }
+        f.pad(match self {
+            Self::Eof => "EOF",
+            Self::Residual => "Residual",
+            Self::ZeroBits => "ZeroBits",
+            Self::Malformed => "Malformed",
+            Self::Rejected => "Rejected",
+        })
     }
 }
 
 impl DecodeErrorKind {
-    const fn sort_key(self) -> u8 {
-        match self {
-            Self::Eof => 0,
-            Self::Residual => 1,
-            Self::ZeroBits => 2,
+    /// The kind of a bit-level read failure, shared by every decoder that
+    /// reports into [`OverlayErrorReport`]. Only [`BitError::Eof`] is an EOF.
+    /// [`BitError::InvalidSerializedIntMax`] is `Rejected`, not `Malformed`:
+    /// the table's maximum is zero and no payload bit is at fault.
+    pub fn from_bit_error(err: &BitError) -> Self {
+        match err {
+            BitError::Eof { .. } => Self::Eof,
+            BitError::MalformedIntPacked { .. }
+            | BitError::IntPackedOverflow { .. }
+            | BitError::InvalidLength { .. }
+            | BitError::InvalidBitLength { .. }
+            | BitError::InvalidString { .. } => Self::Malformed,
+            BitError::InvalidSerializedIntMax { .. } => Self::Rejected,
+        }
+    }
+
+    /// The kind of an overlay decode failure. A refusal (the bits read fine but
+    /// say something the decoder will not return) is `Rejected`: a mistyped
+    /// FText, this repo's costliest bug shape, must not read as leftover bits.
+    pub(crate) fn from_decode_error(err: &DecodeError) -> Self {
+        match err {
+            DecodeError::BitIo(bit) => Self::from_bit_error(bit),
+            DecodeError::NotFullyConsumed { .. } => Self::Residual,
+            // Unreachable: the overlay returns before decoding Raw/Skip.
+            DecodeError::RawOrSkip => Self::ZeroBits,
+            DecodeError::UnsignedOverflow { .. }
+            | DecodeError::UnsupportedTextHistory { .. }
+            | DecodeError::NonFiniteComponent { .. }
+            | DecodeError::InvalidQuantizationScale { .. }
+            | DecodeError::InvalidFNameNumber { .. }
+            | DecodeError::ByteArrayLengthCapExceeded { .. } => Self::Rejected,
+            DecodeError::FTextTree(tree) => match tree {
+                FTextTreeError::BitIo(bit) => Self::from_bit_error(bit),
+                FTextTreeError::TrailingBits { .. } => Self::Residual,
+                FTextTreeError::UnsupportedHistory { .. }
+                | FTextTreeError::UnsupportedNameForm
+                | FTextTreeError::UnsupportedArgumentTag { .. }
+                | FTextTreeError::NegativeNameSuffix { .. }
+                | FTextTreeError::NonFiniteNumber => Self::Rejected,
+                FTextTreeError::InvalidArgumentCount { .. }
+                | FTextTreeError::InvalidEmptyForm
+                | FTextTreeError::InvalidBool { .. }
+                | FTextTreeError::StringTooLong { .. }
+                | FTextTreeError::MissingStringTerminator
+                | FTextTreeError::DepthLimit { .. }
+                | FTextTreeError::NodeLimit { .. } => Self::Malformed,
+            },
         }
     }
 }
 
-/// Accumulates per-(group, field, type, bit_count, error_kind) counts so the
-/// operator can identify the dominant decode-error sources after an export run.
-///
-/// Designed for long-lived use: call [`Self::record`] on every failure, then
-/// [`Self::top_n`] to get the sorted report.
+/// Per-(group, field, type, bit_count, error_kind) failure counts: call
+/// [`Self::record`] on every failure, then [`Self::top_n`] for the dominant
+/// sources.
 #[derive(Debug, Clone, Default)]
 pub struct OverlayErrorReport {
     /// Key: (group_path, field_name, field_type_tag, bit_count, error_kind).
@@ -107,10 +168,8 @@ impl OverlayErrorReport {
                 error_kind: *ek,
             })
             .collect();
-        // Deterministic ordering: descending count, then by the row's identity
-        // fields so equal-count buckets have a stable order run-to-run. A plain
-        // `Reverse(count)` left ties in HashMap iteration order, which varied
-        // per run and made the printed error report non-reproducible.
+        // Descending count, then the row's identity: ties left in HashMap
+        // order varied run to run and made the report non-reproducible.
         rows.sort_by(|a, b| {
             b.count.cmp(&a.count).then_with(|| {
                 a.group_path
@@ -118,7 +177,7 @@ impl OverlayErrorReport {
                     .then_with(|| a.field_name.cmp(&b.field_name))
                     .then_with(|| a.declared_type.cmp(&b.declared_type))
                     .then_with(|| a.bit_count.cmp(&b.bit_count))
-                    .then_with(|| a.error_kind.sort_key().cmp(&b.error_kind.sort_key()))
+                    .then_with(|| a.error_kind.cmp(&b.error_kind))
             })
         });
         rows.truncate(n);
@@ -150,29 +209,37 @@ pub struct OverlayStats {
     /// Fields where field_name was None (unmapped handle).
     pub no_field_name: u64,
     /// Handle fallbacks refused because the replay declared a DIFFERENT,
-    /// unresolved field name at that handle.
-    ///
-    /// The fallback exists for handles the wire does not name, and for handles
-    /// it names only as a bare decimal FName index (`"248"`), which says
-    /// nothing about the property. It used to fire for a real conflicting name
-    /// too: with the descriptor mapping handle 7 to `OldField: Int32` and the
-    /// replay declaring `NewField` there carrying a `Float`, both name probes
-    /// missed, the stale handle mapping was reused, and `1.0f32` was reported
-    /// as `value_i64 = 1065353216` with `decoded_ok` incremented and
-    /// `Decode errors` still zero. That is the exact shape of a game patch
-    /// moving a property, and resolution was documented as fail-closed.
-    ///
-    /// Such a field is now left untyped and counted here rather than typed
-    /// wrongly. Untyped is a state this export already models honestly
-    /// (`raw_bits` is always present); a confident wrong number is not.
-    ///
-    /// It is deliberately NOT routed through `decoded_err`: nothing failed to
-    /// decode, the overlay declined to claim a type. Counting it as a decode
-    /// error would move the corpus off `Decode errors: 0` for a field that was
-    /// never decoded at all.
+    /// unresolved field name at that handle (docs/OVERLAY_RESOLUTION.md
+    /// "Fail-closed on a handle conflict"). Not a `decoded_err`: nothing failed
+    /// to decode, the overlay declined to claim a type.
     pub handle_conflicts_refused: u64,
-    /// Detailed per-field error breakdown (populated only when reporting is on).
+    /// Per-field breakdown of the failures, recorded on every failure.
     pub error_report: OverlayErrorReport,
+}
+
+impl OverlayStats {
+    /// Add the six counters of `other` into `self`. `error_report` is not
+    /// merged: callers fold it into one report shared by every pass, so a
+    /// checkpoint-only failure still reaches the summary. The destructure has
+    /// no `..`, so a new counter does not compile until it is summed here,
+    /// where both the export and `diag` totals come from.
+    pub fn merge_counts_from(&mut self, other: &Self) {
+        let Self {
+            decoded_ok,
+            decoded_err,
+            raw_or_skip,
+            not_in_table,
+            no_field_name,
+            handle_conflicts_refused,
+            error_report: _,
+        } = other;
+        self.decoded_ok += decoded_ok;
+        self.decoded_err += decoded_err;
+        self.raw_or_skip += raw_or_skip;
+        self.not_in_table += not_in_table;
+        self.no_field_name += no_field_name;
+        self.handle_conflicts_refused += handle_conflicts_refused;
+    }
 }
 
 #[cfg(test)]
@@ -224,21 +291,6 @@ mod tests {
     }
 
     #[test]
-    fn top_n_is_identical_across_independently_built_reports() {
-        // Each report owns a HashMap with its own RandomState, so tied buckets
-        // iterate in a different order per instance. Sorting on count alone let
-        // that leak into the printed report; two runs disagreed.
-        let first = tied_report().top_n(TIED.len());
-        let second = tied_report().top_n(TIED.len());
-        let key = |rows: &[OverlayErrorRow]| -> Vec<(String, String)> {
-            rows.iter()
-                .map(|r| (r.group_path.clone(), r.field_name.clone()))
-                .collect()
-        };
-        assert_eq!(key(&first), key(&second));
-    }
-
-    #[test]
     fn top_n_still_puts_the_biggest_count_first() {
         let mut report = tied_report();
         report.record(
@@ -257,16 +309,19 @@ mod tests {
     #[test]
     fn top_n_breaks_identity_ties_by_error_kind() {
         let mut report = OverlayErrorReport::default();
+        // Inserted out of order, so a report echoing insertion order fails.
         for kind in [
             DecodeErrorKind::ZeroBits,
+            DecodeErrorKind::Rejected,
             DecodeErrorKind::Residual,
+            DecodeErrorKind::Malformed,
             DecodeErrorKind::Eof,
         ] {
             report.record("Group", "Field", FieldType::Int32, 32, kind);
         }
 
         let kinds: Vec<DecodeErrorKind> = report
-            .top_n(3)
+            .top_n(5)
             .into_iter()
             .map(|row| row.error_kind)
             .collect();
@@ -276,7 +331,104 @@ mod tests {
                 DecodeErrorKind::Eof,
                 DecodeErrorKind::Residual,
                 DecodeErrorKind::ZeroBits,
+                DecodeErrorKind::Malformed,
+                DecodeErrorKind::Rejected,
             ]
         );
+    }
+
+    /// Every `BitError`, and only `Eof` is an EOF.
+    #[test]
+    fn only_a_bit_level_eof_is_labelled_eof() {
+        let cases = [
+            (
+                BitError::Eof {
+                    position: 0,
+                    length: 8,
+                    requested: 8,
+                },
+                DecodeErrorKind::Eof,
+            ),
+            (
+                BitError::MalformedIntPacked { position: 0 },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::IntPackedOverflow { position: 0 },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::InvalidLength {
+                    position: 0,
+                    length: 100,
+                },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::InvalidBitLength {
+                    requested: 16,
+                    available: 8,
+                },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::InvalidString { position: 0 },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::InvalidSerializedIntMax { max: 0 },
+                DecodeErrorKind::Rejected,
+            ),
+        ];
+        for (err, want) in cases {
+            assert_eq!(DecodeErrorKind::from_bit_error(&err), want, "{err:?}");
+        }
+    }
+
+    /// The report prints the kind in a padded column, which a label written
+    /// with `write_str` ignores.
+    #[test]
+    fn kind_labels_honour_the_report_column_width() {
+        for kind in [
+            DecodeErrorKind::Eof,
+            DecodeErrorKind::Residual,
+            DecodeErrorKind::ZeroBits,
+            DecodeErrorKind::Malformed,
+            DecodeErrorKind::Rejected,
+        ] {
+            let cell = format!("{kind:<9}|");
+            assert_eq!(cell.len(), 10, "{cell:?}");
+            assert!(cell.starts_with(&kind.to_string()), "{cell:?}");
+        }
+        // And unpadded where no width is asked for.
+        assert_eq!(DecodeErrorKind::Malformed.to_string(), "Malformed");
+    }
+
+    fn distinct_counts(base: u64) -> OverlayStats {
+        OverlayStats {
+            decoded_ok: base + 1,
+            decoded_err: base + 2,
+            raw_or_skip: base + 3,
+            not_in_table: base + 4,
+            no_field_name: base + 5,
+            handle_conflicts_refused: base + 6,
+            error_report: tied_report(),
+        }
+    }
+
+    /// Each counter lands in its own total, and the per-field breakdown is
+    /// left alone: callers merge it into a report shared across passes.
+    #[test]
+    fn merge_counts_from_sums_every_counter_and_leaves_the_report() {
+        let mut total = OverlayStats::default();
+        total.merge_counts_from(&distinct_counts(0));
+        total.merge_counts_from(&distinct_counts(100));
+        assert_eq!(total.decoded_ok, 1 + 101);
+        assert_eq!(total.decoded_err, 2 + 102);
+        assert_eq!(total.raw_or_skip, 3 + 103);
+        assert_eq!(total.not_in_table, 4 + 104);
+        assert_eq!(total.no_field_name, 5 + 105);
+        assert_eq!(total.handle_conflicts_refused, 6 + 106);
+        assert_eq!(total.error_report.total_errors(), 0);
     }
 }

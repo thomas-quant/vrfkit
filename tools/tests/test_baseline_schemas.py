@@ -1,59 +1,53 @@
 import json
-import sys
-import tempfile
-import unittest
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_baseline_schemas as schemas  # noqa: E402
+from support import TempDirTestCase
+import check_baseline_schemas as schemas
 
 
-class BaselineSchemaTests(unittest.TestCase):
+class BaselineSchemaTests(TempDirTestCase):
     def test_committed_baselines_are_schema_valid_and_cross_consistent(self):
-        self.assertEqual(schemas.validate_repository(require_hashes=False), [])
+        self.assertEqual(schemas.validate_repository(), [])
 
-    def test_legacy_export_without_hashes_fails_strict_validation(self):
+    def test_an_export_without_a_measured_sha256_fails(self):
+        for digest in (None, "not-measured"):
+            with self.subTest(digest=digest):
+                record = {"rows": 0, "bytes": 0}
+                if digest is not None:
+                    record["sha256"] = digest
+                data = {"replay": "sample.vrf",
+                        "counters": {key: 0 for key in schemas.MAIN_COUNTERS},
+                        "parquet": {name: dict(record) for name in schemas.MAIN_PARQUET}}
+                problems = schemas.validate_export_baseline(Path("export_sample.json"), data)
+                self.assertTrue(any("sha256" in problem for problem in problems), problems)
+
+    def test_checkpoint_baseline_requires_actor_and_guid_tables_and_counters(self):
         data = {
             "replay": "sample.vrf",
-            "counters": {key: 0 for key in schemas.MAIN_COUNTERS},
+            "counters": {key: 0 for key in schemas.MAIN_COUNTERS | schemas.CHECKPOINT_ONLY_COUNTERS},
             "parquet": {
-                name: {"rows": 0, "bytes": 0} for name in schemas.MAIN_PARQUET
+                name: {"rows": 0, "bytes": 0, "sha256": "a" * 64}
+                for name in (*schemas.MAIN_PARQUET, *schemas.CHECKPOINT_PARQUET_FILES)
             },
         }
-        path = Path("export_sample.json")
+        path = Path("checkpoint_sample.json")
+        self.assertEqual(schemas.validate_export_baseline(path, data), [])
 
-        strict = schemas.validate_export_baseline(path, data)
-        migrating = schemas.validate_export_baseline(
-            path, data, require_hashes=False
-        )
+        missing_table = json.loads(json.dumps(data))
+        del missing_table["parquet"]["checkpoint_actors"]
+        problems = schemas.validate_export_baseline(path, missing_table)
+        self.assertTrue(any("checkpoint_actors" in problem for problem in problems), problems)
 
-        self.assertTrue(any("sha256" in problem for problem in strict), strict)
-        self.assertEqual(migrating, [])
-
-    def test_a_non_sha256_placeholder_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            data = {
-                "replay": "sample.vrf",
-                "counters": {key: 0 for key in schemas.MAIN_COUNTERS},
-                "parquet": {
-                    name: {"rows": 0, "bytes": 0, "sha256": "not-measured"}
-                    for name in schemas.MAIN_PARQUET
-                },
-            }
-            path = root / "export_sample.json"
-            path.write_text(json.dumps(data), encoding="utf-8")
-
-            problems = schemas.validate_export_baseline(path, data)
-
-        self.assertTrue(any("sha256" in problem for problem in problems), problems)
+        missing_counter = json.loads(json.dumps(data))
+        del missing_counter["counters"]["cp_net_guid_rows_written"]
+        problems = schemas.validate_export_baseline(path, missing_counter)
+        self.assertTrue(any("cp_net_guid_rows_written" in problem for problem in problems), problems)
 
     def test_unknown_baseline_json_fails_closed(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "unvalidated.json").write_text("{}", encoding="utf-8")
-            problems = schemas.validate_repository(root, require_hashes=False)
+        root = self.tmp()
+        (root / "unvalidated.json").write_text("{}", encoding="utf-8")
+        problems = schemas.validate_repository(root)
         self.assertTrue(any("unvalidated.json" in p and "unknown" in p for p in problems),
                         problems)
 
@@ -63,6 +57,17 @@ class BaselineSchemaTests(unittest.TestCase):
         )
         self.assertTrue(any("export" in p for p in problems), problems)
         self.assertTrue(any("replay" in p for p in problems), problems)
+
+    def test_bench_accepts_the_checkpoint_slot_and_no_other_key(self):
+        """Key sets are compared for equality, not as a subset."""
+        base = {"export": 1.0, "replay": "m.vrf"}
+        bench = Path("bench.json")
+        self.assertEqual(schemas.validate_bench_baseline(
+            bench, dict(base, export_checkpoints=2.0)), [])
+        problems = schemas.validate_bench_baseline(bench, dict(base, export_checkpoints=0.0))
+        self.assertIn("export_checkpoints must be a positive finite float", " ".join(problems))
+        problems = schemas.validate_bench_baseline(bench, dict(base, export_debug=2.0))
+        self.assertIn("export_debug", " ".join(problems))
 
     def test_metrics_reject_wrong_replay_and_negative_or_wrong_typed_values(self):
         metrics = json.loads(
@@ -82,7 +87,3 @@ class BaselineSchemaTests(unittest.TestCase):
         for expected in ("replays.12.10", "kills", "players", "damage_dealt",
                          "team_score.Red"):
             self.assertIn(expected, joined)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,33 +1,42 @@
-//! Model types for decoded Unreal Engine replay primitives.
-//!
-//! These mirror the C# `Replay.Models.Unreal` types but are pure data structs
-//! with no allocations. Display impls produce the compact string form written
-//! to `value_str`.
+//! Model types for Unreal replay values, as plain data; their `Display` impls
+//! produce the string written to `value_str`.
 
 use core::fmt;
 
-/// Rotation quantization modes for [`FRepMovement`].
-///
-/// Determines how the rotation is serialized in `ReplicatedMovement`:
-/// - `ByteComponents`: 1 flag bit + 8 data bits per axis (compact, +/-1.4deg precision)
-/// - `ShortComponents`: 1 flag bit + 16 data bits per axis (precise, +/-0.005deg)
+/// How [`FRepMovement`] serializes its rotation, per axis:
+/// - `ByteComponents`: 1 flag bit + 8 data bits (+/-1.4deg precision)
+/// - `ShortComponents`: 1 flag bit + 16 data bits (+/-0.005deg)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RotatorQuantization {
     ByteComponents,
     ShortComponents,
 }
 
-/// A 3D vector. Components are always `f64` regardless of wire format (float
-/// values are widened on decode to avoid losing precision when mixing formats).
-///
-/// # Wire layouts
-///
-/// | Variant | Bits |
-/// |---------|------|
-/// | Float (3 x f32) | 96 |
-/// | Double (3 x f64) | 192 |
-/// | NetQuantize (packed header + N-bit signed x 3) | variable |
-/// | NetQuantizeNormal (3 x SerializedInt(65536)) | ~48 |
+/// Location quantization for [`FRepMovement`] (Unreal's `EVectorQuantization`):
+/// the decimals the sending class rounds to before packing. Not on the wire --
+/// the packed header says only "scaled" -- so every `RepMovement` entry states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VectorQuantization {
+    /// Whole units: the packed integer is the coordinate.
+    RoundWholeNumber,
+    /// One decimal: the packed integer is ten times the coordinate.
+    RoundOneDecimal,
+    /// Two decimals: the packed integer is a hundred times the coordinate.
+    RoundTwoDecimals,
+}
+
+impl VectorQuantization {
+    /// The divisor that turns a scaled packed integer back into world units.
+    pub const fn scale(self) -> u32 {
+        match self {
+            Self::RoundWholeNumber => 1,
+            Self::RoundOneDecimal => 10,
+            Self::RoundTwoDecimals => 100,
+        }
+    }
+}
+
+/// A 3D vector; components are `f64` whatever the wire width (f32 is widened).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FVector {
     pub x: f64,
@@ -42,13 +51,6 @@ impl fmt::Display for FVector {
 }
 
 /// Euler rotation (degrees).
-///
-/// # Wire layouts
-///
-/// | Variant | Bits per axis |
-/// |---------|---------------|
-/// | Short | 1 flag + 16 | -> `value * 360/65536` |
-/// | Byte | 1 flag + 8 | -> `value * 360/256` |
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FRotator {
     pub pitch: f32,
@@ -63,10 +65,6 @@ impl fmt::Display for FRotator {
 }
 
 /// Quaternion rotation (4 x f32).
-///
-/// # Wire layout
-///
-/// 128 bits = 4 x IEEE-754 single.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FQuat {
     pub x: f32,
@@ -82,10 +80,6 @@ impl fmt::Display for FQuat {
 }
 
 /// Transform = rotation (quat) + translation (vec3) + scale (vec3).
-///
-/// # Wire layout
-///
-/// 320 bits = FQuat(128) + FVector_float(96) + FVector_float(96).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FTransform {
     pub rotation: FQuat,
@@ -103,22 +97,18 @@ impl fmt::Display for FTransform {
     }
 }
 
-/// Replicated movement state.
-///
-/// # Wire layout
+/// Replicated movement state, in wire order:
 ///
 /// ```text
-/// Bit 0: bSimulatedPhysicsSleep
-/// Bit 1: bRepPhysics
-/// Bit 2: bRepServerFrame
-/// Bit 3: bRepServerHandle
-/// [VectorNetQuantize100]: location
-/// [RotationShort or RotationByte]: rotation
-/// [VectorNetQuantize(1)]: linear velocity
-/// if bRepPhysics: [VectorNetQuantize(1)]: angular velocity
-/// if bRepServerFrame: IntPacked server frame
-/// if bRepServerHandle: IntPacked server physics handle
+/// 4 bits: bSimulatedPhysicsSleep, bRepPhysics, bRepServerFrame, bRepServerHandle
+/// location: packed quantized vector / VectorQuantization::scale()
+/// rotation: RotationShort or RotationByte; linear velocity: whole units
+/// if bRepPhysics: angular velocity (whole units)
+/// if bRepServerFrame / bRepServerHandle: IntPacked server frame / physics handle
 /// ```
+///
+/// The location divisor and rotator width are per-class choices the wire does
+/// not carry; `FieldType::RepMovement` supplies both.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FRepMovement {
     pub location: FVector,
@@ -127,84 +117,55 @@ pub struct FRepMovement {
     pub angular_velocity: Option<FVector>,
     pub simulated_physics_sleep: bool,
     pub rep_physics: bool,
-    /// `None` when the wire's `bRepServerFrame` bit is clear -- no value was
-    /// sent, not a reported frame of 0. Mirrors `angular_velocity`'s use of
-    /// `Option` for the same reason: `bRepPhysics` gates that field the same
-    /// way `bRepServerFrame` gates this one.
+    /// `None` when `bRepServerFrame` is clear: not sent, not frame 0.
     pub server_frame: Option<u32>,
-    /// `None` when the wire's `bRepServerHandle` bit is clear. See
-    /// `server_frame`.
+    /// `None` when `bRepServerHandle` is clear.
     pub server_physics_handle: Option<u32>,
 }
 
-/// Writes an [`FVector`] as `{"x":..,"y":..,"z":..}`.
-///
-/// [`FVector`]'s own `Display` is the compact `(x,y,z)` form; a vector nested
-/// inside a `ReplicatedMovement` object needs the named-member shape instead,
-/// so this cannot reuse it.
-fn write_vector_json(f: &mut fmt::Formatter<'_>, v: &FVector) -> fmt::Result {
-    write!(f, "{{\"x\":{},\"y\":{},\"z\":{}}}", v.x, v.y, v.z)
+/// An [`FVector`] as the JSON object `{"x":..,"y":..,"z":..}`, not its compact
+/// `Display`; the effect JSON writes vectors the same way.
+pub(crate) struct VectorJson<'a>(pub(crate) &'a FVector);
+
+impl fmt::Display for VectorJson<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let FVector { x, y, z } = self.0;
+        write!(f, "{{\"x\":{x},\"y\":{y},\"z\":{z}}}")
+    }
 }
 
-/// `ReplicatedMovement` serializes as a JSON object, not the compact form the
-/// other types use.
-///
-/// The compact form cannot carry the whole struct. `simulated_physics_sleep`
-/// and `server_physics_handle` have nowhere to go in a `loc/rot/vel` triple,
-/// and `value_str` is a single string column -- there is no struct column to
-/// put them in. So they were dropped: 14,377 rows on 02d4d478 shipped a
-/// human-readable string where the reference (ReplayJsonNormalizer.cs:255)
-/// emits an eight-member object, and two of those members were simply gone.
-///
-/// Member names and order follow the reference exactly.
-///
-/// # Finiteness is enforced, not structural
-///
-/// This comment used to claim every component was finite *by construction* --
-/// "vectors are an integer quotient of an integer scale factor, rotator axes an
-/// integer multiple of 360/65536 or 360/256". That reasoning covers the
-/// **packed** quantized path and the rotators, and it silently omits the case
-/// where `componentBitCount == 0`: there the decoder falls back to three raw
-/// `f32`s (or `f64`s), which carry whatever the bits spell. A component of
-/// `0x7fc00000` is `NaN`, and this `Display` would emit `"x":NaN` -- not valid
-/// JSON -- while every decode counter reported success.
-///
-/// So the guarantee is now upheld by
-/// [`DecodeError::NonFiniteComponent`](crate::decode::DecodeError), which
-/// rejects such a payload in `geometry::read_quantized_vector` before one can
-/// reach this formatter. Anything that constructs an `FRepMovement` by another
-/// route owes the same check.
+/// `Some(v)` as `v`, `None` as JSON `null`.
+struct OrNull<T>(Option<T>);
+
+impl<T: fmt::Display> fmt::Display for OrNull<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(v) => v.fmt(f),
+            None => f.write_str("null"),
+        }
+    }
+}
+
+/// A JSON object whose member names and order match the reference bundle byte
+/// for byte. Finiteness is `DecodeError::NonFiniteComponent`'s job, not the
+/// type's: the raw-float fallback can carry NaN, so any other constructor owes
+/// that check (docs/OVERLAY_RESOLUTION.md "FRepMovement finiteness is enforced").
 impl fmt::Display for FRepMovement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("{\"linear_velocity\":")?;
-        write_vector_json(f, &self.linear_velocity)?;
-        f.write_str(",\"angular_velocity\":")?;
-        match self.angular_velocity {
-            Some(ref av) => write_vector_json(f, av)?,
-            None => f.write_str("null")?,
-        }
-        f.write_str(",\"location\":")?;
-        write_vector_json(f, &self.location)?;
+        let FRotator { pitch, yaw, roll } = self.rotation;
         write!(
             f,
-            ",\"rotation\":{{\"pitch\":{},\"yaw\":{},\"roll\":{}}}",
-            self.rotation.pitch, self.rotation.yaw, self.rotation.roll
-        )?;
-        write!(
-            f,
-            ",\"simulated_physics_sleep\":{},\"rep_physics\":{}",
-            self.simulated_physics_sleep, self.rep_physics
-        )?;
-        f.write_str(",\"server_frame\":")?;
-        match self.server_frame {
-            Some(v) => write!(f, "{v}")?,
-            None => f.write_str("null")?,
-        }
-        f.write_str(",\"server_physics_handle\":")?;
-        match self.server_physics_handle {
-            Some(v) => write!(f, "{v}")?,
-            None => f.write_str("null")?,
-        }
-        f.write_str("}")
+            "{{\"linear_velocity\":{},\"angular_velocity\":{},\"location\":{},\
+             \"rotation\":{{\"pitch\":{pitch},\"yaw\":{yaw},\"roll\":{roll}}},\
+             \"simulated_physics_sleep\":{},\"rep_physics\":{},\
+             \"server_frame\":{},\"server_physics_handle\":{}}}",
+            VectorJson(&self.linear_velocity),
+            OrNull(self.angular_velocity.as_ref().map(VectorJson)),
+            VectorJson(&self.location),
+            self.simulated_physics_sleep,
+            self.rep_physics,
+            OrNull(self.server_frame),
+            OrNull(self.server_physics_handle),
+        )
     }
 }

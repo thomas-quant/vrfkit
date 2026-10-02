@@ -1,12 +1,14 @@
 """Equippable class path -> display name and category.
 
-GENERATED FILE -- DO NOT EDIT BY HAND.
-Regenerate with: python tools/extract_equippables.py
-Source: src/Replay.Valorant/Combat/ValorantEquippableResolver.cs
+Display names are not on the wire, and these are a fixed reference set, not
+the game's (13.06 calls CompactPistol_C "Bandit"). Do not rename an entry:
+to_valplay_bundle.py publishes it as shot.equippable.name and valplay prices
+weapons by that literal (it leaves "Compact Pistol" unpriced and "Bandit" at
+an unverified 600), so a rename is valplay's decision, made with the price.
 
-Keys cover the three path shapes that appear in replay data, mirroring
-the C# CreateDefinitions(): the full 'Package.Class_C' path, the package
-path alone, and the 'Default__Class_C' archetype form.
+Keys: the 'Package.Class_C' path, the package alone and the
+'Default__Class_C' archetype, plus exact measured aliases for asset renames
+(no case folding).
 """
 
 # fmt: off
@@ -26,6 +28,7 @@ EQUIPPABLE_DEFINITIONS = [
     ('/Game/Equippables/Guns/Shotguns/PumpShotgun/PumpShotgun.PumpShotgun_C', 'Bucky', 'shotgun'),
     ('/Game/Equippables/Guns/Shotguns/AutoShotgun/AutomaticShotgun.AutomaticShotgun_C', 'Judge', 'shotgun'),
     ('/Game/Equippables/Guns/Rifles/Burst/AssaultRifle_Burst.AssaultRifle_Burst_C', 'Bulldog', 'rifle'),
+    ('/Game/Equippables/Guns/Rifles/BattleRifle/BattleRifle.BattleRifle_C', 'Warden', 'rifle'),
     ('/Game/Equippables/Guns/SniperRifles/Dmr/DMR.DMR_C', 'Guardian', 'rifle'),
     ('/Game/Equippables/Guns/Rifles/Carbine/AssaultRifle_ACR.AssaultRifle_ACR_C', 'Phantom', 'rifle'),
     ('/Game/Equippables/Guns/Rifles/AK/AssaultRifle_AK.AssaultRifle_AK_C', 'Vandal', 'rifle'),
@@ -38,17 +41,19 @@ EQUIPPABLE_DEFINITIONS = [
     ('/Game/Characters/Deadeye/S0/Ability_X/Gun_Giantslayer/Gun_Deadeye_X_Giantslayer_Prototype_FIreRatePrototype.Gun_Deadeye_X_Giantslayer_Prototype_FireRatePrototype_C', 'Tour de Force', 'ability'),
 ]
 
+EQUIPPABLE_PATH_ALIASES = {
+    '/Game/Equippables/Guns/SniperRifles/Dmr/DMR.DMR_C': ('/Game/Equippables/Guns/SniperRifles/DMR/DMR.DMR_C',),
+}
+
 
 def _build_lookup():
-    """class path (all three shapes) -> (name, category, canonical path)."""
+    """Every key shape -> (name, category, canonical source path)."""
     out = {}
     for class_path, name, category in EQUIPPABLE_DEFINITIONS:
-        value = (name, category, class_path)
-        out[class_path] = value
-        if '.' in class_path:
-            package, _, class_name = class_path.rpartition('.')
-            out[package] = value
-            out['Default__' + class_name] = value
+        for path in (class_path, *EQUIPPABLE_PATH_ALIASES.get(class_path, ())):
+            package, _, class_name = path.rpartition('.')
+            out.update(dict.fromkeys((path, package, 'Default__' + class_name),
+                                     (name, category, class_path)))
     return out
 
 

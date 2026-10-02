@@ -1,10 +1,9 @@
-//! The ClassNetCache RPC payload walker.
-//!
-//! A ClassNetCache block carries function calls, not properties. Each call's
-//! payload is a sub-archive following the RepLayout `FunctionParameters`
-//! grammar, and walking it turns one opaque blob into one row per named
-//! parameter -- 559,346 of the reference replay's 1,246,812 field rows.
+//! The ClassNetCache RPC payload walker. A ClassNetCache block carries function
+//! calls, each payload a sub-archive in the RepLayout `FunctionParameters`
+//! grammar; walking it turns one opaque blob into one row per named parameter
+//! (their share of all rows: docs/PERFORMANCE_NOTES.md#rpc-parameter-walking).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use smallvec::{SmallVec, smallvec};
@@ -12,27 +11,19 @@ use vrf_bitio::BitReader;
 use vrf_decode::{
     ArrayFieldSchema, DecodeErrorKind, EffectArrayKind, EffectBlobError, FieldType,
     LIFE_CHANGE_BY_SECTION_SCHEMA, LIFE_CHANGE_DAMAGE_SCHEMA, LIFE_CHANGE_SECTION_SCHEMA,
-    apply_overlay_with_checksum, decode_effect_blob_json, decode_struct_array, group_hash_state,
+    apply_overlay_with_checksum, decode_effect_blob_json, decode_struct_array,
+    decode_struct_array_exact, group_hash_state,
 };
 use vrf_schema::{FxHashMap, NetGuidCache};
 
 use super::intern::put;
-use super::{ExportSink, FieldValues, TABLE};
+use super::{ExportSink, FieldValues, MeasuredArrayRoute, TABLE};
 
-/// Memo for [`ExportSink::find_rpc_param_group_path`].
-///
-/// That lookup is a pure function of (content-block group path, function name,
-/// the set of declared group paths). The third input is what
-/// `NetGuidCache::schema_generation` tracks, so stamping the memo with it and
-/// clearing on a change makes the memo exactly equivalent to recomputing.
-///
-/// Why it matters: the fallback branch scans every declared group (475 on
-/// 02d4d478) with `ends_with`, once per RPC, and a replay has 342,735 RPCs.
-/// The distinct (group path, function name) pairs number in the hundreds.
-///
-/// Two levels rather than a tuple key so that a hit costs no allocation: the
-/// outer level is keyed by the same interned `Arc<str>` the sink already holds,
-/// so even a miss allocates nothing for the key.
+/// Memo for [`ExportSink::find_rpc_param_group_path`], a pure function of (block
+/// group path, function name, declared group paths); clearing it when
+/// `NetGuidCache::schema_generation` moves keeps it exact. It spares a scan of
+/// every declared group per RPC. The outer key is the interned group path, so a
+/// hit allocates nothing.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RpcParamGroupMemo {
     generation: u64,
@@ -40,13 +31,11 @@ pub(super) struct RpcParamGroupMemo {
 }
 
 impl ExportSink<'_> {
-    /// Try to parse an RPC payload as a RepLayout field stream using the
-    /// RPC parameter group from the schema.
+    /// Walk an RPC payload as a RepLayout parameter stream, naming each
+    /// parameter from the group [`Self::compute_rpc_param_group_path`] finds, or
+    /// `{func}._h{N}` without one.
     ///
-    /// # Wire format (confirmed against C# `ParseClassNetCachePayload`)
-    ///
-    /// The RPC payload is a sub-archive whose contents follow RepLayout
-    /// `FunctionParameters` grammar:
+    /// The `FunctionParameters` grammar:
     /// ```text
     ///   propertyChecksum : 1 bit (ignored)
     ///   loop:
@@ -56,32 +45,13 @@ impl ExportSink<'_> {
     ///     payloadBits    : IntPacked
     ///     fieldPayload   : sub-reader of payloadBits bits
     /// ```
-    /// Additionally, if exactly 1 bit remains after reading all fields, it is
-    /// a trailing alignment bit that must be consumed (C# grammar check:
-    /// `FunctionParameters && BitsRemaining == 1 -> SkipBits(1)`).
+    /// plus one trailing alignment bit, consumed when exactly one remains
+    /// (`FunctionParameters && BitsRemaining == 1 -> SkipBits(1)`).
     ///
-    /// # Group path resolution
-    ///
-    /// RPC parameter groups are registered with paths like
-    /// `/Script/ShooterGame.ShooterCharacter:MulticastNotifyKilledEnemy`.
-    /// The content block's CNC group might be an agent-specific path like
-    /// `Wushu_PC_C_ClassNetCache`. We cannot simply strip the suffix and
-    /// append `:FunctionName` because the parent class differs.
-    ///
-    /// Strategy: look up the group by function name as a unique leaf suffix
-    /// (the part after `:`). Most RPC parameter groups have a unique function
-    /// name across all 84 groups. For the rare case where the name is not
-    /// unique, we fall back to emitting unnamed handle-indexed rows.
-    ///
-    /// Returns `true` if parameters were emitted (even if just handle-indexed),
-    /// `false` if the payload could not be walked at all (caller should emit
-    /// raw_bits row).
-    ///
-    /// A walk that starts but breaks on a malformed read (truncated handle,
-    /// truncated payload length, or a length exceeding the remaining bits) is
-    /// neither a clean parse nor an unparseable blob: whatever rows were already
-    /// emitted stay, and `self.stats.truncated_rpcs` is bumped so the summary
-    /// can distinguish "completed" from "ran out of bits".
+    /// `false` only when no parameter row was emitted (the caller then emits the
+    /// raw row). A walk that breaks on a malformed read keeps its rows and bumps
+    /// `truncated_rpcs`; after such a break, or a suffix past the terminator, the
+    /// whole payload is added as one more row.
     pub(super) fn try_parse_rpc_params(
         &mut self,
         rpc_handle: u32,
@@ -96,23 +66,17 @@ impl ExportSink<'_> {
             return false;
         };
 
-        // Find the RPC parameter group. Try direct path construction first,
-        // then fall back to function-name leaf match.
         let param_group_path = self.find_rpc_param_group_path(func_name);
-
-        // Parse the RepLayout stream inside the RPC payload.
         let mut rpc_reader = reader;
 
-        // Property checksum bit (1 bit) -- always present for FunctionParameters.
         if rpc_reader.read_bit().is_err() {
             return false;
         }
+        self.stats.rpc_param_walks += 1;
 
         let mut emitted_any = false;
-        // Set on the four malformed-read break paths below, so the caller can
-        // tell a completed walk from one that ran out of bits. The normal exits
-        // (clean end-of-stream, the trailing alignment bit, the zero-handle
-        // terminator) leave it `false`.
+        // Set only on the three malformed-read breaks below, never on the
+        // normal exits (end of stream, alignment bit, zero-handle terminator).
         let mut truncated = false;
         let mut unexplained_suffix = false;
         let param_group_path_ref = param_group_path.as_deref();
@@ -122,7 +86,6 @@ impl ExportSink<'_> {
                 break;
             }
 
-            // FunctionParameters grammar: if exactly 1 bit remains, skip it.
             if rpc_reader.bits_remaining() == 1 {
                 let _ = rpc_reader.read_bit();
                 break;
@@ -133,11 +96,9 @@ impl ExportSink<'_> {
                 break;
             };
             if encoded_handle == 0 {
-                // The wire said "no more parameters". Ask what is still in the
-                // payload before believing it: one trailing alignment bit is
-                // grammar, anything more is a suffix this walk cannot explain.
-                // See `ExportStats::rpc_suffix_bits_dropped` for why it is
-                // counted rather than rejected.
+                // "No more parameters": one trailing alignment bit is grammar,
+                // anything more is a suffix this walk cannot explain, counted
+                // (not rejected; see `ExportStats::rpc_suffix_bits_dropped`).
                 let leftover = rpc_reader.bits_remaining();
                 if leftover > 1 {
                     self.stats.rpc_suffix_bits_dropped =
@@ -153,25 +114,13 @@ impl ExportSink<'_> {
                 break;
             };
 
-            if u64::from(payload_bits) > rpc_reader.bits_remaining() {
-                // Malformed: more bits declared than available. Stop parsing
-                // but keep what we have (emitted_any may be true).
-                truncated = true;
-                break;
-            }
-
+            // Fails when more bits are declared than remain.
             let Ok(sub) = rpc_reader.sub_reader(u64::from(payload_bits)) else {
                 truncated = true;
                 break;
             };
 
-            // Resolve parameter field name from the group. Borrowed, not
-            // cloned: it is only needed to build `full_field_name` and to key
-            // the overlay, both of which end before the next mutation of self.
-            //
-            // The same `NetFieldExport` carries `compatible_checksum`, so the
-            // overlay's last-resort lookup costs nothing extra here -- one
-            // schema walk yields both.
+            // One schema walk for the name and the overlay's last-resort checksum.
             let param_export = param_group_path_ref.and_then(|gp| {
                 self.cache
                     .get_group_by_path(gp)
@@ -180,104 +129,63 @@ impl ExportSink<'_> {
             let param_name: Option<&str> = param_export.map(|f| f.name.as_str());
             let param_checksum: Option<u32> = param_export.map(|f| f.compatible_checksum);
 
-            // Build field_name: "FunctionName.ParamName" or "FunctionName._h{N}".
-            //
-            // Interned rather than `format!`-ed per row: the distinct set is
-            // bounded by the schema (a few hundred), while this loop body runs
-            // 559,346 times on the reference replay.
-            let full_field_name = match param_name {
-                Some(pn) => self.channel_state.names.intern_join(func_name, '.', pn),
-                None => self.channel_state.names.intern_fmt(|out| {
-                    put(out, format_args!("{func_name}._h{param_handle}"));
-                }),
-            };
+            // "Function.Param", or "Function._h{N}" unnamed: a dot, because group
+            // paths already use ':' and downstream splits on the first '.'.
+            let full_field_name = self.channel_state.names.intern_fmt(|out| match param_name {
+                Some(pn) => put(out, format_args!("{func_name}.{pn}")),
+                None => put(out, format_args!("{func_name}._h{param_handle}")),
+            });
 
-            // Extract raw bits for this parameter field.
             let raw_bits = copy_raw_bits(sub, payload_bits);
 
-            // Apply type overlay using the parameter group path as group_path.
-            // The group hash is cached for the current_group_path fallback; a
-            // resolved parameter group is a different path, so its hash is
-            // computed fresh.
+            // The overlay keys on the parameter group; only the
+            // `current_group_path` fallback has a cached hash.
             let overlay_group = param_group_path_ref.unwrap_or(&self.current_group_path);
             let group_state = match param_group_path_ref {
                 Some(gp) => group_hash_state(gp),
                 None => self.current_group_hash,
             };
-            // `param_name`, not `full_field_name`: when the group has no
-            // declared name at this handle, `full_field_name` is vrfkit's own
-            // synthesized `"{func}._h{N}"` placeholder for the emitted row's
-            // label, not a name the wire declared. Passing it here as though it
-            // were a wire-declared name trips `resolve_in_group`'s fail-closed
-            // conflict guard against its own placeholder, refusing the very
-            // handle fallback that guard exists to allow. `None` lets
-            // resolution fall through to the handle-based descriptor lookup
-            // with no name to (falsely) conflict against, same as the
-            // RepLayout field path in `stream.rs`.
-            let (value_i64, value_f64, value_bool, mut value_str) =
-                match apply_overlay_with_checksum(
-                    &TABLE,
-                    overlay_group,
-                    group_state,
-                    param_name,
-                    param_handle,
-                    param_checksum,
-                    raw_bits.as_deref(),
-                    payload_bits,
-                    &mut self.stats.overlay,
-                ) {
-                    Some(result) => (
-                        result.value_i64,
-                        result.value_f64,
-                        result.value_bool,
-                        result.value_str,
-                    ),
-                    None => (None, None, None, None),
-                };
+            // `param_name`, not `full_field_name`: the synthesized `{func}._h{N}`
+            // is no wire-declared name, and passed as one it would trip
+            // `resolve_in_group`'s conflict guard against its own placeholder,
+            // refusing the handle fallback that guard exists to allow.
+            let (value_i64, value_f64, value_bool, mut value_str) = apply_overlay_with_checksum(
+                &TABLE,
+                overlay_group,
+                group_state,
+                param_name,
+                param_handle,
+                param_checksum,
+                raw_bits.as_deref(),
+                payload_bits,
+                &mut self.stats.overlay,
+            )
+            .map(|result| result.into_columns())
+            .unwrap_or_default();
 
-            // Second, additive pass: the EffectContainer arrays.
-            //
-            // The static overlay types these as `Raw` (or does not know them at
-            // all), so they reach here with every `value_*` null and only the
-            // bits to show for themselves -- 45.8% of everything still untyped
-            // in `02d4d478`. `decode_effect_blob_json` turns one into a JSON
-            // array; `raw_bits` is left in place, so this is an overlay, not a
-            // replacement, and a consumer that wants to reinterpret the bits
-            // still can.
-            //
-            // Only attempted when the overlay produced nothing: a declared type
-            // that decoded is the more specific answer and outranks a decode
-            // driven by the parameter's name.
+            // Additive pass: an EffectContainer array the overlay left untyped
+            // becomes a JSON `value_str`, `raw_bits` kept. A declared type that
+            // decoded outranks this name-driven decode. The match is on the
+            // parameter name: a `_h{N}` handle does not identify the element type.
             if value_i64.is_none()
                 && value_f64.is_none()
                 && value_bool.is_none()
                 && value_str.is_none()
             {
                 if let (Some(kind), Some(raw)) = (
-                    effect_array_kind_for_param(func_name, param_name),
+                    param_name.and_then(EffectArrayKind::from_param_name),
                     raw_bits.as_deref(),
                 ) {
-                    // `payload_bits`, not `raw.len() * 8`: the last byte is
-                    // padded, and handing the padding to the decoder as data is
-                    // the latent bug docs/archive/PROJECT_STATUS.md 12-D pins
-                    // on the Python side of this same format.
+                    // `payload_bits`, not `raw.len() * 8`: the padding is not data.
                     match decode_effect_blob_json(kind, raw, payload_bits) {
                         Ok(json) => {
                             value_str = Some(json);
                             self.stats.effect_blobs_decoded += 1;
                         }
                         Err(err) => {
-                            // Loud, not silent: `value_str` stays null, the bits
-                            // stay, and the row lands in the export summary's
-                            // "Decode errors" line and its per-field breakdown.
-                            //
-                            // `stats.overlay` is the only channel that survives
-                            // here -- the sink is rebuilt per packet and the
-                            // driver aggregates nothing else. The cost is that a
-                            // failing row is counted in two buckets, so "Rows
-                            // offered" over-reports by the failure count. That
-                            // denominator is a diagnostic, not an invariant, and
-                            // the count was 0 across all 61,617 blobs measured.
+                            // Reaches "Decode errors": `stats.overlay` is the only
+                            // channel that survives the packet, so "Rows offered"
+                            // over-reports by the failure count (0 measured).
                             self.stats.overlay.decoded_err += 1;
                             self.stats.overlay.error_report.record(
                                 overlay_group,
@@ -291,15 +199,35 @@ impl ExportSink<'_> {
                 }
             }
 
-            // Third, additive pass: the life-change arrays.
-            //
-            // Outside the `value_*.is_none()` gate above, not inside it. That
-            // gate exists so a declared type outranks a name-driven decode of
-            // the same bits; this pass emits *additional rows* and takes the
-            // parent's bits away from nobody. Nesting it would mean that giving
-            // the parent a type one day silently stops the children being
-            // emitted -- the shape of failure this file has been chasing all
-            // week.
+            let targeting_world_location_array = func_name == "MulticastRespondToValidMapClick"
+                && param_handle == 0
+                && param_name == Some("WorldLocation")
+                && param_checksum == Some(2052180909)
+                && param_group_path_ref
+                    == Some(
+                        "/Script/ShooterGame.MapTargetingStateComponent:MulticastRespondToValidMapClick",
+                    )
+                && param_group_path_ref
+                    .and_then(|path| self.cache.get_group_by_path(path))
+                    .and_then(|group| group.get_field(1))
+                    .is_some_and(|field| {
+                        field.name == "WorldLocation" && field.compatible_checksum == 3965480401
+                    });
+            let projectile_path_array = self.admits(MeasuredArrayRoute::NetworkedProjectilePath)
+                && self.current_group_path.as_ref()
+                    == "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache"
+                && param_group_path_ref
+                    == Some(
+                        "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:MulticastSetPath",
+                    )
+                && func_name == "MulticastSetPath"
+                && param_handle == 0
+                && param_name == Some("NetworkedProjectilePath")
+                && param_checksum == Some(2_930_105_559);
+
+            // Additive pass: the life-change arrays, outside the value gate on
+            // purpose. That gate ranks decodes of the same bits; this pass only
+            // adds rows, so typing the parent one day must not stop the children.
             if let (Some(schema), Some(raw)) = (
                 life_change_schema_for_param(func_name, param_name),
                 raw_bits.as_deref(),
@@ -313,6 +241,44 @@ impl ExportSink<'_> {
                 );
             }
 
+            // The multi-click RPC's flat array of 192-bit world locations. Every
+            // identity is the replay's declaration, so a lookalike stays raw.
+            if let (true, Some(raw)) = (targeting_world_location_array, raw_bits.as_deref()) {
+                self.stats.targeting_world_locations_decoded += self.emit_exact_array_leaves(
+                    &full_field_name,
+                    rpc_handle,
+                    (raw, payload_bits),
+                    &[None, Some("WorldLocation")],
+                    &[(1, 192, ".WorldLocation", FieldType::VectorDouble)],
+                );
+            }
+
+            // The projectile path's element handles come from the PathPoint
+            // descriptor (the replay's handles 1-3 are unrelated siblings), so
+            // the route is scoped to the observed parent identity.
+            if let (true, Some(raw)) = (projectile_path_array, raw_bits.as_deref()) {
+                if super::blobs::strict_nested_array_preflight(raw, payload_bits, &[1, 2, 3]) {
+                    self.stats.route_children_projectile_path += self.emit_exact_array_leaves(
+                        &full_field_name,
+                        rpc_handle,
+                        (raw, payload_bits),
+                        &[
+                            None,
+                            Some("ElapsedSeconds"),
+                            Some("Location"),
+                            Some("Velocity"),
+                        ],
+                        &[
+                            (1, 32, ".ElapsedSeconds", FieldType::Float),
+                            (2, 192, ".Location", FieldType::VectorDouble),
+                            (3, 192, ".Velocity", FieldType::VectorDouble),
+                        ],
+                    );
+                } else {
+                    self.stats.array.errors += 1;
+                }
+            }
+
             self.push_field(FieldValues {
                 handle: rpc_handle,
                 field_name: Some(full_field_name),
@@ -324,7 +290,6 @@ impl ExportSink<'_> {
                 value_bool,
                 value_str,
             });
-            self.stats.fields_emitted += 1;
 
             emitted_any = true;
         }
@@ -333,12 +298,9 @@ impl ExportSink<'_> {
             self.stats.truncated_rpcs = self.stats.truncated_rpcs.saturating_add(1);
         }
 
-        // Parameter rows already emitted remain useful, but they cannot stand
-        // in for bytes the walk did not explain. Add the original payload as a
-        // fallback row whenever a partial walk would otherwise suppress the
-        // caller's ordinary whole-payload fallback. This is additive: typed
-        // parameter rows stay, and the exact raw input stays available for a
-        // future decoder.
+        // Emitted parameter rows cannot stand in for bits the walk did not
+        // explain, and they suppress the caller's raw fallback, so add the
+        // whole payload as one more row; the typed rows stay.
         if emitted_any && (truncated || unexplained_suffix) {
             let field_name = self.channel_state.names.intern(func_name);
             self.push_field(FieldValues {
@@ -348,24 +310,16 @@ impl ExportSink<'_> {
                 raw_bits: copy_raw_bits(whole_reader, whole_bit_count),
                 ..FieldValues::default()
             });
-            self.stats.fields_emitted += 1;
         }
 
         emitted_any
     }
 
-    /// Emit one row per member of a life-change array element.
-    ///
-    /// Purely additive: the parent row keeps its `raw_bits` and is pushed by
-    /// the caller either way, so a consumer that was reading the blob still
-    /// can.
-    ///
-    /// The rows carry `rpc_handle`, not the member's handle inside the struct.
-    /// That is not cosmetic -- `tools/to_valplay_bundle.py` groups a call's
+    /// Emit one row per member of a life-change array element; additive, the
+    /// caller pushes the parent row either way. The rows carry `rpc_handle`, not
+    /// the member's own handle: `tools/to_valplay_bundle.py` groups a call's
     /// parameters by `(packet, actor, group, handle)`, so member handles would
-    /// split one RPC into as many fake calls as it has members. Measured, not
-    /// reasoned about: injecting two child rows under their struct handles
-    /// produced two bundle events where the RPC handle produced one.
+    /// split one call into several events.
     fn emit_life_change_array(
         &mut self,
         schema: &'static ArrayFieldSchema,
@@ -377,49 +331,106 @@ impl ExportSink<'_> {
         let flattened =
             decode_struct_array(raw, bit_count, Some(schema), &[], &mut self.stats.array);
         for field in &flattened {
-            let (value_i64, value_f64, value_bool, value_str) =
-                match life_change_member_type(&field.path) {
-                    Some(ft) => super::blobs::decode_leaf_with_stats(
-                        ft,
-                        &field.raw_bits,
-                        field.bit_count,
-                        &mut self.stats.array_leaf_decode_errors,
-                    ),
-                    None => (None, None, None, None),
-                };
-            let full_name = self.channel_state.names.intern_fmt(|out| {
-                out.push_str(prefix);
-                out.push_str(&field.path);
-            });
-            self.push_field(FieldValues {
-                handle: rpc_handle,
-                field_name: Some(full_name),
-                // A member is addressed inside the array payload, so the
-                // replay declares no checksum for it. See `FieldRecord`.
-                compatible_checksum: None,
-                bit_count: field.bit_count,
-                raw_bits: Some(SmallVec::from_slice(&field.raw_bits)),
-                value_i64,
-                value_f64,
-                value_bool,
-                value_str,
-            });
-            self.stats.fields_emitted += 1;
+            let columns = match life_change_member_type(&field.path) {
+                Some(ft) => super::blobs::decode_leaf_with_stats(
+                    ft,
+                    &field.raw_bits,
+                    field.bit_count,
+                    &mut self.stats.array_leaf_decode_errors,
+                ),
+                None => (None, None, None, None),
+            };
+            self.push_child(
+                rpc_handle,
+                &[prefix, &field.path],
+                field.bit_count,
+                &field.raw_bits,
+                columns,
+            );
         }
     }
 
-    /// Find the RPC parameter group path for a given function name.
-    ///
-    /// Memoised wrapper around [`Self::compute_rpc_param_group_path`].
-    ///
-    /// The computation is a pure function of the current group path, the
-    /// function name, and the set of declared group paths; only the third can
-    /// change while a replay is being read, and `schema_generation` tracks
-    /// exactly that. A generation change discards the whole memo, so a hit is
-    /// indistinguishable from a recomputation.
-    ///
-    /// Strategy 2 in the computation is O(groups) per call. Without this memo a
-    /// replay pays 342,735 x 475 `ends_with` probes.
+    /// Emit an RPC struct array's leaves when every element holds exactly
+    /// `members` (handle, width, path suffix, type), else none: a walker
+    /// diagnostic, a short element (the walker calls a missing member clean), an
+    /// unexpected leaf, a duplicate path or a non-finite number keeps only the
+    /// raw parent. A refused clean walk counts once in
+    /// `array_leaf_decode_errors`. Returns the children pushed.
+    fn emit_exact_array_leaves(
+        &mut self,
+        prefix: &str,
+        rpc_handle: u32,
+        (raw, bit_count): (&[u8], u32),
+        declared: &[Option<&str>],
+        members: &[(u32, u32, &str, FieldType)],
+    ) -> u64 {
+        let mut isolated = vrf_decode::ArrayDecodeStats::default();
+        let flattened = decode_struct_array_exact(raw, bit_count, declared, &mut isolated);
+        self.stats.array.merge_from(&isolated);
+        if !isolated.is_clean() {
+            return 0;
+        }
+        let len = flattened.len() as u64;
+        let complete = isolated.fields_emitted == len
+            && isolated
+                .elements_decoded
+                .saturating_mul(members.len() as u64)
+                == len;
+        let prior_errors = self.stats.array_leaf_decode_errors;
+        let mut paths = HashSet::new();
+        let children: Option<Vec<_>> = complete
+            .then(|| {
+                flattened
+                    .into_iter()
+                    .map(|field| {
+                        let &(.., kind) = members.iter().find(|&&(handle, width, suffix, _)| {
+                            field.handle == handle
+                                && field.bit_count == width
+                                && field.path.ends_with(suffix)
+                        })?;
+                        let finite = kind != FieldType::VectorDouble
+                            || field.raw_bits.chunks_exact(8).all(|chunk| {
+                                f64::from_le_bytes(chunk.try_into().expect("eight-byte chunk"))
+                                    .is_finite()
+                            });
+                        if !finite || !paths.insert(field.path.clone()) {
+                            return None;
+                        }
+                        let columns = super::blobs::decode_leaf_with_stats(
+                            kind,
+                            &field.raw_bits,
+                            field.bit_count,
+                            &mut self.stats.array_leaf_decode_errors,
+                        );
+                        let typed = match kind {
+                            FieldType::Float => columns.1.is_some_and(f64::is_finite),
+                            _ => columns.3.is_some(),
+                        };
+                        typed.then_some((field, columns))
+                    })
+                    .collect()
+            })
+            .flatten();
+        let Some(children) = children else {
+            if self.stats.array_leaf_decode_errors == prior_errors {
+                self.stats.array_leaf_decode_errors += 1;
+            }
+            return 0;
+        };
+        let pushed = children.len() as u64;
+        for (field, columns) in children {
+            self.push_child(
+                rpc_handle,
+                &[prefix, &field.path],
+                field.bit_count,
+                &field.raw_bits,
+                columns,
+            );
+        }
+        pushed
+    }
+
+    /// [`Self::compute_rpc_param_group_path`], memoised in [`RpcParamGroupMemo`].
     fn find_rpc_param_group_path(&mut self, function_name: &str) -> Option<Arc<str>> {
         let Self {
             cache,
@@ -449,23 +460,19 @@ impl ExportSink<'_> {
         resolved
     }
 
-    /// Strategy:
-    /// 1. Try stripping `_ClassNetCache` from current_group_path and appending
-    ///    `:<function_name>` -- this works when the CNC group matches the
-    ///    parameter group's class (e.g. DamageableComponent).
-    /// 2. Search all registered groups for one whose path ends with
-    ///    `:<function_name>`. If exactly one matches, use it (unique leaf match).
-    ///    If multiple match, return None (ambiguous).
-    ///
-    /// The second strategy handles inheritance: `Wushu_PC_C_ClassNetCache` has
-    /// `MulticastNotifyKilledEnemy` but the parameter group is under
-    /// `ShooterCharacter:MulticastNotifyKilledEnemy`.
+    /// The RPC's parameter group: `<class>:<function>` from the block's
+    /// `_ClassNetCache` group when the class itself declares it (e.g.
+    /// `DamageableComponent`), else the one declared group ending in
+    /// `:<function>`, which covers inheritance (`Wushu_PC_C_ClassNetCache`'s
+    /// `MulticastNotifyKilledEnemy` is declared as
+    /// `ShooterCharacter:MulticastNotifyKilledEnemy`). Most of the 84 RPC
+    /// parameter groups have a unique function name; an ambiguous one is `None`,
+    /// and its parameters are named `{func}._h{N}`.
     fn compute_rpc_param_group_path(
         cache: &NetGuidCache,
         current_group_path: &str,
         function_name: &str,
     ) -> Option<Arc<str>> {
-        // Strategy 1: direct path construction from CNC group.
         if let Some(base) = current_group_path.strip_suffix(vrf_schema::CLASS_NET_CACHE_SUFFIX) {
             let candidate = format!("{base}:{function_name}");
             if cache.get_group_by_path(&candidate).is_some() {
@@ -473,11 +480,10 @@ impl ExportSink<'_> {
             }
         }
 
-        // Strategy 2: search for unique group with `:<function_name>` suffix.
         let suffix = format!(":{function_name}");
         let mut found: Option<&str> = None;
         for group in cache.groups() {
-            if group.path.ends_with(&suffix) && group.path.contains(':') {
+            if group.path.ends_with(&suffix) {
                 if found.is_some() {
                     // Ambiguous: multiple groups match this function name.
                     return None;
@@ -489,54 +495,29 @@ impl ExportSink<'_> {
     }
 }
 
-/// Copy `bit_count` bits out of `reader` into a fresh byte buffer.
-///
-/// `None` for a zero-bit field: an empty blob and "no payload" are different
-/// things downstream, and `raw_bits` is the column the valplay adapter's
-/// capture predicate keys on.
-pub(super) fn copy_raw_bits(reader: BitReader<'_>, bit_count: u32) -> Option<SmallVec<[u8; 16]>> {
+/// Copy `bit_count` bits out of `reader` into a fresh byte buffer. `None` for a
+/// zero-bit field -- an empty blob is not "no payload" to the valplay adapter,
+/// whose capture predicate keys on `raw_bits` -- and for a short reader.
+pub(super) fn copy_raw_bits(
+    mut reader: BitReader<'_>,
+    bit_count: u32,
+) -> Option<SmallVec<[u8; 16]>> {
     if bit_count == 0 {
         return None;
     }
     let mut buf = smallvec![0u8; (bit_count as usize).div_ceil(8)];
-    let mut reader = reader;
-    let _ = reader.copy_bits_to(&mut buf, u64::from(bit_count));
+    reader.copy_bits_to(&mut buf, u64::from(bit_count)).ok()?;
     Some(buf)
 }
 
-/// The one RPC whose effect blobs must keep reaching the downstream adapter as
-/// raw bits.
-///
-/// `tools/to_valplay_bundle.py` builds `valorant_shot_received` -- and with it
-/// the `weapons`, `shot_rays`, `spray_control` and `posture` metric sections --
-/// from this RPC's blobs, which it captures at line 1744 under a predicate it
-/// calls `is_raw`. That predicate is `_get_value` at line 1096, and it returns
-/// `is_raw = False` the moment `value_str` is non-null: the `row_str` test at
-/// lines 1104-1105 runs *before* the `row_raw` test at line 1110. So filling
-/// `value_str` on these rows would not merely change their shape, it would
-/// stop the adapter capturing them at all, silently, and the shot sections
-/// would go with them.
-///
-/// The exclusion is therefore a property of the consumer, not of the wire
-/// format -- which is why it lives here and not in `vrf_decode::effect`. It can
-/// go away once the adapter reads the decoded JSON instead of the bits.
-const EFFECT_BLOB_RPC_LEFT_RAW_FOR_ADAPTER: &str = "ReplayPlayContinuousEffectAtLocation";
-
-/// Which life-change schema an RPC parameter takes, if any.
-///
-/// Keyed on the function as well as the parameter, because the local handles
-/// differ per function -- each struct array gets its own handle space, so the
-/// same four members sit at 10-13, 1-4 or 2-5 depending on where they arrive.
-///
-/// `MulticastNotifyHeal` and `MulticastNotifyOverhealDecay` name their
-/// parameter `LifeChangeBySection`, not `LifeChangeEvents`. Dispatching on the
-/// array's name alone would silently miss both, which between them are more
-/// than half the calls.
-///
+/// Which life-change schema an RPC parameter takes, if any. Keyed on the
+/// function too: each struct array has its own handle space, so the same four
+/// members sit at 10-13, 1-4 or 2-5. `MulticastNotifyHeal` and
+/// `MulticastNotifyOverhealDecay`, more than half the calls, name theirs
+/// `LifeChangeBySection`, not `LifeChangeEvents`.
 /// `MulticastReceivePlayerTemporaryDeathEvent_Point` and
-/// `MulticastReceivePlayerDownedEvent_Point` send the same array at handles
-/// 12-15 and are deliberately absent: 9 and 2 calls across twenty replays is
-/// not enough to check a schema against anything.
+/// `MulticastReceivePlayerDownedEvent_Point` (the same array at 12-15) are left
+/// out: 9 and 2 calls across twenty replays cannot check a schema.
 fn life_change_schema_for_param(
     function_name: &str,
     param_name: Option<&str>,
@@ -553,14 +534,12 @@ fn life_change_schema_for_param(
     }
 }
 
-/// The member type for a leaf of a life-change element.
-///
-/// Matched on the name the schema gave it rather than on its handle, because
-/// the handles move between functions and the names do not. Evidence for each:
-/// `ChangedComponent` resolves through `net_guids` to a `*DamageSection` actor
-/// on better than 99.98% of rows, `sum(DeltaLife)` matches the RPC's own
-/// scalar total on 69,818 of 69,818 calls, and `bAliveAfterChange` is one bit
-/// on every row and agrees with the sibling `bAliveAfterDamage` 17,550/17,550.
+/// The member type of a life-change leaf, matched on the schema's name (handles
+/// move between functions, names do not). `ChangedComponent` resolves through
+/// `net_guids` to a `*DamageSection` actor on >99.98% of rows, `sum(DeltaLife)`
+/// matches the RPC's own scalar total on 69,818 of 69,818 calls, and
+/// `bAliveAfterChange` is one bit on every row and agrees with the sibling
+/// `bAliveAfterDamage` 17,550/17,550.
 fn life_change_member_type(path: &str) -> Option<FieldType> {
     if path.ends_with("ChangedComponent") {
         Some(FieldType::ObjectNetGuid)
@@ -573,34 +552,208 @@ fn life_change_member_type(path: &str) -> Option<FieldType> {
     }
 }
 
-/// Decide whether an RPC parameter should be decoded as an effect-array blob.
-///
-/// Eleven functions on `02d4d478` declare a parameter named `FloatValues`,
-/// `ObjectValues` or `VectorValues`, and all 61,617 of those payloads decode
-/// as this format and consume their window exactly. No other parameter name
-/// does, which is why the match is on the name and not on the function.
-fn effect_array_kind_for_param(
-    function_name: &str,
-    param_name: Option<&str>,
-) -> Option<EffectArrayKind> {
-    if function_name == EFFECT_BLOB_RPC_LEFT_RAW_FOR_ADAPTER {
-        return None;
-    }
-    // A parameter whose name the group did not resolve is emitted as `_h{N}`,
-    // and a handle does not identify the element type across functions.
-    EffectArrayKind::from_param_name(param_name?)
-}
-
-/// Map an effect-blob failure onto the overlay report's error kinds.
-///
-/// `DecodeErrorKind` has three variants and this decoder has seven failures,
-/// so the mapping is lossy by construction; the report's `field_name` column
-/// carries the identification. `Residual` is the bucket for "the payload was
-/// not consumable as this format", which is what every structural failure
-/// means here.
+/// Map an effect-blob failure onto the overlay report's error kinds, which must
+/// mean the same here as for overlay failures: the kind is the report's only
+/// "why" column. No wildcard, so a new `EffectBlobError` does not compile until
+/// it is classified.
 fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
     match err {
-        EffectBlobError::BitIo(_) => DecodeErrorKind::Eof,
-        _ => DecodeErrorKind::Residual,
+        EffectBlobError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
+        // The bits ran out before the structure did: the window ended before
+        // the terminator, or a member's type read past the end of its own
+        // field.
+        EffectBlobError::MissingTerminator { .. } | EffectBlobError::PayloadOverread { .. } => {
+            DecodeErrorKind::Eof
+        }
+        // Bits the structure did not account for, after the terminator or
+        // inside a field whose type read short of it.
+        EffectBlobError::ResidualBits { .. } | EffectBlobError::PayloadUnderread { .. } => {
+            DecodeErrorKind::Residual
+        }
+        // Decoded values refused: a count over the configured maximum, a
+        // float JSON cannot carry.
+        EffectBlobError::ArrayCountTooLarge { .. } | EffectBlobError::NonFiniteFloat { .. } => {
+            DecodeErrorKind::Rejected
+        }
+        // The bits break a rule of this framing. `PayloadTooLarge` is a field
+        // width past the window or the decoder's 65,536-bit cap, refused before
+        // the payload is read: an overlong length prefix, `Malformed` for an
+        // overlay string or byte array too, not a reader running out.
+        EffectBlobError::PayloadTooLarge { .. }
+        | EffectBlobError::IndexOutOfBounds { .. }
+        | EffectBlobError::NonAscendingIndex { .. }
+        | EffectBlobError::TooManyFields { .. }
+        | EffectBlobError::BitLengthExceedsBuffer { .. }
+        | EffectBlobError::UnexpectedPayloadWidth { .. }
+        | EffectBlobError::ElementFieldCount { .. }
+        | EffectBlobError::NonAdjacentHandles { .. }
+        | EffectBlobError::InconsistentHandleBase { .. }
+        | EffectBlobError::NonZeroTerminator { .. } => DecodeErrorKind::Malformed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use vrf_bitio::BitError;
+
+    use super::{EffectBlobError, effect_error_kind};
+
+    /// Effect-blob failures share the overlay's error report, so each cause
+    /// prints its own label. Every variant has a case, checked against the list
+    /// the variant match below is generated from: the match has no wildcard, so
+    /// a new variant does not compile until listed, and a listed variant without
+    /// a case fails here.
+    #[test]
+    fn effect_failures_print_the_label_of_their_cause() {
+        // Generated from one list, so the list and the match cannot disagree.
+        macro_rules! variants {
+            ($($variant:ident),+ $(,)?) => {
+                (
+                    [$(stringify!($variant)),+],
+                    |err: &EffectBlobError| -> &'static str {
+                        match err {
+                            $(EffectBlobError::$variant { .. } => stringify!($variant),)+
+                        }
+                    },
+                )
+            };
+        }
+        let (every_variant, variant_of) = variants!(
+            BitIo,
+            ArrayCountTooLarge,
+            IndexOutOfBounds,
+            NonAscendingIndex,
+            PayloadTooLarge,
+            TooManyFields,
+            BitLengthExceedsBuffer,
+            ResidualBits,
+            NonFiniteFloat,
+            UnexpectedPayloadWidth,
+            ElementFieldCount,
+            NonAdjacentHandles,
+            InconsistentHandleBase,
+            PayloadOverread,
+            PayloadUnderread,
+            MissingTerminator,
+            NonZeroTerminator,
+        );
+        let cases = [
+            (
+                EffectBlobError::BitIo(BitError::Eof {
+                    position: 0,
+                    length: 8,
+                    requested: 8,
+                }),
+                "EOF",
+            ),
+            (
+                EffectBlobError::BitIo(BitError::MalformedIntPacked { position: 0 }),
+                "Malformed",
+            ),
+            (
+                EffectBlobError::BitIo(BitError::InvalidString { position: 0 }),
+                "Malformed",
+            ),
+            (
+                EffectBlobError::MissingTerminator { context: "array" },
+                "EOF",
+            ),
+            (
+                EffectBlobError::PayloadOverread {
+                    declared: 16,
+                    consumed: 32,
+                },
+                "EOF",
+            ),
+            (EffectBlobError::ResidualBits { remaining: 16 }, "Residual"),
+            (
+                EffectBlobError::PayloadUnderread {
+                    declared: 32,
+                    consumed: 16,
+                },
+                "Residual",
+            ),
+            (EffectBlobError::NonFiniteFloat { index: 0 }, "Rejected"),
+            (
+                EffectBlobError::ArrayCountTooLarge {
+                    count: 300,
+                    max: 256,
+                },
+                "Rejected",
+            ),
+            (EffectBlobError::NonZeroTerminator { value: 1 }, "Malformed"),
+            (EffectBlobError::ElementFieldCount { found: 3 }, "Malformed"),
+            // A declared width past the window is an overlong length prefix,
+            // `Malformed` like an overlay string's, not an EOF.
+            (
+                EffectBlobError::PayloadTooLarge {
+                    bits: 64,
+                    remaining: 32,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::IndexOutOfBounds { index: 2, count: 2 },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::NonAscendingIndex {
+                    index: 0,
+                    previous: 0,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::TooManyFields { context: "element" },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::BitLengthExceedsBuffer {
+                    bits: 64,
+                    available: 32,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::UnexpectedPayloadWidth {
+                    context: "float value",
+                    expected: 32,
+                    found: 16,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::NonAdjacentHandles {
+                    first: 1,
+                    second: 3,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::InconsistentHandleBase {
+                    expected: 1,
+                    found: 3,
+                },
+                "Malformed",
+            ),
+        ];
+        let printed: Vec<(String, String)> = cases
+            .iter()
+            .map(|(err, _)| (format!("{err:?}"), effect_error_kind(err).to_string()))
+            .collect();
+        let wanted: Vec<(String, String)> = cases
+            .iter()
+            .map(|(err, want)| (format!("{err:?}"), (*want).to_owned()))
+            .collect();
+        assert_eq!(printed, wanted);
+
+        let reached: BTreeSet<&str> = cases.iter().map(|(err, _)| variant_of(err)).collect();
+        assert_eq!(
+            reached,
+            every_variant.into_iter().collect::<BTreeSet<_>>(),
+            "every EffectBlobError needs a case"
+        );
     }
 }
